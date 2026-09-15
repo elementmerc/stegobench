@@ -19,15 +19,37 @@ the single fact that decides what this dataset can be.
 
 | Source | Basis | Conditions |
 |---|---|---|
-| **Pexels** | Licence permits modification and use, commercial included | Don't redistribute unaltered photos as a stock resource |
+| **Pexels** | **DISPUTED, see below.** The Licence permits modification; the Terms of Service ban the acquisition method | Do not build a new arm from it until resolved |
 | **Unsplash** | "irrevocable, nonexclusive, worldwide copyright license to download, copy, modify, distribute, perform, and use ... including for commercial purposes" | Same carve-out: no competing stock service |
 | **CLIC** | Ships under the Unsplash licence above | As Unsplash |
 | **Wikimedia Commons** | "Publication of derivative work must be allowed" and "Commercial use of the work must be allowed" are *entry requirements*, so NC and ND cannot exist there | Per-file: attribution may be required, share-alike may be required |
 | **Open Images** | Images listed as CC BY 2.0; already ships per-image URL, licence and MD5 | Attribution. Google explicitly disclaims warranting each image's status, so verification is ours |
 
-All five permit commercial use. That matters here specifically: Stegcore is
+All permit commercial use. That matters here specifically: Stegcore is
 dual-licensed with a commercial tier, so any non-commercial restriction is a
 standing argument waiting to be had.
+
+### Pexels: the Licence and the Terms of Service disagree
+
+The Pexels **Licence** permits modification and bars only redistribution "on
+other stock photo or wallpaper platforms", which is what this document said
+first. The Pexels **Terms of Service** separately ban "Bulk, large-scale or
+systematic copying of Content ... unless explicit permission has been granted by
+us" and "the use of programs or robots for automatic data collection ...
+including without limitation for machine learning purposes".
+
+`generators/fetch_pexels.py` is a program that systematically collects content in
+bulk to build a corpus. The Licence governs what may be done with an image; the
+Terms govern how it may be obtained, and the acquisition is the half in doubt.
+
+**This affects the 200 covers already fetched**, so it is not merely a rule for
+the next arm. Two ways out, and they are not exclusive: ask Pexels for the
+explicit permission the Terms contemplate, or rebuild the web arm from
+**Unsplash under the ordinary Unsplash Licence**, which is the most permissive
+text in this entire survey and carries no equivalent acquisition clause.
+
+One trap worth naming: the **Unsplash Dataset** ships under separate terms that
+forbid publishing any portion of it. Only the ordinary route works.
 
 ## Cannot publish derived images
 
@@ -81,6 +103,35 @@ rather than the exception:
 Any survey that reports mirror licences at face value propagates the error. When
 this corpus is published, its licence field must be accurate to the source, per
 file, or it joins the list.
+
+## The prior art that moved while we were not looking
+
+**REVEAL**, Netherlands Forensic Institute and University of Amsterdam, October
+2025. 100,006 base images from 57 imaging methods, run through **51 real
+end-user steganography tools** at **10 payload rates down to 0.00001 bpp**,
+paired, **CC BY-SA 4.0**, downloadable today.
+
+Assume a reviewer knows it. Until it appeared, "real tools rather than reference
+implementations" was the obvious pitch for a new corpus; that ground is taken.
+
+What it deliberately leaves open, in its authors' own words, is that it **excludes
+academic content-adaptive schemes entirely** ("we exclude these schemes from our
+dataset because we believe this comprises a much smaller part of steganography in
+the wild"). It also covers only png, jpg, bmp and gif, and its tool snapshot is
+frozen at July 2023, a limitation it states about itself: "REVEAL will be highly
+sensitive to software versioning."
+
+So the unoccupied position is narrower and sharper than it was: **one corpus
+spanning real tools AND adaptive academic schemes AND spatial LSB at camera
+diversity AND very low payload, as separate arms rather than a blend.** Nobody
+holds that.
+
+Two other entrants worth knowing. **StegBench** (August 2026) claims 525,000
+images across six tools and has **shipped no images at all**; its repository
+holds a README and nothing else. And the name is a problem: "StegBench" now
+refers to that paper, to a 2021 MIT-licensed tool, and to a gated LLM
+covert-channel corpus. "stegobench" is one letter away from a collision with a
+paper five weeks old.
 
 ## The second differentiator: these corpora are recipes, not artefacts
 
