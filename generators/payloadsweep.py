@@ -37,6 +37,15 @@ def main() -> int:
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--seed", type=int, default=20260915)
     ap.add_argument(
+        "--method",
+        choices=("replace", "match"),
+        default="replace",
+        help="replace: overwrite the low bit (LSB replacement), the easy case "
+        "every classical detector is built for. match: add or subtract one so "
+        "the low bit comes out right (LSB matching, plus or minus 1), which "
+        "leaves the pair statistics SPA, RS and WS read almost untouched.",
+    )
+    ap.add_argument(
         "--placement",
         choices=("spread", "sequential"),
         default="spread",
@@ -90,7 +99,22 @@ def main() -> int:
             else:
                 pos = np.arange(nbits)
 
-            flat[pos] = (flat[pos] & 0xFE) | bits
+            if args.method == "replace":
+                flat[pos] = (flat[pos] & 0xFE) | bits
+            else:
+                # LSB matching. Where the low bit is already right, touch
+                # nothing: that is what keeps the sample-pair statistics clean.
+                # Otherwise step the value by one in a random direction, which
+                # moves the sample between pairs rather than within one, so the
+                # structure SPA and RS look for never forms. Clamp at the ends,
+                # since 0 cannot go down and 255 cannot go up.
+                cur = flat[pos]
+                need = cur & 1 != bits
+                step = rng.integers(0, 2, size=pos.size, dtype=np.int16) * 2 - 1
+                new = cur.astype(np.int16) + np.where(need, step, 0)
+                new = np.where(new < 0, 1, new)
+                new = np.where(new > 255, 254, new)
+                flat[pos] = new.astype(np.uint8)
             stego_p = out / arm / "stego" / f"{idx:05d}.png"
             Image.fromarray(flat.reshape(arr.shape)).save(stego_p)
 
@@ -105,6 +129,7 @@ def main() -> int:
                     "source": src.name,
                     "size": args.size,
                     "bits": nbits,
+                    "method": args.method,
                     "placement": args.placement,
                     "samples_changed": changed,
                     "clean_sha256": hashlib.sha256(clean_p.read_bytes()).hexdigest(),
@@ -115,7 +140,7 @@ def main() -> int:
     (out / "manifest.jsonl").write_text(
         "".join(json.dumps(m) + "\n" for m in manifest)
     )
-    print(f"wrote {len(manifest)} pairs across {len(RATES)} payload rates at {args.size}px, placement={args.placement}")
+    print(f"wrote {len(manifest)} pairs across {len(RATES)} payload rates at {args.size}px, placement={args.placement}, method={args.method}")
     for rate in RATES:
         ch = [m["samples_changed"] for m in manifest if m["rate"] == rate]
         approx_bytes = int(RATES and manifest[0]["size"] ** 2 * 3 * rate / 8)
