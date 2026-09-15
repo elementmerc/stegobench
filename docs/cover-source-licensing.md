@@ -34,7 +34,7 @@ standing argument waiting to be had.
 | Source | Why | Verbatim |
 |---|---|---|
 | **ALASKA / ALASKA2** | CC BY-NC-ND. The ND term is decisive | "this license explicitly forbids ... the distribution of any material build upon the material provided, especially if you remix and transform the dataset" |
-| **BOSSbase** | Licence file is on a dead host and was never archived. The live download host states the opposite of a grant | "may not be distributed or republished in any form or by any means ... without the prior express written permission" |
+| **BOSSbase** | Was never permissively licensed. The BOSS organisers claimed rights explicitly and required assent before download; the licence file itself is on a dead host and was never archived | "The organisers hold the rights on the ... contents ... provided for the BOSS contest" and "any use of the BOSS image-database will have to be done according to a licence usage agreement" |
 | **Dresden** | Derivatives *are* permitted, but non-commercial only | "You may not use or distribute the data or any derivative work for commercial purposes" |
 | **RAISE** | Same licence text as Dresden, names swapped | "to be used for non-commercial research and educational purposes" |
 | **BOWS2** | Permits redistribution, non-commercial only, and the licence names the *watermarked* set rather than the originals steganalysis actually uses | "You may not use this work for commercial purposes" |
@@ -63,19 +63,48 @@ copy. LAION took down the *list* after the Stanford report, not merely the
 images. Every party involved has behaved as though the manifest carries the
 liability of the thing it points at.
 
-**Third-party licence labels are not evidence, and this is not a one-off.** Two
-independent examples found while checking eleven sources:
+**Licence laundering is systemic here, not incidental.** Mirrors of these
+corpora carry labels their uploaders had no standing to grant, and it is the norm
+rather than the exception:
 
-- **Dresden** is mirrored on Kaggle under "CC0: Public Domain". Its upstream
-  licence forbids commercial use and requires the copyright notice to survive
-  into derivatives.
-- **UCID** is mirrored on Kaggle under "MIT". Its original distribution stated no
-  licence at all, so there was nothing for an uploader to relabel *from*.
+- **BOSSbase** mirrors are labelled `MIT`, `Apache 2.0`, `CC0: Public Domain` and
+  `Unknown` across a dozen re-uploads. Not one traces to a grant from the rights
+  holders, who stated plainly that they held the rights.
+- **ALASKA2** mirrors are labelled `CC0: Public Domain` while the organisers'
+  own page says CC BY-NC-ND. That upstream licence is explicit, stated in plain
+  words, and trivially checkable, and it is contradicted anyway.
+- **Dresden** is on Kaggle as `CC0: Public Domain`; upstream forbids commercial
+  use and requires the copyright notice to survive into derivatives.
+- **UCID** is on Kaggle as `MIT`; its original distribution stated no licence at
+  all, so there was nothing to relabel *from*.
 
-Both are uploader assertions with no basis upstream. Anyone relying on either
-field to justify commercial use is relying on a stranger's mistake. When this
-corpus is published, its licence field must be accurate to the source, per file,
-or it becomes the third such trap.
+Any survey that reports mirror licences at face value propagates the error. When
+this corpus is published, its licence field must be accurate to the source, per
+file, or it joins the list.
+
+## The second differentiator: these corpora are recipes, not artefacts
+
+The version of BOSSbase that most deep-learning steganalysis actually uses does
+not exist as a file anyone published. It is a procedure: resize 512x512 to
+256x256 with Matlab `imresize` at default settings, optionally recompress at
+quality 75 or 95, then split 14,000 train / 1,000 validation / 5,000 test. That
+recipe is stated precisely in the SRNet paper and reproduced from YeNet before
+it.
+
+Nobody ships checksums for the result. `imresize` defaults are a Matlab version
+dependency that no paper records. So two groups reporting on "BOSSbase 256" may
+be reporting on different bytes, and there is no way to tell.
+
+The decay is visible in the wild. One Hugging Face redistribution advertises
+20,000 covers plus 20,000 WOW and 20,000 S-UNIWARD stego images as PNG; it
+actually holds 9,975 covers, 5,475 WOW and 750 S-UNIWARD, all PGM, drawn from
+about 5,000 distinct source images rather than 10,000, with no cover-to-stego
+pairing file. It is MIT-labelled and has over a thousand downloads.
+
+Every generator in this repository is seeded and writes a manifest with a sha256
+per file and the count of samples actually changed. That is not a nicety; it is
+the property the field is missing, and it is cheaper to have from the start than
+to retrofit.
 
 ## The two corpora
 
