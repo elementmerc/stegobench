@@ -63,12 +63,19 @@ copy. LAION took down the *list* after the Stanford report, not merely the
 images. Every party involved has behaved as though the manifest carries the
 liability of the thing it points at.
 
-**Third-party licence labels are not evidence.** The Dresden database is mirrored
-on Kaggle under "CC0: Public Domain". The upstream licence forbids commercial use
-and requires the copyright notice to survive into derivatives. Anyone relying on
-that Kaggle field to justify commercial use is relying on a stranger's mistake.
-When this corpus is published, its licence field has to be accurate to the
-source, per file, or it becomes the next such trap.
+**Third-party licence labels are not evidence, and this is not a one-off.** Two
+independent examples found while checking eleven sources:
+
+- **Dresden** is mirrored on Kaggle under "CC0: Public Domain". Its upstream
+  licence forbids commercial use and requires the copyright notice to survive
+  into derivatives.
+- **UCID** is mirrored on Kaggle under "MIT". Its original distribution stated no
+  licence at all, so there was nothing for an uploader to relabel *from*.
+
+Both are uploader assertions with no basis upstream. Anyone relying on either
+field to justify commercial use is relying on a stranger's mistake. When this
+corpus is published, its licence field must be accurate to the source, per file,
+or it becomes the third such trap.
 
 ## The two corpora
 
@@ -94,6 +101,29 @@ Building one from sources that plainly permit it would be the first of its kind,
 and that is a more durable differentiator than image count. The reason nobody has
 is not that it is hard; it is that the academic corpora were free enough for
 academic work and nobody needed to ask the question.
+
+## Quality traps in the older corpora
+
+Licensing is not the only reason to prefer fresh sources. Two of the corpora
+above carry defects that bite a steganalysis experiment specifically, and neither
+is advertised:
+
+- **USC-SIPI's Brodatz textures have rows of literal zeros.** The pigskin images
+  (1.1.11, 1.2.11) are missing their last 26 lines; the rest of the 512x512
+  Brodatz set is missing its last two. A band of zeros is a degenerate input to
+  any least-significant-bit statistic, so a detector will produce a meaningless
+  estimate on those images rather than a wrong one.
+- **UCID is downscaled, and does not say so.** Every file carries
+  an ImageMagick `Software` tag from 2002 and the source camera is a roughly 3.3 MP
+  Minolta DiMAGE 5, so 512x384 is a heavy resample. Neither the paper nor the
+  project page mentions it. Resampling averages neighbouring pixels, which is
+  exactly the statistic spatial steganalysis reads, so UCID is not a
+  sensor-native cover source however uncompressed its TIFFs are. A further 39 of
+  its 1,338 files are PackBits-compressed rather than uncompressed and carry no
+  camera tags, which will trip any pipeline assuming a uniform format.
+
+Neither defect is fatal for casual use. Both are the kind of thing that produces
+a confusing result weeks later rather than an error at load time.
 
 ## Outstanding
 
