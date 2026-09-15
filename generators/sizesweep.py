@@ -47,6 +47,23 @@ def payload_bits(n: int, seed: int) -> np.ndarray:
     return rng.integers(0, 2, size=n, dtype=np.uint8)
 
 
+
+def open_preserving_mode(path) -> Image.Image:
+    """Open an image as greyscale or RGB, whichever it already is.
+
+    BOSSbase is single-channel greyscale, and forcing it to RGB would replicate
+    one plane three times: every payload bit would then be embedded three times
+    over, in three perfectly correlated channels. No real embedder does that,
+    and it would make the arm easier than reality while looking like a detail of
+    file handling. Palette images are promoted to RGB because their pixel values
+    are indices, not intensities, and a low bit of an index means nothing.
+    """
+    img = Image.open(path)
+    if img.mode in ("L", "I;16", "I"):
+        return img.convert("L")
+    return img.convert("RGB")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--covers", required=True, help="directory of source covers")
@@ -67,7 +84,7 @@ def main() -> int:
         for split in ("clean", "stego"):
             (out / str(size) / split).mkdir(parents=True, exist_ok=True)
         for idx, src in enumerate(covers):
-            img = Image.open(src).convert("RGB").resize((size, size), Image.LANCZOS)
+            img = open_preserving_mode(src).resize((size, size), Image.LANCZOS)
             arr = np.array(img, dtype=np.uint8)
 
             # The cover is written from the SAME resized array the stego is made
