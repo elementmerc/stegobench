@@ -36,6 +36,13 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=40)
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--seed", type=int, default=20260915)
+    ap.add_argument(
+        "--placement",
+        choices=("spread", "sequential"),
+        default="spread",
+        help="spread: payload scattered over the whole image, as real tools do. "
+        "sequential: packed into a prefix, which global detectors dilute away.",
+    )
     args = ap.parse_args()
 
     covers = sorted(pathlib.Path(args.covers).glob("*.png"))[: args.count]
@@ -64,7 +71,26 @@ def main() -> int:
             rng = np.random.default_rng(args.seed + idx)
             bits = rng.integers(0, 2, size=nbits, dtype=np.uint8)
             flat = arr.reshape(-1).copy()
-            flat[:nbits] = (flat[:nbits] & 0xFE) | bits
+
+            if args.placement == "spread":
+                # Scatter the payload over the whole image, which is what every
+                # real tool does and what the classical detectors assume.
+                #
+                # The first version of this script filled flat[:nbits], a
+                # sequential prefix. At 0.25 bpp that puts the entire payload in
+                # the first quarter of the image and leaves three quarters
+                # pristine. SPA, RS and WS are GLOBAL estimators: they measure
+                # the disturbance across the whole LSB plane, so a concentrated
+                # payload is diluted by the untouched majority and the estimated
+                # rate comes out far below the true one. Measured on 2026-09-15,
+                # that alone took Stegcore's verdict from what its calibration
+                # predicts down to near zero, which looked like a calibration
+                # fault and was an artefact of this line.
+                pos = rng.choice(flat.size, size=nbits, replace=False)
+            else:
+                pos = np.arange(nbits)
+
+            flat[pos] = (flat[pos] & 0xFE) | bits
             stego_p = out / arm / "stego" / f"{idx:05d}.png"
             Image.fromarray(flat.reshape(arr.shape)).save(stego_p)
 
@@ -79,6 +105,7 @@ def main() -> int:
                     "source": src.name,
                     "size": args.size,
                     "bits": nbits,
+                    "placement": args.placement,
                     "samples_changed": changed,
                     "clean_sha256": hashlib.sha256(clean_p.read_bytes()).hexdigest(),
                     "stego_sha256": hashlib.sha256(stego_p.read_bytes()).hexdigest(),
@@ -88,7 +115,7 @@ def main() -> int:
     (out / "manifest.jsonl").write_text(
         "".join(json.dumps(m) + "\n" for m in manifest)
     )
-    print(f"wrote {len(manifest)} pairs across {len(RATES)} payload rates at {args.size}px")
+    print(f"wrote {len(manifest)} pairs across {len(RATES)} payload rates at {args.size}px, placement={args.placement}")
     for rate in RATES:
         ch = [m["samples_changed"] for m in manifest if m["rate"] == rate]
         approx_bytes = int(RATES and manifest[0]["size"] ** 2 * 3 * rate / 8)
