@@ -1,0 +1,28 @@
+# Minimal universal .gitignore shipped by claude-setup. Kept deliberately
+# generic: operator tooling and private state (CLAUDE.md, .githooks/, private/,
+# etc.) are ignored locally via .git/info/exclude instead, so this committed
+# file never names them. Add language-specific entries (Rust target/, Node
+# node_modules/, Python __pycache__/) when you know what the repo ships.
+
+# Environment + secrets
+.env
+.env.*
+*.pem
+*.key
+.credentials.json
+
+# Editor + OS leakage
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Common build artefact directories — uncomment per project as needed
+# target/
+# node_modules/
+# dist/
+# build/
+# __pycache__/
+# *.pyc
