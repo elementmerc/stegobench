@@ -426,7 +426,14 @@ def main() -> int:
     last_beat = time.monotonic()
 
     if args.strategy == "random":
-        source = random_candidates(args.count * 4, args.min_kb, args.max_kb,
+        # The budget must cover the measured yield with room to spare. A random
+        # draw that is a permissively licensed photograph large enough to crop
+        # runs at about 22%, so a cover costs roughly 4.5 candidates and a
+        # budget of 4 per cover stops the run at a fraction of what was asked
+        # for while reporting success. 40 leaves an order of magnitude of
+        # headroom for a source whose composition drifts; the consecutive-miss
+        # guard inside the generator is what actually stops a runaway.
+        source = random_candidates(args.count * 40, args.min_kb, args.max_kb,
                                    args.size, args.delay)
     else:
         cats = [c.strip() for c in args.categories.split(",") if c.strip()]
@@ -582,6 +589,14 @@ def main() -> int:
     print(f"wrote {written} covers of {args.count} requested into {out}")
     if any(skipped.values()):
         print(f"  skipped: {skipped}")
+    if written < args.count:
+        # Short of the target is a result, not a detail. A caller that reads
+        # "wrote 4000" as success builds an arm a quarter of the size it
+        # documents, which is the kind of thing nobody notices until the paper.
+        print(f"  SHORT by {args.count - written}: the candidate supply ran out "
+              f"before the target was met. Re-run the same command to continue, "
+              f"or loosen --min-kb, --max-kb or the diversity caps.",
+              file=sys.stderr)
     print(f"  manifest: {manifest_path}")
     if rejected_path.exists() and rejected_path.stat().st_size:
         print(f"  rejections: {rejected_path}")
