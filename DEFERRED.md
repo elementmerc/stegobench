@@ -21,3 +21,21 @@ reference them, do not duplicate them.
   the whole point is replacing a dead public tool. So the flip must include
   either removing `origin` from `PRIVATE_REMOTES` and untracking this file, or
   deciding this ledger is fit to publish. Do not discover it afterwards.
+
+- **One prolific uploader can dominate a random Commons sample (2026-09-16).**
+  A 20 cover test run with the photograph filter returned 4 frames of
+  `ISS0xx-E-xxxxx - View of Earth`, all shot on the same Nikon D4 aboard the
+  space station. Each frame is a genuinely different picture, so deduplication
+  correctly admits every one of them, and the corpus still ends up with a
+  visible share of one camera pointed at one subject from one altitude.
+
+  NASA has uploaded tens of thousands of these. Commons has several such bulk
+  contributors, and uniform random sampling over files gives each file equal
+  weight rather than each photographer or each camera.
+
+  The fix is a cap during acquisition rather than a filter afterwards: limit how
+  many covers any single uploader, camera body or title prefix may contribute,
+  and record the cap in the manifest so the sampling is reproducible. It needs a
+  decision on what the unit of diversity is (uploader, camera serial, or subject)
+  before it can be implemented, and the v1 corpus is large enough that the effect
+  may be small. Measure the concentration on the first full fetch, then decide.
