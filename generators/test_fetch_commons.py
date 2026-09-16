@@ -199,6 +199,84 @@ class DiversityCapTests(unittest.TestCase):
         self.assertEqual(admitted, 3, "the camera cap, the tighter of the two, binds")
 
 
+class ShareQuotaTests(unittest.TestCase):
+    """Balancing an axis whose values are not equally available.
+
+    Base ISO frames outnumber high ISO ones heavily in any photo collection, so
+    a hard cap either never fires or stalls the fetch waiting for grain the
+    source cannot supply. A share quota bounds the proportion instead.
+    """
+
+    def test_nothing_is_refused_below_the_floor(self):
+        q = fetch_commons.ShareQuota("iso band", 0.5, floor=10)
+        for _ in range(9):
+            self.assertIsNone(q.refusal("base"))
+            q.record("base")
+        self.assertIsNone(q.refusal("base"), "still under the floor")
+
+    def test_the_share_binds_once_the_floor_is_passed(self):
+        q = fetch_commons.ShareQuota("iso band", 0.5, floor=10)
+        for _ in range(10):
+            q.record("base")
+        self.assertIsNotNone(q.refusal("base"))
+        self.assertIsNone(q.refusal("high"), "a starved band must stay open")
+
+    def test_a_balanced_corpus_lets_everything_through(self):
+        q = fetch_commons.ShareQuota("iso band", 0.5, floor=10)
+        for i in range(40):
+            band = ("base", "low", "high", "extreme")[i % 4]
+            self.assertIsNone(q.refusal(band), f"refused {band} at {i}")
+            q.record(band)
+
+    def test_the_quota_converges_on_the_share(self):
+        """Offer nothing but one band and it settles at the cap, not above it."""
+        q = fetch_commons.ShareQuota("iso band", 0.5, floor=10)
+        for _ in range(200):
+            if q.refusal("base") is None:
+                q.record("base")
+            else:
+                q.record("high")
+        self.assertLessEqual(q.counts["base"] / q.total, 0.55)
+        self.assertGreater(q.counts["base"] / q.total, 0.4)
+
+    def test_an_unknown_band_is_never_refused(self):
+        """A frame that never recorded its ISO is not evidence of imbalance."""
+        q = fetch_commons.ShareQuota("iso band", 0.1, floor=1)
+        for _ in range(50):
+            q.record(None)
+        self.assertIsNone(q.refusal(None))
+
+    def test_resuming_restores_the_tally(self):
+        q = fetch_commons.ShareQuota("iso band", 0.5, floor=10)
+        q.resume_from(["base"] * 20)
+        self.assertEqual(q.total, 20)
+        self.assertIsNotNone(q.refusal("base"))
+
+    def test_an_impossible_share_is_refused(self):
+        for share in (0, -0.5, 1.5):
+            with self.assertRaises(ValueError):
+                fetch_commons.ShareQuota("iso band", share)
+        fetch_commons.ShareQuota("iso band", 1.0)  # a share of everything is legal
+
+    def test_the_refusal_says_which_axis_and_what_it_holds(self):
+        q = fetch_commons.ShareQuota("iso band", 0.5, floor=2)
+        q.record("base"); q.record("base")
+        message = q.refusal("base")
+        self.assertIn("iso band", message)
+        self.assertIn("base", message)
+        self.assertIn("50%", message)
+
+
+class TiffIsAcceptedTests(unittest.TestCase):
+    def test_tiff_passes_the_filter(self):
+        """TIFF is where the never-compressed originals are."""
+        self.assertTrue(suitable(info(mime="image/tiff"), 300, 6000, 512))
+
+    def test_still_nothing_else(self):
+        for mime in ("image/gif", "image/svg+xml", "application/pdf"):
+            self.assertFalse(suitable(info(mime=mime), 300, 6000, 512))
+
+
 class PermissiveSetTests(unittest.TestCase):
     def test_share_alike_is_not_permissive(self):
         """Ruled 2026-09-16: permissive only, so share-alike must stay out."""

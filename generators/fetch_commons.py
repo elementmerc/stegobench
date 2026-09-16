@@ -45,12 +45,30 @@ reach the store: a picture with no gradients hashes its own rounding noise and
 collides with every other flat crop. Both kinds of refusal are written to
 `rejected.jsonl` beside the manifest rather than dropped.
 
-CROP, NEVER RESIZE
-------------------
+CROP, NEVER RESIZE, AND NEVER FROM THE CENTRE
+---------------------------------------------
 Resampling averages neighbouring pixels, which rewrites the whole
 least-significant-bit plane: exactly the statistic spatial steganalysis reads.
 Commons offers thumbnail URLs at any width and they are useless to us for that
-reason. We take the original bytes and centre-crop.
+reason. We take the original bytes and cut a square out of them.
+
+Where we cut matters as much as that we cut. Photographers compose with the
+subject near the middle, so a centre crop systematically over-samples subjects
+and under-samples background: sky, wall, foliage, water. Those smooth regions
+are where adaptive embedding refuses to spend its payload and where detection is
+hardest, so a centre-cropped corpus is quietly weighted towards the easy case.
+The position is drawn from a seed made of the page id, so it is reproducible
+from the manifest without storing anything extra.
+
+WHAT ELSE EACH COVER CARRIES
+----------------------------
+The compression history, because 81.5% of Commons is JPEG and the ranking of
+embedding schemes is known to invert between never-compressed covers and
+decompressed ones. The ISO band, because sensor noise roughly doubles per stop
+and is what a steganalyser is reading underneath the payload. Whether the file
+was ever lossily compressed at all, since the never-compressed regime is the one
+most published results were obtained in and the hardest to source from the web.
+See `provenance.py` for all three.
 
 POLITENESS
 ----------
@@ -75,6 +93,7 @@ import urllib.request
 from PIL import Image
 
 import cover_quality
+import provenance
 from dedup import DedupError, DedupStore, fingerprint_bytes
 
 API = "https://commons.wikimedia.org/w/api.php"
@@ -270,13 +289,62 @@ class DiversityCaps:
             self.cameras[camera] = self.cameras.get(camera, 0) + 1
 
 
+class ShareQuota:
+    """No single value on an axis may take more than a share of the corpus.
+
+    A hard cap is the wrong instrument for an axis whose values are not equally
+    available. Base ISO frames outnumber high ISO ones heavily in any photo
+    collection, so capping them at a fixed count would either be so high it
+    never fires or so low the fetch stalls waiting for grain that never comes.
+
+    A share quota says instead: whatever the corpus turns out to be, no one
+    value may exceed this fraction of it. The corpus stays balanced without the
+    fetch ever blocking on a stratum the source cannot supply.
+
+    The floor exists because a share is meaningless on a small sample. Before it
+    is reached nothing is refused, otherwise the first cover of a run would be
+    100% of one band and every later one would be turned away.
+    """
+
+    def __init__(self, axis: str, max_share: float, floor: int = 200) -> None:
+        if not 0 < max_share <= 1:
+            raise ValueError(f"max_share must be in (0, 1], got {max_share}")
+        self.axis = axis
+        self.max_share = max_share
+        self.floor = floor
+        self.counts: dict[str, int] = {}
+        self.total = 0
+
+    def resume_from(self, values) -> None:
+        for value in values:
+            self.record(value)
+
+    def refusal(self, value: str | None) -> str | None:
+        if value is None or self.total < self.floor:
+            return None
+        held = self.counts.get(value, 0)
+        if held + 1 > self.max_share * (self.total + 1):
+            return (f"{self.axis} {value} already holds {held} of {self.total} "
+                    f"covers, over the {self.max_share:.0%} share")
+        return None
+
+    def record(self, value: str | None) -> None:
+        self.total += 1
+        if value is not None:
+            self.counts[value] = self.counts.get(value, 0) + 1
+
+
 def suitable(ii: dict, min_kb: int, max_kb: int, size: int) -> bool:
     """Everything decidable from API metadata, before a byte is downloaded.
 
     Commons is donated infrastructure and its featured images reach 80 MB, so
     anything we can rule out from the listing is ruled out there.
     """
-    if not ii or ii.get("mime") not in ("image/jpeg", "image/png"):
+    # TIFF is here for one reason: it is where the never-compressed originals
+    # are. A few per cent of Commons is TIFF, those files have no quantisation
+    # history, and that regime is the one almost every published steganalysis
+    # result was obtained in. See provenance.pristine.
+    if not ii or ii.get("mime") not in ("image/jpeg", "image/png", "image/tiff"):
         return False
     kb = ii.get("size", 0) // 1024
     if not (min_kb <= kb <= max_kb):
@@ -412,6 +480,11 @@ def main() -> int:
                     help="most covers one camera make and model may contribute, "
                          "which is the acquisition-diversity axis this corpus "
                          "sells. 0 disables")
+    ap.add_argument("--max-iso-share", type=float, default=0.5,
+                    help="largest share of the corpus any one ISO band may take. "
+                         "Sensor noise roughly doubles per stop and dominates "
+                         "detection, so a corpus that is nearly all base ISO "
+                         "measures one noise regime and calls it steganalysis")
     ap.add_argument("--dedup-db", default=None,
                     help="path to the shared dedup store. Without it this fetcher "
                          "cannot tell that a cover already arrived from another "
@@ -429,11 +502,13 @@ def main() -> int:
     rejected_path = out / "rejected.jsonl"
 
     caps = DiversityCaps(args.max_per_uploader, args.max_per_camera)
+    iso_quota = ShareQuota("iso band", args.max_iso_share)
     seen_ids = set()
     if manifest_path.exists():
         rows = [json.loads(l) for l in manifest_path.read_text().splitlines() if l.strip()]
         seen_ids = {r["pageid"] for r in rows}
         caps.resume_from(rows)
+        iso_quota.resume_from(r.get("iso_band") for r in rows)
         print(f"resuming: {len(seen_ids)} covers already fetched")
 
     store = None
@@ -449,7 +524,8 @@ def main() -> int:
               file=sys.stderr)
 
     written = len(seen_ids)
-    skipped = {"licence": 0, "not_a_photograph": 0, "over_cap": 0, "error": 0,
+    skipped = {"licence": 0, "not_a_photograph": 0, "over_cap": 0,
+               "over_quota": 0, "error": 0,
                "download": 0, "decode": 0, "too_small": 0, "flat": 0,
                "duplicate": 0}
     last_beat = time.monotonic()
@@ -520,17 +596,43 @@ def main() -> int:
                     continue
                 try:
                     img = Image.open(io.BytesIO(raw))
+                    img.load()
+                    # Read the compression history off the file as opened. The
+                    # quantisation tables live on the decoder and a convert()
+                    # discards them, so this cannot be deferred.
+                    profile = provenance.jpeg_profile(img)
                     img = img.convert("L") if img.mode in ("L", "I;16", "I") else img.convert("RGB")
                 except Exception:  # noqa: BLE001
                     skipped["decode"] += 1
                     continue
                 try:
-                    cropped = centre_crop(img, args.size)
+                    # Random rather than centre: photographers put the subject in
+                    # the middle, so a centre crop over-samples subjects and
+                    # under-samples the smooth background where adaptive
+                    # embedding hides and detection is hardest. Seeded from the
+                    # page id, so a rebuild cuts in the same place.
+                    box = provenance.crop_box(
+                        img.size[0], img.size[1], args.size,
+                        f"commons:{page['pageid']}",
+                    )
+                    cropped = img.crop(box)
                 except ValueError:
                     skipped["too_small"] += 1
                     continue
 
                 seen_ids.add(page["pageid"])
+
+                band = provenance.iso_band(exif)
+                crowded = iso_quota.refusal(band)
+                if crowded:
+                    skipped["over_quota"] += 1
+                    rf.write(json.dumps({
+                        "pageid": page["pageid"], "title": page["title"],
+                        "source_url": ii["url"], "reason": "share_quota",
+                        "detail": crowded, "iso_band": band,
+                    }) + "\n")
+                    rf.flush()
+                    continue
 
                 # Suitability before uniqueness, deliberately: a flat crop must never
                 # reach the dedup store, because a picture with no gradients hashes
@@ -600,15 +702,20 @@ def main() -> int:
                     "commons_sha1": ii.get("sha1"),
                     "exif": exif,
                     "uploader": uploader,
+                    "iso_band": band,
+                    "compression": profile,
+                    "pristine": provenance.pristine(ii.get("mime"), profile),
+                    "crop_box": list(box),
                     "strategy": args.strategy,
                     "crop": args.size,
-                    "method": "centre_crop",
+                    "method": "random_crop",
                     "mode": cropped.mode,
                     "quality": quality.as_dict(),
                     "sha256": digest,
                 }) + "\n")
                 mf.flush()
                 caps.record(uploader, camera)
+                iso_quota.record(band)
                 written += 1
 
                 if time.monotonic() - last_beat >= 60:
