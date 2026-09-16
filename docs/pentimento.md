@@ -83,6 +83,62 @@ tier), and a long tail granting nothing at all.
 Licence permits modification while its Terms of Service ban bulk automated
 collection. Resolve or replace before publishing.
 
+### How Commons is sampled, and why it is not the obvious way
+
+Measured on 2026-09-16 against the live API, because every number here changes
+what the overnight fetch collects.
+
+The first ten categories this project used were featured and quality picture
+sets. That reaches an aesthetically selected slice: competent photographers,
+good light, and a camera population skewed towards expensive bodies. A corpus
+built from it measures detection on prize-winning photographs.
+
+Uniform random sampling of the file namespace has the opposite bias, and it is
+worse. Commons' public domain holdings are dominated by bulk archive
+digitisation, so random draws return scanned books, engravings, maps and
+diagrams. In a 25 cover test run the titles included an undergraduate course
+catalogue, a 1924 Polish physics textbook, a plate of French royal coinage and a
+sixteenth century treatise on fishes. Scanned text is a legitimate cover class
+with its own statistics, sharply bimodal histograms and large flat regions, and
+it is not a photograph. It gets its own arm or it gets excluded; it does not get
+mixed in silently.
+
+**A camera make in the EXIF is the cheapest available proof a camera made the
+file**, and it doubles as the acquisition-diversity axis. Across 237 random
+draws that were JPEG or PNG and at least 512px on each side:
+
+| | Permissive | Share-alike or other |
+|---|---|---|
+| **Carries camera EXIF** | 52 | 79 |
+| **No EXIF** (scans, diagrams) | 78 | 28 |
+
+The two filters pull against each other, and that is the whole finding. The
+public domain bulk *is* the scans. Photographers who upload to Commons
+overwhelmingly choose CC BY-SA: 56.5% of the photographs in that sample. So
+
+- photograph **and** permissive: **21.9%** per draw
+- photograph, any licence: **55.3%** per draw
+
+Excluding share-alike costs roughly 60% of every photograph Commons holds.
+
+**Ruled 2026-09-16: permissive only.** CC0, public domain and plain CC BY. No
+share-alike, deliberately, so that anyone can use this corpus without first
+working out what obligation it puts them under. The operator's reasoning was
+adoption rather than scale, and the arithmetic supports it: Commons holds
+147,766,476 files, which puts the permissive photograph pool near 25 million, so
+the 10,000 cover target is 0.04% of what is available and even a 100,000 cover
+corpus is under 0.4%. The pool never binds. Share-alike would have bought
+throughput we do not need at the price of an obligation every downstream user
+would have to reason about.
+
+The diversity on offer is the reason to bother: **107 distinct camera models
+across 131 photographs**, with Apple, Xiaomi, Samsung and Google appearing
+alongside Canon, Nikon, Sony, Pentax and Olympus. Phone cameras are not a
+contaminant here, they are what a deployed detector actually meets.
+
+One operational note: the API answered HTTP 429 at 0.4 second spacing. A second
+between calls, with the backoff the fetcher already carries, is the floor.
+
 ## Deduplication is a correctness requirement, not hygiene
 
 No two images in the corpus may be the same, and exact hashing is not enough.

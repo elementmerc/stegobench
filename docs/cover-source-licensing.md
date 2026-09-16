@@ -51,6 +51,50 @@ text in this entire survey and carries no equivalent acquisition clause.
 One trap worth naming: the **Unsplash Dataset** ships under separate terms that
 forbid publishing any portion of it. Only the ordinary route works.
 
+### The Unsplash Dataset, read in full on 2026-09-16
+
+The repository at `github.com/unsplash/datasets` looks like the answer to the
+cover-acquisition problem and is not. Three separate things share the Unsplash
+name and only the middle one is open to us.
+
+| Thing | Ruling |
+|---|---|
+| **The Dataset** (`unsplash/datasets`, TSV files) | **Out.** "It cannot be used to redistribute the images contained within." Redistribution of the Licensed Data "in whole or in part" needs written permission, and the Lite grant is narrowly "internally use the Commercial Licensed Data to train machine learning models or algorithms for your internal business purposes". The Full set of 7.4M photos is "non-commercial usage only", which collides with Stegcore's commercial tier |
+| **The ordinary Unsplash Licence** (photos from the site or API) | **In**, as recorded above |
+| **The API Terms** | **Workable.** No retention limit and no ban on storing copies. It asks for download-event notification, preserved attribution, and staying inside quota |
+
+Two clauses are worth carrying forward even though the Dataset is out. Using API
+content "in connection with any machine learning and/or artificial intelligence
+purposes" is directed to a separate data licence, and a detection corpus is
+squarely that, so it is a question to put in writing rather than assume. And
+publishing "the results of any comparison of the Datasets or Licensed Data to
+similar datasets" requires written permission, which is precisely what a corpus
+paper does.
+
+The Dataset was still worth reading. Its `photos.tsv` carries `exif_camera_make`,
+`exif_camera_model`, `exif_iso`, `exif_exposure_time` and `exif_aperture_value`,
+which named the axis this corpus was missing: **acquisition diversity**. The API
+returns the same fields per photo. So did Commons, as it turned out, for free.
+
+### Flickr: the same shape of conflict as Pexels
+
+The per-photo Creative Commons grant comes from the photographer and is
+irrevocable, so redistribution of a CC BY or CC BY-SA Flickr photo is plainly
+permitted. The **Flickr API Terms** separately forbid an application to "cache or
+store any Flickr user photos other than for reasonable periods in order to
+provide the service you are providing to Flickr users". A permanent research
+corpus is not a reasonable period.
+
+Licence says yes, acquisition method says no: identical to Pexels. The route that
+works is the one already in use, since Commons holds a very large quantity of
+CC-licensed Flickr photography, already licence-vetted at upload, with no
+equivalent acquisition clause.
+
+**The selection rule this produces: prefer hosts that publish their own bulk
+access.** A host that ships dumps and documents its API for reuse cannot
+simultaneously forbid collecting in bulk, and that single test separates Commons
+from Pexels, Flickr and the Unsplash Dataset without needing to parse each one.
+
 ## Cannot publish derived images
 
 | Source | Why | Verbatim |
