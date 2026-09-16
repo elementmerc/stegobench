@@ -656,8 +656,18 @@ def main() -> int:
 
                 # Encode once. The bytes fingerprinted are the bytes written, so the
                 # manifest digest, the dedup store and the file on disk cannot drift.
+                # Rebuild from raw pixels so nothing rides along. Pillow carries
+                # the source's ancillary data through a crop, and 207 of the first
+                # 400 covers inherited an ICC profile from their originals while
+                # 193 did not. A corpus where half the clean covers carry a
+                # variable-size ancillary chunk has an uncontrolled variable in
+                # it, and the structural arm is specifically about data appended
+                # to a file, so this is a confound rather than untidiness. One
+                # profile was also large enough to trip Pillow's decompression
+                # guard on re-open, which is the error that surfaced it.
+                bare = Image.frombytes(cropped.mode, cropped.size, cropped.tobytes())
                 buf = io.BytesIO()
-                cropped.save(buf, format="PNG", optimize=False)
+                bare.save(buf, format="PNG", optimize=False)
                 payload = buf.getvalue()
                 digest = hashlib.sha256(payload).hexdigest()
 
