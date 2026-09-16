@@ -161,7 +161,7 @@ def centre_crop(img: Image.Image, size: int) -> Image.Image:
     return img.crop((left, top, left + size, top + size))
 
 
-IIPROP = "url|size|mime|sha1|extmetadata|metadata"
+IIPROP = "url|size|mime|sha1|user|extmetadata|metadata"
 IIEXTFILTER = "LicenseShortName|Artist|Credit|UsageTerms"
 
 # EXIF fields worth keeping, and only these. Camera make and model give the
@@ -182,6 +182,63 @@ def exif_of(ii: dict) -> dict:
         if value not in (None, ""):
             out[key] = str(value).strip()
     return out
+
+
+class DiversityCaps:
+    """Limits on how much of the corpus any one uploader or camera may be.
+
+    WHY A CAP AND NOT A HASH
+    ------------------------
+    Deduplication answers "is this the same picture?" and answers it well. It
+    has nothing to say about "is this the four hundredth photograph of the same
+    subject, from the same camera, by the same uploader?", because every one of
+    those frames genuinely is a different picture and a perceptual hash is right
+    to admit them.
+
+    That case is not hypothetical. A 20 cover test run on 2026-09-16 returned
+    four frames of `ISS0xx-E-xxxxx - View of Earth`, all shot on one Nikon D4
+    aboard the space station, because NASA has uploaded tens of thousands of
+    them and uniform random sampling weights files rather than photographers.
+
+    Commons hands us the uploader and the camera in the same API response we are
+    already reading, so the cap costs nothing and is exactly reproducible.
+    Counting resumes from the manifest, so an interrupted run does not reset the
+    tally and quietly double every cap.
+    """
+
+    def __init__(self, per_uploader: int, per_camera: int) -> None:
+        self.per_uploader = per_uploader
+        self.per_camera = per_camera
+        self.uploaders: dict[str, int] = {}
+        self.cameras: dict[str, int] = {}
+
+    @staticmethod
+    def camera_key(exif: dict) -> str | None:
+        make, model = exif.get("Make", ""), exif.get("Model", "")
+        key = f"{make} {model}".strip()
+        return key or None
+
+    def resume_from(self, rows: list) -> None:
+        for row in rows:
+            self.record(row.get("uploader"), self.camera_key(row.get("exif") or {}))
+
+    def refusal(self, uploader: str | None, camera: str | None) -> str | None:
+        """Why this candidate is refused, or None if there is room for it."""
+        if uploader and self.per_uploader > 0:
+            if self.uploaders.get(uploader, 0) >= self.per_uploader:
+                return (f"uploader {uploader} has already contributed "
+                        f"{self.per_uploader} covers")
+        if camera and self.per_camera > 0:
+            if self.cameras.get(camera, 0) >= self.per_camera:
+                return (f"camera {camera} has already contributed "
+                        f"{self.per_camera} covers")
+        return None
+
+    def record(self, uploader: str | None, camera: str | None) -> None:
+        if uploader:
+            self.uploaders[uploader] = self.uploaders.get(uploader, 0) + 1
+        if camera:
+            self.cameras[camera] = self.cameras.get(camera, 0) + 1
 
 
 def suitable(ii: dict, min_kb: int, max_kb: int, size: int) -> bool:
@@ -318,6 +375,14 @@ def main() -> int:
                          "is mostly digitised books, engravings, maps and "
                          "diagrams, whose statistics are nothing like a "
                          "photograph's. Their own arm, never mixed into one")
+    ap.add_argument("--max-per-uploader", type=int, default=40,
+                    help="most covers one Commons uploader may contribute. Bulk "
+                         "importers such as the NASA feeds would otherwise take "
+                         "a visible share of a random sample. 0 disables")
+    ap.add_argument("--max-per-camera", type=int, default=40,
+                    help="most covers one camera make and model may contribute, "
+                         "which is the acquisition-diversity axis this corpus "
+                         "sells. 0 disables")
     ap.add_argument("--dedup-db", default=None,
                     help="path to the shared dedup store. Without it this fetcher "
                          "cannot tell that a cover already arrived from another "
@@ -334,11 +399,12 @@ def main() -> int:
     manifest_path = out / "manifest.jsonl"
     rejected_path = out / "rejected.jsonl"
 
+    caps = DiversityCaps(args.max_per_uploader, args.max_per_camera)
     seen_ids = set()
     if manifest_path.exists():
-        for line in manifest_path.read_text().splitlines():
-            if line.strip():
-                seen_ids.add(json.loads(line)["pageid"])
+        rows = [json.loads(l) for l in manifest_path.read_text().splitlines() if l.strip()]
+        seen_ids = {r["pageid"] for r in rows}
+        caps.resume_from(rows)
         print(f"resuming: {len(seen_ids)} covers already fetched")
 
     store = None
@@ -354,8 +420,9 @@ def main() -> int:
               file=sys.stderr)
 
     written = len(seen_ids)
-    skipped = {"licence": 0, "not_a_photograph": 0, "download": 0, "decode": 0,
-               "too_small": 0, "flat": 0, "duplicate": 0}
+    skipped = {"licence": 0, "not_a_photograph": 0, "over_cap": 0,
+               "download": 0, "decode": 0, "too_small": 0, "flat": 0,
+               "duplicate": 0}
     last_beat = time.monotonic()
 
     if args.strategy == "random":
@@ -391,6 +458,21 @@ def main() -> int:
                 skipped["not_a_photograph"] += 1
                 continue
 
+            uploader = (ii.get("user") or "").strip() or None
+            camera = DiversityCaps.camera_key(exif)
+            # Checked before the download, because a cover we will not keep is
+            # bandwidth taken from donated infrastructure for nothing.
+            capped = caps.refusal(uploader, camera)
+            if capped:
+                skipped["over_cap"] += 1
+                rf.write(json.dumps({
+                    "pageid": page["pageid"], "title": page["title"],
+                    "source_url": ii["url"], "reason": "diversity_cap",
+                    "detail": capped, "uploader": uploader, "camera": camera,
+                }) + "\n")
+                rf.flush()
+                continue
+
             try:
                 raw = fetch_bytes(ii["url"])
             except RuntimeError:
@@ -416,10 +498,16 @@ def main() -> int:
             quality = cover_quality.assess(cropped)
             if not quality.usable:
                 skipped["flat"] += 1
+                measured = quality.as_dict()
                 rf.write(json.dumps({
                     "pageid": page["pageid"], "title": page["title"],
-                    "source_url": ii["url"], "reason": "unusable_cover",
-                    "detail": quality.reason, **quality.as_dict(),
+                    "source_url": ii["url"],
+                    # The code is what a later pass groups on, so it must not be
+                    # overwritten by the prose explaining it.
+                    "reason": "unusable_cover",
+                    "detail": quality.reason,
+                    "texture": measured["texture"],
+                    "clipped": measured["clipped"],
                 }) + "\n")
                 rf.flush()
                 continue
@@ -471,6 +559,7 @@ def main() -> int:
                 "original_mime": ii.get("mime"),
                 "commons_sha1": ii.get("sha1"),
                 "exif": exif,
+                "uploader": uploader,
                 "strategy": args.strategy,
                 "crop": args.size,
                 "method": "centre_crop",
@@ -479,6 +568,7 @@ def main() -> int:
                 "sha256": digest,
             }) + "\n")
             mf.flush()
+            caps.record(uploader, camera)
             written += 1
 
             if time.monotonic() - last_beat >= 60:

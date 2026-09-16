@@ -156,6 +156,57 @@ a persistent store across every source and every session. A candidate within a
 small Hamming distance of anything already held is rejected, **and the rejection
 is recorded in the manifest**, so the corpus can show what it excluded and why.
 
+### Redundancy is a fourth failure mode, and hashing cannot touch it
+
+There is a fourth case the three above do not cover, and it was found by looking
+for it. A 20 cover test run returned four frames of `ISS0xx-E-xxxxx - View of
+Earth`, every one shot on the same Nikon D4 aboard the space station, because
+NASA has uploaded tens of thousands of them and uniform random sampling weights
+files rather than photographers.
+
+Those frames are not duplicates. They are different continents under different
+clouds, and deduplication is right to admit each one. The corpus still ends up
+with a visible share of one camera pointed at one subject.
+
+Measured on 2026-09-16, pHash distances across 7 such frames and 20 unrelated
+Commons photographs:
+
+| | min | median |
+|---|---|---|
+| Within the ISS set | 24 | 30 |
+| Within unrelated photographs | 24 | 32 |
+| ISS against unrelated | 22 | 32 |
+
+**The distributions sit on top of each other.** Two photographs of Earth from
+the station are no more alike, to a perceptual hash, than two photographs of
+unrelated things, so no threshold separates them. Raising the radius to reach
+that far fails independently: chance collisions run at 1 in 26 billion at
+distance 7 and 1 in 82,086 at distance 15, which at 25 million images is 305
+false collisions for every candidate offered.
+
+Redundancy is therefore handled where its evidence actually lives, in the
+acquisition metadata. Commons returns the uploader and the camera in the same
+response the fetcher already reads, so `DiversityCaps` limits how many covers
+one uploader or one camera body may contribute, checked before the download so a
+cover we will not keep costs no bandwidth. The caps are recorded in the manifest
+and the tally resumes from it, since a cap that resets on restart is a cap that
+doubles overnight.
+
+### The same measurement found a false rejection
+
+The closest pair in that whole set was not two ISS frames. It was an ISS frame
+and an unrelated photograph, 6 bits apart on dHash, exactly the threshold, while
+pHash put them 28 apart. Both had almost no texture, 1.00 and 1.43 grey levels,
+which is above the cover floor and inside its advisory band.
+
+dHash records which of each adjacent pair of pixels is brighter, so where there
+are no gradients those comparisons are decided by rounding and two unrelated
+thin pictures agree about as often as two coins do. pHash fails the same way for
+the same reason. A picture that thin now needs both hashes to agree before it is
+refused, which two independent noise sources will not do, and ordinary
+photographs are unaffected: a resave and a brightness shift are still caught at 0
+bits, an 8 pixel crop with resize at 2.
+
 ## Resource budget on atlas
 
 Measured 2026-09-16, not estimated.
