@@ -273,6 +273,118 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(st["rejected_by_reason"], {"exact": 1})
 
 
+class ThinPictureTests(unittest.TestCase):
+    """A picture with almost no structure must not be convicted on one hash.
+
+    Reproduces the measured case: on 2026-09-16 an ISS Earth view and an
+    unrelated Commons photograph, textures 1.00 and 1.43, came out 6 bits apart
+    on dHash while pHash put them 28 apart. Six is exactly the default
+    threshold, so without corroboration that pair is a false rejection.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = DedupStore(pathlib.Path(self.tmp.name) / "thin.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def test_one_hash_is_not_enough_for_a_thin_picture(self):
+        held = Fingerprint("a" * 64, 0x0000000000000000, 0x0F0F0F0F0F0F0F0F,
+                           512, 512, texture=1.00)
+        self.store.offer(held, "commons", "iss.png")
+        # dHash 6 bits away, pHash nothing like it: the measured false pair.
+        candidate = Fingerprint("b" * 64, 0b111111, 0xF0F0F0F0F0F0F0F0,
+                                512, 512, texture=1.43)
+        self.assertEqual(hamming(held.dhash, candidate.dhash), 6)
+        self.assertGreater(hamming(held.phash, candidate.phash),
+                           dedup.DEFAULT_PHASH_MAX)
+        self.assertIsNone(
+            self.store.find_match(candidate),
+            "a thin picture was refused on one hash alone",
+        )
+
+    def test_both_hashes_agreeing_still_convicts_a_thin_picture(self):
+        held = Fingerprint("c" * 64, 0x00FF00FF00FF00FF, 0x0F0F0F0F0F0F0F0F,
+                           512, 512, texture=1.00)
+        self.store.offer(held, "commons", "a.png")
+        candidate = Fingerprint("d" * 64, 0x00FF00FF00FF00FE,
+                                0x0F0F0F0F0F0F0F0E, 512, 512, texture=1.20)
+        match = self.store.find_match(candidate)
+        self.assertIsNotNone(match, "two agreeing hashes must still convict")
+
+    def test_a_textured_picture_is_still_convicted_on_one_hash(self):
+        """The rule must not weaken dedup on ordinary photographs."""
+        held = Fingerprint("e" * 64, 0x0000000000000000, 0x0F0F0F0F0F0F0F0F,
+                           512, 512, texture=20.0)
+        self.store.offer(held, "commons", "a.png")
+        candidate = Fingerprint("f" * 64, 0b111111, 0xF0F0F0F0F0F0F0F0,
+                                512, 512, texture=25.0)
+        match = self.store.find_match(candidate)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.kind, "dhash")
+        self.assertEqual(match.distance, 6)
+
+    def test_one_thin_side_is_enough_to_require_corroboration(self):
+        """Either image being thin makes the single-hash evidence unsafe."""
+        held = Fingerprint("0" * 64, 0x0000000000000000, 0x0F0F0F0F0F0F0F0F,
+                           512, 512, texture=30.0)
+        self.store.offer(held, "commons", "a.png")
+        thin = Fingerprint("1" * 64, 0b111111, 0xF0F0F0F0F0F0F0F0,
+                           512, 512, texture=0.5)
+        self.assertIsNone(self.store.find_match(thin))
+
+    def test_fingerprinting_an_image_records_its_texture(self):
+        fp = fingerprint_bytes(png_bytes(photo(42)))
+        self.assertGreater(fp.texture, 0.0)
+        flat = np.full((64, 64, 3), 120, dtype=np.uint8)
+        self.assertEqual(
+            fingerprint_bytes(png_bytes(Image.fromarray(flat, "RGB"))).texture,
+            0.0,
+        )
+
+    def test_texture_survives_the_database(self):
+        fp = fingerprint_bytes(png_bytes(photo(43)))
+        self.store.offer(fp, "commons", "a.png")
+        row = self.store.db.execute(
+            "SELECT texture FROM images WHERE sha256 = ?", (fp.sha256,)
+        ).fetchone()
+        self.assertAlmostEqual(row["texture"], fp.texture, places=6)
+
+
+class RedundancyIsNotDuplicationTests(unittest.TestCase):
+    """The store's documented limit, asserted so it cannot be quietly forgotten.
+
+    If someone later raises the thresholds hoping to catch bulk-uploader
+    redundancy, this test is where they find out why that cannot work.
+    """
+
+    def test_chance_collisions_explode_with_the_radius(self):
+        """Why the threshold is not simply raised to reach redundant images."""
+        import math
+        space = 2 ** 64
+
+        def per_candidate(radius: int, held: int) -> float:
+            return held * sum(math.comb(64, k) for k in range(radius + 1)) / space
+
+        # At the working threshold nothing collides by accident, even at a
+        # corpus far larger than anything planned.
+        self.assertLess(per_candidate(MAX_SUPPORTED_DISTANCE, 25_000_000), 0.01)
+        # At the radius that would be needed to reach for redundancy, a large
+        # corpus would reject almost everything for no reason at all.
+        self.assertGreater(per_candidate(15, 25_000_000), 100)
+
+    def test_no_reachable_threshold_separates_redundant_photographs(self):
+        """The measured ISS distances, asserted against the supported ceiling.
+
+        Recorded 2026-09-16: the *closest* pair of ISS Earth views sat 24 bits
+        apart on both hashes, while unrelated Commons photographs sat 24 apart
+        too. The sets do not separate, and the closest redundant pair is more
+        than three times the furthest distance this index can serve.
+        """
+        closest_redundant_pair = 24
+        self.assertGreater(closest_redundant_pair, MAX_SUPPORTED_DISTANCE * 3)
+
+
 class BandedIndexTests(unittest.TestCase):
     """The pigeonhole claim the whole lookup rests on, checked against brute force."""
 

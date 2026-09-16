@@ -42,6 +42,51 @@ rejection is deliberate: the cost of wrongly rejecting a cover is that we fetch
 another one, and covers are abundant. The cost of wrongly accepting a duplicate
 is a corpus with a silent defect in it.
 
+The exception is a picture too thin to hash honestly, where both must agree. See
+`CORROBORATION_BELOW`.
+
+WHAT THIS STORE CANNOT DO, MEASURED RATHER THAN ASSUMED
+-------------------------------------------------------
+It catches *duplicates*. It does not catch *redundancy*, and no threshold
+setting will make it.
+
+The distinction matters because the two look alike in a corpus listing. A
+duplicate is the same picture arriving twice. Redundancy is four hundred
+genuinely different photographs of the same subject, from one camera, by one
+uploader, which is what a bulk contributor such as the NASA station feeds
+produces.
+
+Measured on 2026-09-16 across 7 ISS "View of Earth" frames and 20 unrelated
+Commons photographs, pHash distances were:
+
+    within the ISS set          min 24, median 30
+    within unrelated set        min 24, median 32
+    ISS against unrelated       min 22, median 32
+
+The distributions are the same. Two photographs of Earth from the space station
+are no more alike, to a perceptual hash, than two photographs of unrelated
+things. There is no threshold between them because there is no gap.
+
+Reaching for them by raising the threshold fails for a second, independent
+reason: chance collisions grow far faster than the radius does.
+
+    radius   a random pair collides   at 10k held   at 100k   at 25M
+       6            1 in 221 billion         0.000     0.000    0.000
+       7             1 in 26 billion         0.000     0.000    0.001
+      10            1 in 100 million         0.000     0.001    0.250
+      15                 1 in 82,086         0.122     1.218  304.557
+
+The right hand columns are expected false collisions per candidate. Distance 15
+is survivable at ten thousand images and worthless at ten million, so a
+threshold chosen today against a small corpus would quietly poison a large one.
+There is headroom to about 10 if a measurement ever justifies it; there is none
+at all in the range that would be needed here, and the ISS numbers above say the
+range needed here is past 24 regardless.
+
+Redundancy is therefore handled where the evidence for it actually lives, in the
+acquisition metadata: see `DiversityCaps` in `fetch_commons.py`, which limits how
+many covers one uploader or one camera body may contribute.
+
 HOW THE LOOKUP STAYS FAST AT ANY SCALE
 --------------------------------------
 The naive near duplicate search compares the candidate against every hash held,
@@ -90,7 +135,9 @@ import time
 import numpy as np
 from PIL import Image
 
-SCHEMA_VERSION = 1
+import cover_quality
+
+SCHEMA_VERSION = 2
 
 HASH_BITS = 64
 BAND_COUNT = 8
@@ -102,6 +149,27 @@ MAX_SUPPORTED_DISTANCE = BAND_COUNT - 1
 
 DEFAULT_DHASH_MAX = 6
 DEFAULT_PHASH_MAX = 6
+
+# Below this much local structure, one hash agreeing is not evidence and the
+# other must agree too before a candidate is refused.
+#
+# Measured 2026-09-16 and this is not a precaution. Across 7 ISS Earth views and
+# 20 unrelated Commons photographs, the closest cross pair in the whole set had
+# dHash distance 6, right on the threshold, while pHash put the same pair at 28,
+# which is as unrelated as two images get. Both had barely any texture: 1.00 and
+# 1.43 grey levels, above `cover_quality.TEXTURE_FLOOR` and well inside its
+# advisory band.
+#
+# The cause is structural rather than unlucky. dHash records, for each adjacent
+# pair of pixels, which is brighter. On a picture with almost no gradients those
+# comparisons are decided by rounding, so two unrelated flat images agree at
+# roughly the rate two coin flips agree. pHash degenerates the same way for the
+# same reason: with no energy outside the DC term, its 63 remaining bits are
+# noise about a median of noise.
+#
+# So the rule is not "trust pHash instead". It is that a thin picture needs both
+# hashes to agree, which two independent noise sources will not do.
+CORROBORATION_BELOW = 4.0
 
 # SQLite's default lock wait is zero, which turns any concurrent writer into an
 # instant "database is locked". Baseline Section 2.1: every wait is deadline
@@ -122,6 +190,11 @@ class Fingerprint:
     phash: int
     width: int
     height: int
+    # Mean local structure, in grey levels. Carried because a hash computed on a
+    # picture with almost no structure is a hash of its own rounding noise, and
+    # the store has to know that before it convicts anything. See
+    # `CORROBORATION_BELOW` and `find_match`.
+    texture: float = 0.0
 
     def band(self, kind: str, idx: int) -> int:
         value = self.dhash if kind == "d" else self.phash
@@ -218,7 +291,8 @@ def fingerprint_bytes(raw: bytes) -> Fingerprint:
             width, height = img.size
             if width < 8 or height < 8:
                 raise DedupError(f"{width}x{height} is too small to fingerprint")
-            return Fingerprint(digest, dhash(img), phash(img), width, height)
+            return Fingerprint(digest, dhash(img), phash(img), width, height,
+                               cover_quality.texture(img))
     except DedupError:
         raise
     except Exception as e:  # noqa: BLE001 - the caller needs the reason, not the type
@@ -290,6 +364,7 @@ class DedupStore:
                 ref      TEXT NOT NULL,
                 width    INTEGER NOT NULL,
                 height   INTEGER NOT NULL,
+                texture  REAL NOT NULL,
                 added_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS bands (
@@ -378,15 +453,31 @@ class DedupStore:
             bands = [(kind, i, fp.band(kind, i)) for i in range(BAND_COUNT)]
             clauses = " OR ".join(["(kind = ? AND idx = ? AND band = ?)"] * BAND_COUNT)
             column = "dhash" if kind == "d" else "phash"
+            other = "phash" if kind == "d" else "dhash"
+            other_value = fp.phash if kind == "d" else fp.dhash
+            other_limit = self.phash_max if kind == "d" else self.dhash_max
             candidates = self.db.execute(
-                f"""SELECT DISTINCT i.sha256, i.source, i.ref, i.{column} AS h
+                f"""SELECT DISTINCT i.sha256, i.source, i.ref, i.texture,
+                           i.{column} AS h, i.{other} AS other_h
                     FROM bands b JOIN images i ON i.sha256 = b.sha256
                     WHERE {clauses}""",
                 [item for band in bands for item in band],
             )
             for cand in candidates:
                 distance = hamming(value, self._unsigned(cand["h"]))
-                if distance <= limit and (best is None or distance < best.distance):
+                if distance > limit:
+                    continue
+                # A thin picture hashes its own rounding noise, so one hash
+                # agreeing proves nothing. Demand the other one as well.
+                thin = (fp.texture < CORROBORATION_BELOW
+                        or cand["texture"] < CORROBORATION_BELOW)
+                if thin:
+                    corroborating = hamming(
+                        other_value, self._unsigned(cand["other_h"])
+                    )
+                    if corroborating > other_limit:
+                        continue
+                if best is None or distance < best.distance:
                     best = Match(
                         cand["sha256"], cand["source"], cand["ref"],
                         "dhash" if kind == "d" else "phash", distance,
@@ -424,10 +515,11 @@ class DedupStore:
 
             self.db.execute(
                 """INSERT INTO images
-                   (sha256, dhash, phash, source, ref, width, height, added_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (sha256, dhash, phash, source, ref, width, height,
+                    texture, added_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (fp.sha256, self._signed(fp.dhash), self._signed(fp.phash),
-                 source, ref, fp.width, fp.height, now),
+                 source, ref, fp.width, fp.height, fp.texture, now),
             )
             self.db.executemany(
                 "INSERT INTO bands(kind, idx, band, sha256) VALUES (?, ?, ?, ?)",
