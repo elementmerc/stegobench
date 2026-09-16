@@ -69,6 +69,46 @@ class ExifTests(unittest.TestCase):
         self.assertEqual(exif_of({"metadata": [{"name": "Make", "value": ""}]}), {})
 
 
+class ExtMetadataShapeTests(unittest.TestCase):
+    """The API does not promise one shape, and an overnight fetch died proving it.
+
+    A 10,000 cover run stopped on its eighth cover with
+    `'list' object has no attribute 'get'`: for some files Commons sends
+    `extmetadata` as an empty list rather than an object. Every shape the API
+    has been seen to send is handled here, at the boundary, once.
+    """
+
+    def test_the_ordinary_object_shape_reads(self):
+        ii = {"extmetadata": {"LicenseShortName": {"value": "CC BY 4.0"}}}
+        em = fetch_commons.extmetadata_of(ii)
+        self.assertEqual(fetch_commons.extmeta_value(em, "LicenseShortName"),
+                         "CC BY 4.0")
+
+    def test_a_list_does_not_raise(self):
+        """The exact crash, as a test."""
+        for shape in ([], [{"value": "x"}], "", 0):
+            em = fetch_commons.extmetadata_of({"extmetadata": shape})
+            self.assertEqual(em, {}, f"shape {shape!r} was not neutralised")
+            self.assertEqual(fetch_commons.extmeta_value(em, "LicenseShortName"), "")
+
+    def test_a_missing_block_reads_as_empty(self):
+        self.assertEqual(fetch_commons.extmetadata_of({}), {})
+
+    def test_a_present_key_with_an_odd_value_still_reads(self):
+        em = {"Artist": "a plain string", "Credit": None, "UsageTerms": 42}
+        self.assertEqual(fetch_commons.extmeta_value(em, "Artist"), "a plain string")
+        self.assertEqual(fetch_commons.extmeta_value(em, "Credit"), "")
+        self.assertEqual(fetch_commons.extmeta_value(em, "UsageTerms"), "42")
+
+    def test_an_absent_key_reads_as_empty(self):
+        self.assertEqual(fetch_commons.extmeta_value({}, "LicenseShortName"), "")
+
+    def test_metadata_in_the_wrong_shape_does_not_raise(self):
+        """The same hazard on the EXIF side, which reads a list of objects."""
+        for shape in ({}, "", None, [None, "x", 3]):
+            self.assertEqual(exif_of({"metadata": shape}), {})
+
+
 class StripHtmlTests(unittest.TestCase):
     def test_tags_are_removed_and_text_kept(self):
         self.assertEqual(

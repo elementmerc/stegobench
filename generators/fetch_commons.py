@@ -173,9 +173,38 @@ EXIF_KEEP = ("Make", "Model", "ISOSpeedRatings", "ExposureTime", "FNumber",
              "FocalLength", "DateTimeOriginal")
 
 
+def extmetadata_of(ii: dict) -> dict:
+    """The extmetadata block, or an empty one if the API did not send a block.
+
+    The MediaWiki API does not guarantee the shape of this field. For most files
+    it is an object keyed by property name; for some it arrives as an empty
+    *list* instead, which is JSON's other way of spelling "nothing here" and
+    which has no `.get`. An overnight fetch died on its eighth cover for exactly
+    that reason.
+
+    This is a boundary, so the coercion belongs here rather than at every use.
+    """
+    em = ii.get("extmetadata")
+    return em if isinstance(em, dict) else {}
+
+
+def extmeta_value(em: dict, key: str) -> str:
+    """One extmetadata string, tolerating every shape the API sends."""
+    field = em.get(key)
+    if isinstance(field, dict):
+        value = field.get("value")
+    else:
+        value = field
+    return "" if value is None else str(value).strip()
+
+
 def exif_of(ii: dict) -> dict:
     """The EXIF fields we keep, flattened out of the API's list-of-dicts shape."""
-    raw = {m.get("name"): m.get("value") for m in (ii.get("metadata") or [])}
+    entries = ii.get("metadata")
+    if not isinstance(entries, list):
+        return {}
+    raw = {m.get("name"): m.get("value")
+           for m in entries if isinstance(m, dict)}
     out = {}
     for key in EXIF_KEEP:
         value = raw.get(key)
@@ -420,7 +449,7 @@ def main() -> int:
               file=sys.stderr)
 
     written = len(seen_ids)
-    skipped = {"licence": 0, "not_a_photograph": 0, "over_cap": 0,
+    skipped = {"licence": 0, "not_a_photograph": 0, "over_cap": 0, "error": 0,
                "download": 0, "decode": 0, "too_small": 0, "flat": 0,
                "duplicate": 0}
     last_beat = time.monotonic()
@@ -449,140 +478,156 @@ def main() -> int:
                 break
             if page["pageid"] in seen_ids:
                 continue
-            em = ii.get("extmetadata", {})
-            lic = (em.get("LicenseShortName", {}).get("value") or "").strip()
-            if args.licences == "permissive" and lic.lower() not in PERMISSIVE:
-                skipped["licence"] += 1
-                continue
-
-            exif = exif_of(ii)
-            # A camera make is the cheapest available proof that a camera made
-            # this file. Commons' public domain holdings are dominated by bulk
-            # archive digitisation, so uniform random sampling without this
-            # filter returns mostly scanned books: measured 2026-09-16, 78 of
-            # 130 permissively licensed files carried no camera EXIF at all.
-            if args.require_exif and not exif.get("Make"):
-                skipped["not_a_photograph"] += 1
-                continue
-
-            uploader = (ii.get("user") or "").strip() or None
-            camera = DiversityCaps.camera_key(exif)
-            # Checked before the download, because a cover we will not keep is
-            # bandwidth taken from donated infrastructure for nothing.
-            capped = caps.refusal(uploader, camera)
-            if capped:
-                skipped["over_cap"] += 1
-                rf.write(json.dumps({
-                    "pageid": page["pageid"], "title": page["title"],
-                    "source_url": ii["url"], "reason": "diversity_cap",
-                    "detail": capped, "uploader": uploader, "camera": camera,
-                }) + "\n")
-                rf.flush()
-                continue
-
+            # This run is measured in hours and one malformed API record has
+            # already killed it once. A candidate that cannot be processed now
+            # costs itself and nothing more, and names itself on the way out.
             try:
-                raw = fetch_bytes(ii["url"])
-            except RuntimeError:
-                skipped["download"] += 1
-                continue
-            try:
-                img = Image.open(io.BytesIO(raw))
-                img = img.convert("L") if img.mode in ("L", "I;16", "I") else img.convert("RGB")
-            except Exception:  # noqa: BLE001
-                skipped["decode"] += 1
-                continue
-            try:
-                cropped = centre_crop(img, args.size)
-            except ValueError:
-                skipped["too_small"] += 1
-                continue
+                em = extmetadata_of(ii)
+                lic = extmeta_value(em, "LicenseShortName")
+                if args.licences == "permissive" and lic.lower() not in PERMISSIVE:
+                    skipped["licence"] += 1
+                    continue
 
-            seen_ids.add(page["pageid"])
+                exif = exif_of(ii)
+                # A camera make is the cheapest available proof that a camera made
+                # this file. Commons' public domain holdings are dominated by bulk
+                # archive digitisation, so uniform random sampling without this
+                # filter returns mostly scanned books: measured 2026-09-16, 78 of
+                # 130 permissively licensed files carried no camera EXIF at all.
+                if args.require_exif and not exif.get("Make"):
+                    skipped["not_a_photograph"] += 1
+                    continue
 
-            # Suitability before uniqueness, deliberately: a flat crop must never
-            # reach the dedup store, because a picture with no gradients hashes
-            # its own rounding noise and collides with every other flat crop.
-            quality = cover_quality.assess(cropped)
-            if not quality.usable:
-                skipped["flat"] += 1
-                measured = quality.as_dict()
-                rf.write(json.dumps({
-                    "pageid": page["pageid"], "title": page["title"],
-                    "source_url": ii["url"],
-                    # The code is what a later pass groups on, so it must not be
-                    # overwritten by the prose explaining it.
-                    "reason": "unusable_cover",
-                    "detail": quality.reason,
-                    "texture": measured["texture"],
-                    "clipped": measured["clipped"],
-                }) + "\n")
-                rf.flush()
-                continue
-
-            # Encode once. The bytes fingerprinted are the bytes written, so the
-            # manifest digest, the dedup store and the file on disk cannot drift.
-            buf = io.BytesIO()
-            cropped.save(buf, format="PNG", optimize=False)
-            payload = buf.getvalue()
-            digest = hashlib.sha256(payload).hexdigest()
-
-            if store is not None:
-                decision = store.offer(
-                    fingerprint_bytes(payload), "commons", str(page["pageid"])
-                )
-                if not decision.accepted:
-                    skipped["duplicate"] += 1
+                uploader = (ii.get("user") or "").strip() or None
+                camera = DiversityCaps.camera_key(exif)
+                # Checked before the download, because a cover we will not keep is
+                # bandwidth taken from donated infrastructure for nothing.
+                capped = caps.refusal(uploader, camera)
+                if capped:
+                    skipped["over_cap"] += 1
                     rf.write(json.dumps({
                         "pageid": page["pageid"], "title": page["title"],
-                        "source_url": ii["url"], "reason": "duplicate",
-                        "detail": decision.match.describe(),
-                        "matched_sha256": decision.match.sha256,
-                        "match_kind": decision.match.kind,
-                        "match_distance": decision.match.distance,
+                        "source_url": ii["url"], "reason": "diversity_cap",
+                        "detail": capped, "uploader": uploader, "camera": camera,
                     }) + "\n")
                     rf.flush()
                     continue
 
-            name = f"{written:05d}.png"
-            path = out / name
-            # Atomic: a killed run leaves no half-written PNG behind for the
-            # next one to read as a finished cover.
-            part = path.with_suffix(".png.part")
-            part.write_bytes(payload)
-            part.replace(path)
+                try:
+                    raw = fetch_bytes(ii["url"])
+                except RuntimeError:
+                    skipped["download"] += 1
+                    continue
+                try:
+                    img = Image.open(io.BytesIO(raw))
+                    img = img.convert("L") if img.mode in ("L", "I;16", "I") else img.convert("RGB")
+                except Exception:  # noqa: BLE001
+                    skipped["decode"] += 1
+                    continue
+                try:
+                    cropped = centre_crop(img, args.size)
+                except ValueError:
+                    skipped["too_small"] += 1
+                    continue
 
-            mf.write(json.dumps({
-                "file": name,
-                "pageid": page["pageid"],
-                "title": page["title"],
-                "source_url": ii["url"],
-                "descriptionurl": ii.get("descriptionurl"),
-                "licence": lic,
-                "usage_terms": strip_html(em.get("UsageTerms", {}).get("value", "")),
-                "artist": strip_html(em.get("Artist", {}).get("value", "")),
-                "credit": strip_html(em.get("Credit", {}).get("value", "")),
-                "original_size": [ii.get("width"), ii.get("height")],
-                "original_bytes": ii.get("size"),
-                "original_mime": ii.get("mime"),
-                "commons_sha1": ii.get("sha1"),
-                "exif": exif,
-                "uploader": uploader,
-                "strategy": args.strategy,
-                "crop": args.size,
-                "method": "centre_crop",
-                "mode": cropped.mode,
-                "quality": quality.as_dict(),
-                "sha256": digest,
-            }) + "\n")
-            mf.flush()
-            caps.record(uploader, camera)
-            written += 1
+                seen_ids.add(page["pageid"])
 
-            if time.monotonic() - last_beat >= 60:
-                print(f"  ... {written}/{args.count} covers, skipped {skipped}",
-                      flush=True)
-                last_beat = time.monotonic()
-            time.sleep(args.delay)
+                # Suitability before uniqueness, deliberately: a flat crop must never
+                # reach the dedup store, because a picture with no gradients hashes
+                # its own rounding noise and collides with every other flat crop.
+                quality = cover_quality.assess(cropped)
+                if not quality.usable:
+                    skipped["flat"] += 1
+                    measured = quality.as_dict()
+                    rf.write(json.dumps({
+                        "pageid": page["pageid"], "title": page["title"],
+                        "source_url": ii["url"],
+                        # The code is what a later pass groups on, so it must not be
+                        # overwritten by the prose explaining it.
+                        "reason": "unusable_cover",
+                        "detail": quality.reason,
+                        "texture": measured["texture"],
+                        "clipped": measured["clipped"],
+                    }) + "\n")
+                    rf.flush()
+                    continue
+
+                # Encode once. The bytes fingerprinted are the bytes written, so the
+                # manifest digest, the dedup store and the file on disk cannot drift.
+                buf = io.BytesIO()
+                cropped.save(buf, format="PNG", optimize=False)
+                payload = buf.getvalue()
+                digest = hashlib.sha256(payload).hexdigest()
+
+                if store is not None:
+                    decision = store.offer(
+                        fingerprint_bytes(payload), "commons", str(page["pageid"])
+                    )
+                    if not decision.accepted:
+                        skipped["duplicate"] += 1
+                        rf.write(json.dumps({
+                            "pageid": page["pageid"], "title": page["title"],
+                            "source_url": ii["url"], "reason": "duplicate",
+                            "detail": decision.match.describe(),
+                            "matched_sha256": decision.match.sha256,
+                            "match_kind": decision.match.kind,
+                            "match_distance": decision.match.distance,
+                        }) + "\n")
+                        rf.flush()
+                        continue
+
+                name = f"{written:05d}.png"
+                path = out / name
+                # Atomic: a killed run leaves no half-written PNG behind for the
+                # next one to read as a finished cover.
+                part = path.with_suffix(".png.part")
+                part.write_bytes(payload)
+                part.replace(path)
+
+                mf.write(json.dumps({
+                    "file": name,
+                    "pageid": page["pageid"],
+                    "title": page["title"],
+                    "source_url": ii["url"],
+                    "descriptionurl": ii.get("descriptionurl"),
+                    "licence": lic,
+                    "usage_terms": strip_html(extmeta_value(em, "UsageTerms")),
+                    "artist": strip_html(extmeta_value(em, "Artist")),
+                    "credit": strip_html(extmeta_value(em, "Credit")),
+                    "original_size": [ii.get("width"), ii.get("height")],
+                    "original_bytes": ii.get("size"),
+                    "original_mime": ii.get("mime"),
+                    "commons_sha1": ii.get("sha1"),
+                    "exif": exif,
+                    "uploader": uploader,
+                    "strategy": args.strategy,
+                    "crop": args.size,
+                    "method": "centre_crop",
+                    "mode": cropped.mode,
+                    "quality": quality.as_dict(),
+                    "sha256": digest,
+                }) + "\n")
+                mf.flush()
+                caps.record(uploader, camera)
+                written += 1
+
+                if time.monotonic() - last_beat >= 60:
+                    print(f"  ... {written}/{args.count} covers, skipped {skipped}",
+                          flush=True)
+                    last_beat = time.monotonic()
+                time.sleep(args.delay)
+            except Exception as e:  # noqa: BLE001 - one bad record, not one dead run
+                skipped["error"] += 1
+                seen_ids.add(page["pageid"])
+                print(f"  skipping {page.get('title', page['pageid'])}: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
+                rf.write(json.dumps({
+                    "pageid": page["pageid"], "title": page.get("title"),
+                    "reason": "error", "detail": f"{type(e).__name__}: {e}",
+                }) + "\n")
+                rf.flush()
+                continue
+
 
     if store is not None:
         store.close()
