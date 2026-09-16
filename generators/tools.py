@@ -316,12 +316,23 @@ class HStegoEmbedder(DockerTool, Embedder):
         return "hstego"
 
     def capacity(self, cover: pathlib.Path) -> int:
-        with Image.open(cover) as img:
-            width, height = img.size
-        # hstego reports its own limit on refusal; this is the bound it applies
-        # for spatial covers, one bit per pixel less its header and the coding
-        # overhead a real STC pays.
-        return max(0, (width * height) // 8 - 64)
+        """Ask the tool, because a real STC's overhead is not a formula.
+
+        The coding loss depends on the cost map, which depends on the picture,
+        so an estimate computed from the dimensions would be wrong in the
+        direction that silently truncates payloads.
+        """
+        with temp_workdir() as tmp:
+            tmp = pathlib.Path(tmp)
+            name = f"cover{cover.suffix}"
+            shutil.copy2(cover, tmp / name)
+            result = self.run_in(tmp, ["capacity", name])
+        text = (result.stdout or b"").decode("utf-8", "replace")
+        for line in text.splitlines():
+            for token in line.replace(":", " ").split():
+                if token.isdigit():
+                    return int(token)
+        raise EmbedError(f"hstego would not report a capacity for {cover.name}")
 
     def embed(self, cover, payload, stego, password=None):
         self._check(cover, payload)

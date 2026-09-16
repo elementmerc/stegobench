@@ -24,6 +24,7 @@ FROM python:3.11-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc g++ libc6-dev make curl ca-certificates git \
+        tk \
     && rm -rf /var/lib/apt/lists/*
 
 # 9e is the current IJG release. Pinned, because the struct layout this tool
@@ -48,7 +49,26 @@ ENV CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" \
     LD_LIBRARY_PATH="/usr/local/lib"
 
 ARG HSTEGO_REF=master
-RUN pip install --no-cache-dir "git+https://github.com/daniellerch/hstego@${HSTEGO_REF}"
+# hstego declares almost none of its runtime dependencies. A clean install
+# produces a tool that cannot start, and the failures arrive one import at a
+# time: imageio, then scipy, then pycryptodome, then numba, then Pillow, and
+# finally libtk because hstego.py imports ImageTk at module scope even when it
+# is being used from the command line. Tk is a GUI toolkit and has no business
+# in a headless container; it is here because an unused import at module scope
+# is still an import.
+#
+# All of this is upstream packaging rather than a preference of ours, and worth
+# reporting: we already have a pull request open against the same author's
+# Aletheia, so there is a channel for it.
+RUN pip install --no-cache-dir imageio scipy pycryptodome numba pillow \
+    && pip install --no-cache-dir "git+https://github.com/daniellerch/hstego@${HSTEGO_REF}"
+
+# numba compiles hstegolib's hot loops with cache=True, which writes next to the
+# module in site-packages. We run these containers as the calling user with all
+# capabilities dropped, so site-packages is not writable and the import dies
+# before the tool starts. Point the cache somewhere writable instead of running
+# the container as root: the sandbox is the point.
+ENV NUMBA_CACHE_DIR=/tmp/numba-cache
 
 WORKDIR /data
 # hstego.py embed <payload> <cover> <stego> <password>
