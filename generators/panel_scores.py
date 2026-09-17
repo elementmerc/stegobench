@@ -63,10 +63,17 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp"}
 #: box is worse than work that fails, because nothing reports it.
 LABEL = "stegobench-panel"
 
+#: Hard memory ceiling per container. Without one the limit is the whole
+#: machine, so several containers bid against each other and against unrelated
+#: services, and an out-of-memory kill lands wherever the kernel decides rather
+#: than on the run that caused it. See the note in rich_model_baseline.py.
+CONTAINER_MEMORY = "3g"
+
 HARDENING = [
     "--network=none", "--cap-drop=ALL",
     "--security-opt", "no-new-privileges",
     "--label", LABEL,
+    "--memory", CONTAINER_MEMORY,
 ]
 
 

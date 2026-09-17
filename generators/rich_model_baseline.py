@@ -74,6 +74,19 @@ EXTRACTOR_FOR = {"spatial": "srm", "jpeg": "dctr"}
 #: its containers with it. Killing the parent does not kill them.
 LABEL = "stegobench-rich"
 
+#: Hard memory ceiling per extractor container.
+#:
+#: Without one, a container's limit is the whole machine. Eight of them then bid
+#: against each other and against everything else on the box, and when memory
+#: runs out the kernel picks a victim from the WHOLE system rather than from the
+#: run that caused it. On 2026-09-17 that victim was dbus, pipewire and
+#: wireplumber, none of which had anything to do with this.
+#:
+#: Measured: each container sits at 1.6 to 2.1 GiB, so 3 GiB is headroom rather
+#: than a squeeze. A container that exceeds it is killed on its own and the run
+#: reports which one, which is the behaviour worth having.
+CONTAINER_MEMORY = "3g"
+
 
 def run(cmd: list[str], timeout: int, what: str) -> subprocess.CompletedProcess:
     try:
@@ -123,6 +136,7 @@ def _extract_one(image: str, extractor: str, images: pathlib.Path,
             "--network=none", "--cap-drop=ALL",
             "--security-opt", "no-new-privileges",
             "--label", LABEL,
+            "--memory", CONTAINER_MEMORY,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{images}:/images:ro",
             "-v", f"{out_file.parent}:/out",
