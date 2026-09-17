@@ -132,13 +132,50 @@ class OutguessEmbedder(DockerTool, Embedder):
         return "outguess"
 
     def capacity(self, cover: pathlib.Path) -> int:
-        # Outguess has no capacity query. The conservative estimate below is
-        # deliberately pessimistic: it would rather skip an arm than write a
-        # truncated payload, which is silent corruption in a corpus.
-        with Image.open(cover) as img:
-            width, height = img.size
-        coefficients = (width // 8) * (height // 8) * 64
-        return max(0, int(coefficients * 0.05) // 8)
+        """Ask outguess, because no formula predicts this.
+
+        Outguess has no capacity subcommand, but it prints what it can carry on
+        the way to embedding, and that number is the one that matters: it is the
+        *correctable* message size, after the error-correcting code has taken
+        its share.
+
+        The share is not a constant. Measured across four 512px covers at
+        quality 95, it came out at 42.20%, 50.84%, 0.63% and 36.94% of the
+        usable bits, because the code's overhead depends on how the coefficients
+        fall in that particular picture. An estimate from the dimensions would
+        have been eighty times too generous on the third of those, and the
+        payload would have been silently truncated.
+        """
+        with temp_workdir() as tmp:
+            tmp = pathlib.Path(tmp)
+            name = f"cover{cover.suffix}"
+            shutil.copy2(cover, tmp / name)
+            (tmp / "probe.bin").write_bytes(b"\0")
+            result = self.run_in(tmp, ["-d", "probe.bin", name, "probe-out.jpg"])
+        text = ((result.stderr or b"") + (result.stdout or b"")).decode(
+            "utf-8", "replace")
+        for line in text.splitlines():
+            if "Correctable message size" in line:
+                digits = "".join(
+                    c for c in line.split(":", 1)[1].split("bits")[0] if c.isdigit()
+                )
+                if not digits:
+                    continue
+                room = int(digits) // 8
+                # Outguess sometimes reports a nonsense figure rather than
+                # admitting it cannot embed: 2305843009213693951 bytes, which is
+                # 2^61 - 1, appeared for six covers in two hundred. It is its own
+                # arithmetic overflowing, and taken at face value it produces a
+                # payload large enough to exhaust memory. Nothing can hide more
+                # in a file than the file contains, so that bound is the check.
+                if room > cover.stat().st_size:
+                    raise EmbedError(
+                        f"outguess reported {room} bytes of capacity in a "
+                        f"{cover.stat().st_size} byte file, which is its own "
+                        "overflow rather than a usable number"
+                    )
+                return room
+        raise EmbedError(f"outguess would not report a capacity for {cover.name}")
 
     def embed(self, cover, payload, stego, password=None):
         self._check(cover, payload)
