@@ -63,17 +63,22 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp"}
 #: box is worse than work that fails, because nothing reports it.
 LABEL = "stegobench-panel"
 
-#: Hard memory ceiling per container. Without one the limit is the whole
-#: machine, so several containers bid against each other and against unrelated
-#: services, and an out-of-memory kill lands wherever the kernel decides rather
-#: than on the run that caused it. See the note in rich_model_baseline.py.
-CONTAINER_MEMORY = "3g"
+#: The memory the whole panel may use, split between its containers.
+#:
+#: Declared as a total rather than per container for the reason in
+#: rich_model_baseline.py: a per container ceiling does not bound a run, and
+#: shards times the cap is the number that decides whether anything else on the
+#: machine survives. Splitting one budget also makes concurrency cost something,
+#: which is what stops a wider run looking free at the point it is typed.
+MEMORY_BUDGET_GIB = 12.0
+
+#: Measured floor for a SPA/RS container, which is far lighter than an SRM one.
+MIN_CONTAINER_GIB = 1.0
 
 HARDENING = [
     "--network=none", "--cap-drop=ALL",
     "--security-opt", "no-new-privileges",
     "--label", LABEL,
-    "--memory", CONTAINER_MEMORY,
 ]
 
 
@@ -94,6 +99,19 @@ def reap() -> int:
     except (subprocess.SubprocessError, OSError):
         pass
     return len(ids)
+
+
+def memory_flag(shards: int, budget_gib: float = MEMORY_BUDGET_GIB) -> list[str]:
+    """Per container ceiling derived from the run's whole budget."""
+    per = budget_gib / max(1, shards)
+    if per < MIN_CONTAINER_GIB:
+        raise RuntimeError(
+            f"{shards} shards under a {budget_gib:g} GiB budget leaves "
+            f"{per:.2f} GiB each, below the {MIN_CONTAINER_GIB} GiB a detector "
+            f"needs. Run at most {int(budget_gib // MIN_CONTAINER_GIB)} shards, "
+            f"or raise the budget and say what gives up that memory."
+        )
+    return ["--memory", f"{per:.2f}g"]
 
 
 def run(cmd: list[str], timeout: int, what: str, check: bool = True):
@@ -118,9 +136,11 @@ def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
     The threads here only wait on subprocesses, so the interpreter lock is
     irrelevant and the parallelism is real.
     """
+    mem = memory_flag(shards)
+
     def one(shard: int) -> str:
         cmd = [
-            "docker", "run", "--rm", *HARDENING,
+            "docker", "run", "--rm", *HARDENING, *mem,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{directory}:/images:ro",
             "-v", f"{HERE}:/driver:ro",
@@ -175,7 +195,7 @@ def stegexpose_dir(image: str, directory: pathlib.Path, scratch: pathlib.Path,
     if csv.exists():
         csv.unlink()
     run([
-        "docker", "run", "--rm", *HARDENING,
+        "docker", "run", "--rm", *HARDENING, *memory_flag(1),
         "--user", f"{os.getuid()}:{os.getgid()}",
         "-v", f"{scratch}:/data", image,
         "/data", "default", "0.2", "/data/stegexpose.csv",
@@ -203,7 +223,7 @@ def zsteg_file(image: str, path: pathlib.Path, timeout: int) -> bool:
     from a boolean would be a category error.
     """
     proc = run([
-        "docker", "run", "--rm", *HARDENING,
+        "docker", "run", "--rm", *HARDENING, *memory_flag(1),
         "-v", f"{path.parent}:/data:ro", image, f"/data/{path.name}",
     ], timeout=timeout, what=f"zsteg on {path.name}", check=False)
     for line in proc.stdout.splitlines():

@@ -74,18 +74,22 @@ EXTRACTOR_FOR = {"spatial": "srm", "jpeg": "dctr"}
 #: its containers with it. Killing the parent does not kill them.
 LABEL = "stegobench-rich"
 
-#: Hard memory ceiling per extractor container.
+#: The memory the WHOLE run may use, not the per container figure.
 #:
-#: Without one, a container's limit is the whole machine. Eight of them then bid
-#: against each other and against everything else on the box, and when memory
-#: runs out the kernel picks a victim from the WHOLE system rather than from the
-#: run that caused it. On 2026-09-17 that victim was dbus, pipewire and
-#: wireplumber, none of which had anything to do with this.
+#: A per container ceiling alone does not bound a run. Eight containers capped
+#: at 3 GiB each is still 24 GiB, which on a 28 GiB box starves everything else
+#: exactly as an uncapped run does. The number that matters is shards times the
+#: cap, so that is the number declared here and the per container limit is
+#: derived from it.
 #:
-#: Measured: each container sits at 1.6 to 2.1 GiB, so 3 GiB is headroom rather
-#: than a squeeze. A container that exceeds it is killed on its own and the run
-#: reports which one, which is the behaviour worth having.
-CONTAINER_MEMORY = "3g"
+#: Choosing the concurrency then costs memory rather than being free, which is
+#: the property that was missing on 2026-09-17: nothing about `--shards 8`
+#: looked expensive when it was typed.
+MEMORY_BUDGET_GIB = 12.0
+
+#: Measured floor. An SRM extractor container sits at 1.6 to 2.1 GiB, so below
+#: this it is killed for doing its job rather than for misbehaving.
+MIN_CONTAINER_GIB = 2.5
 
 
 def run(cmd: list[str], timeout: int, what: str) -> subprocess.CompletedProcess:
@@ -127,8 +131,9 @@ def stage(rows: list[dict], corpus: pathlib.Path, dest: pathlib.Path, key: str) 
 
 
 def _extract_one(image: str, extractor: str, images: pathlib.Path,
-                 out_file: pathlib.Path, timeout: int) -> tuple[np.ndarray, list[str]]:
-    """One container over one directory."""
+                 out_file: pathlib.Path, timeout: int,
+                 memory: str = "3g") -> tuple[np.ndarray, list[str]]:
+    """One container over one directory, under a hard memory ceiling."""
     out_file.parent.mkdir(parents=True, exist_ok=True)
     if not out_file.is_file():
         run([
@@ -136,7 +141,7 @@ def _extract_one(image: str, extractor: str, images: pathlib.Path,
             "--network=none", "--cap-drop=ALL",
             "--security-opt", "no-new-privileges",
             "--label", LABEL,
-            "--memory", CONTAINER_MEMORY,
+            "--memory", memory,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{images}:/images:ro",
             "-v", f"{out_file.parent}:/out",
@@ -162,9 +167,9 @@ def _extract_one(image: str, extractor: str, images: pathlib.Path,
 
 
 def extract(image: str, extractor: str, images: pathlib.Path,
-            out_file: pathlib.Path, timeout: int,
-            shards: int = 1) -> tuple[np.ndarray, list[str]]:
-    """Extract features, split across `shards` containers.
+            out_file: pathlib.Path, timeout: int, shards: int = 1,
+            budget_gib: float = MEMORY_BUDGET_GIB) -> tuple[np.ndarray, list[str]]:
+    """Extract features, split across `shards` containers, under one budget.
 
     SRM measured at about 6.6 seconds per 512x512 greyscale image on this
     hardware, which is nearly four hours for a thousand-pair arm in one
@@ -175,8 +180,18 @@ def extract(image: str, extractor: str, images: pathlib.Path,
     directory, because Aletheia's `srm` takes a directory and has no notion of
     a subset. Hard links cost nothing and the extractor only reads.
     """
+    per = budget_gib / max(1, shards)
+    if per < MIN_CONTAINER_GIB:
+        raise RuntimeError(
+            f"{shards} shards under a {budget_gib:g} GiB budget leaves "
+            f"{per:.2f} GiB each, below the {MIN_CONTAINER_GIB} GiB an extractor "
+            f"needs. Either run at most {int(budget_gib // MIN_CONTAINER_GIB)} "
+            f"shards, or raise --memory-budget and say what else on the machine "
+            f"is giving up that memory."
+        )
+    memory = f"{per:.2f}g"
     if shards <= 1:
-        return _extract_one(image, extractor, images, out_file, timeout)
+        return _extract_one(image, extractor, images, out_file, timeout, memory)
 
     files = sorted(p for p in images.iterdir() if p.is_file())
     parts: list[tuple[pathlib.Path, pathlib.Path]] = []
@@ -195,7 +210,7 @@ def extract(image: str, extractor: str, images: pathlib.Path,
     results: list[tuple[np.ndarray, list[str]] | None] = [None] * shards
     with futures.ThreadPoolExecutor(max_workers=shards) as pool:
         submitted = {
-            pool.submit(_extract_one, image, extractor, sub, out, timeout): i
+            pool.submit(_extract_one, image, extractor, sub, out, timeout, memory): i
             for i, (sub, out) in enumerate(parts)
         }
         for fut in futures.as_completed(submitted):
@@ -224,7 +239,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--test-frac", type=float, default=0.3)
     ap.add_argument("--learners", type=int, default=200)
     ap.add_argument("--shards", type=int, default=4,
-                    help="parallel extractor containers")
+                    help="parallel extractor containers. The memory budget is "
+                         "split between them, so more shards means a tighter "
+                         "ceiling on each and concurrency is not free")
+    ap.add_argument("--memory-budget", type=float, default=MEMORY_BUDGET_GIB,
+                    help="GiB the whole run may use, across all containers")
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--timeout", type=int, default=86400,
                     help="per extraction; rich models are slow and this is a whole job")
@@ -285,7 +304,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  staged {staged:>5} new into {name}")
             feats, names = extract(args.image, extractor, images,
                                    work / "features" / f"{name}.fea", args.timeout,
-                                   shards=args.shards)
+                                   shards=args.shards,
+                                   budget_gib=args.memory_budget)
             print(f"  {name}: {feats.shape[0]} vectors of {feats.shape[1]} features "
                   f"({time.monotonic() - started:.0f}s elapsed)")
             sets[name] = feats
