@@ -39,3 +39,22 @@ reference them, do not duplicate them.
   decision on what the unit of diversity is (uploader, camera serial, or subject)
   before it can be implemented, and the v1 corpus is large enough that the effect
   may be small. Measure the concentration on the first full fetch, then decide.
+
+## The feature cache cannot survive a concurrency change (2026-09-17)
+
+`rich_model_baseline.py` names its cached feature files after the shard index,
+`train_clean__s0.fea` through `__s7.fea`, and the shard index also decides which
+images land in which file. So the cache is keyed to the shard count twice over.
+Re-running the same arm with a different `--shards` recomputes everything.
+
+Why that matters more than it sounds: it means a bad concurrency choice cannot
+be cheaply reversed. On 2026-09-17 an 8 shard run turned into 128 Octave workers
+on a 16 core box, consumed all swap, and took a peer's service down with it. By
+the time it was measured, an hour of extraction was already cached at 8 shards,
+and dropping to 3 would have thrown that hour away. The wrong setting had to be
+run to completion because the cache made the right setting expensive.
+
+The fix is to key the cache on the image rather than on the shard: one feature
+file per image, or one file with an index by name, so concurrency becomes a
+runtime decision that costs nothing to change. Then a concurrency mistake is a
+slow hour rather than a committed one.
