@@ -127,6 +127,19 @@ class OutguessEmbedder(DockerTool, Embedder):
     image = "stegobench/outguess:pinned"
     formats = (".jpg", ".jpeg")
 
+    def __init__(self, quality: int = 75) -> None:
+        # Outguess RE-ENCODES the JPEG it writes, at quality 75 by default,
+        # whatever the cover's quality was. Left alone that breaks the pairing:
+        # a quality 95 cover against a quality 75 stego differs in compression
+        # as well as in payload, and a detector reading the difference is
+        # measuring the re-encode. Measured on 119 pairs built that way, both
+        # StegaShield and Stegcore came out at AUC 0.40, BELOW chance, because
+        # the stego half was smoother than its own cover.
+        #
+        # `-p` is passed through to the JPEG handler and sets the quality, which
+        # its own help text does not say. Callers pass the cover's quality.
+        self.quality = quality
+
     @property
     def id(self) -> str:
         return "outguess"
@@ -151,7 +164,11 @@ class OutguessEmbedder(DockerTool, Embedder):
             name = f"cover{cover.suffix}"
             shutil.copy2(cover, tmp / name)
             (tmp / "probe.bin").write_bytes(b"\0")
-            result = self.run_in(tmp, ["-d", "probe.bin", name, "probe-out.jpg"])
+            # Measured at the quality we will actually write at: a higher
+            # quality keeps more usable coefficients, so capacity at 75 is not
+            # capacity at 95.
+            result = self.run_in(tmp, ["-p", str(self.quality),
+                                       "-d", "probe.bin", name, "probe-out.jpg"])
         text = ((result.stderr or b"") + (result.stdout or b"")).decode(
             "utf-8", "replace")
         for line in text.splitlines():
@@ -182,7 +199,7 @@ class OutguessEmbedder(DockerTool, Embedder):
         with temp_workdir() as tmp:
             tmp = pathlib.Path(tmp)
             s = stage(tmp, cover, payload)
-            args = ["-d", s.payload]
+            args = ["-p", str(self.quality), "-d", s.payload]
             if password:
                 args = ["-k", password] + args
             result = self.run_in(tmp, args + [s.cover, s.out])
@@ -196,6 +213,7 @@ class OutguessEmbedder(DockerTool, Embedder):
             shutil.copy2(produced, stego)
         return EmbedResult(stego, len(payload), self.id,
                            {"statistics_corrected": True,
+                            "reencoded_at_quality": self.quality,
                             "password": bool(password)})
 
 

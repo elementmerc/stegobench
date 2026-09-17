@@ -126,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     chosen = rng.sample(pool, min(args.count, len(pool)))
     print(f"{len(chosen)} covers sampled from {len(pool)} available")
 
-    embedders = [SteghideEmbedder(), OutguessEmbedder()]
+    # Outguess re-encodes; it must do so at the quality both halves share.
+    embedders = [SteghideEmbedder(), OutguessEmbedder(quality=args.quality)]
     for e in embedders:
         if not e.available():
             print(f"{e.id} is not available here; the arm would be a gap in the "
