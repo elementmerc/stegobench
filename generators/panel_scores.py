@@ -221,19 +221,44 @@ def zsteg_file(image: str, path: pathlib.Path, timeout: int,
                budget_gib: float = MEMORY_BUDGET_GIB) -> bool:
     """Did zsteg report anything? A verdict, deliberately, not a score.
 
-    zsteg does not estimate a payload. It hunts for readable content, so the
-    only honest reduction is whether it found something, and an AUC computed
-    from a boolean would be a category error.
+    zsteg does not estimate a payload. It hunts for readable content and for
+    structure that should not be there, so the only honest reduction is whether
+    it found something, and an AUC computed from its output would be a category
+    error.
+
+    TWO WAYS THIS READ WRONG, BOTH FOUND BY LOOKING AT REAL OUTPUT
+    ---------------------------------------------------------------
+    The first version matched only `text:` and `file:`, which are the markers on
+    a payload recovered from a bit plane. zsteg's other finding shape is a
+    bracketed note about the container:
+
+        [?] 4122 bytes of extra data after image end (IEND), offset = 0x121bb
+
+    That is exactly the appended-data arm, detected correctly, and it was being
+    scored as "found nothing" on all 200 files. The report came within a draft
+    of saying no free tool catches appended data, on the strength of a parser
+    that was not looking for the answer.
+
+    The second is that on a JPEG zsteg prints that line and THEN dies with a
+    NoMethodError, because it is a PNG and BMP tool being handed a JPEG. The
+    call does not check the exit status, so the crash was invisible too. The
+    finding is still real and still on stdout, so it is kept, but the crash is
+    reported rather than swallowed.
     """
     proc = run([
         "docker", "run", "--rm", *HARDENING, *memory_flag(1, budget_gib),
         "-v", f"{path.parent}:/data:ro", image, f"/data/{path.name}",
     ], timeout=timeout, what=f"zsteg on {path.name}", check=False)
+
     for line in proc.stdout.splitlines():
         stripped = line.strip()
-        # Progress output is a run of "b1,r,lsb,xy .." with no finding attached;
-        # a real hit carries a payload description after the channel spec.
-        if stripped and ".. " in line and "text:" in line or "file:" in line:
+        if not stripped:
+            continue
+        # A bracketed note is a structural finding: extra data, an odd chunk,
+        # a size mismatch. A `text:` or `file:` marker is a recovered payload.
+        if stripped.startswith("[?]"):
+            return True
+        if "text:" in stripped or "file:" in stripped:
             return True
     return False
 
