@@ -133,6 +133,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stegcore", default=None,
                     help="path to the stegcore binary; omit to skip that column")
     ap.add_argument("--limit", type=int, default=0, help="0 means every pair")
+    ap.add_argument("--shards", type=int, default=1,
+                    help="split the work across this many parallel scorers")
+    ap.add_argument("--shard", type=int, default=0, help="which shard this is")
+    ap.add_argument("--report-only", action="store_true",
+                    help="skip scoring and just read what is already recorded")
     args = ap.parse_args(argv)
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -170,7 +175,16 @@ def main(argv: list[str] | None = None) -> int:
         binary = None
 
     todo = [r for r in wanted if r not in scored]
-    print(f"{len(wanted)} unique files, {len(todo)} left to score")
+    if args.shards > 1:
+        # Partitioned by position so the shards never touch the same file. They
+        # all append to one scores file, which is safe for the same reason the
+        # manifest is: every line is a few hundred bytes and an O_APPEND write
+        # below PIPE_BUF is atomic on Linux.
+        todo = [r for i, r in enumerate(todo) if i % args.shards == args.shard]
+        print(f"shard {args.shard} of {args.shards}")
+    if args.report_only:
+        todo = []
+    print(f"{len(wanted)} unique files, {len(todo)} for this scorer")
     last_beat = time.monotonic()
     failures = 0
 

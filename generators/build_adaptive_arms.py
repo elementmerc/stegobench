@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import json
 import pathlib
 import random
@@ -94,9 +95,23 @@ JPEG_SCHEMES = ("juniward", "uerd")
 DEFAULT_RATES = (0.4, 0.2, 0.1, 0.05)
 
 
+def _scratch(dest: pathlib.Path, suffix: str) -> pathlib.Path:
+    """A temp path unique to this process.
+
+    Write-then-rename is only atomic if the temp name is not shared. Six workers
+    split by scheme still race to create the same greyscale cover, and with a
+    fixed `.part` name the first rename removes the file the second is about to
+    rename, which fails with a bare FileNotFoundError naming a path that plainly
+    exists a moment earlier. The pid makes each writer's scratch file its own;
+    the rename onto the final name stays atomic and last writer wins with
+    identical content.
+    """
+    return dest.with_suffix(f".{os.getpid()}{suffix}")
+
+
 def write_png(array: np.ndarray, dest: pathlib.Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_suffix(".png.part")
+    part = _scratch(dest, ".png.part")
     Image.fromarray(array.astype(np.uint8), mode="L").save(part, format="PNG")
     part.replace(dest)
 
@@ -111,7 +126,7 @@ def jpeg_passthrough(source: pathlib.Path, dest: pathlib.Path) -> None:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     im = jpeglib.read_dct(str(source))
-    part = dest.with_suffix(".jpg.part")
+    part = _scratch(dest, ".jpg.part")
     im.write_dct(str(part))
     part.replace(dest)
 
@@ -286,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                             continue
                         stego.parent.mkdir(parents=True, exist_ok=True)
                         im.Y = y1
-                        part = stego.with_suffix(".jpg.part")
+                        part = _scratch(stego, ".jpg.part")
                         im.write_dct(str(part))
                         part.replace(stego)
                         im.Y = y0
