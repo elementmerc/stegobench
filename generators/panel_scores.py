@@ -250,7 +250,18 @@ def zsteg_file(image: str, path: pathlib.Path, timeout: int,
         "-v", f"{path.parent}:/data:ro", image, f"/data/{path.name}",
     ], timeout=timeout, what=f"zsteg on {path.name}", check=False)
 
-    for line in proc.stdout.splitlines():
+    # BOTH streams, and that is the third layer of this same bug rather than
+    # belt and braces. On a JPEG zsteg writes NOTHING to stdout: the finding and
+    # the crash both go to stderr, so a scanner reading only stdout sees an empty
+    # string and reports "found nothing" with complete confidence.
+    #
+    #     stdout:  (empty)
+    #     stderr:  [?] 4122 bytes of extra data after image end (IEND) ...
+    #
+    # The first version had the wrong pattern, the second had the right pattern
+    # on the wrong stream, and both returned a clean False that looked like a
+    # measurement.
+    for line in (proc.stdout + "\n" + proc.stderr).splitlines():
         stripped = line.strip()
         if not stripped:
             continue
