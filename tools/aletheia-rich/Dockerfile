@@ -38,12 +38,13 @@
 # redistributed.** The licences come with them, in the same directory, so
 # anybody inspecting the image can read the terms that apply to what they are
 # running.
-FROM python:3.11-slim
-
-ARG ALETHEIA_REF=df4fc2e51352ddafeafd033d0f77efd28ecb8c77
-# Pinned by commit, not by branch, because a benchmark that moves under you is
-# not a benchmark. This is the commit the classical image resolved to on
-# 2026-09-17.
+# Built ON TOP of the lean image rather than from the base, because the Aletheia
+# clone is the slowest step by a wide margin (over thirty minutes from this
+# build box, twice) and the lean image already has it, at the same pinned
+# commit. Layering also guarantees the two images cannot drift to different
+# revisions of the detector, which would make the classical panel and the rich
+# baseline incomparable in a way nothing would report.
+FROM stegobench/aletheia:pinned
 
 ARG RESOURCES_REF=main
 
@@ -57,16 +58,26 @@ ARG RESOURCES_REF=main
 # may not run in this image. SRM is the one this evaluation turns on and it
 # works on pixels, so it needs no mex at all. The build below asserts SRM
 # specifically for that reason.
+#
+# The three Octave Forge packages are not optional and are not part of `octave`.
+# `octave_interface.py:169` emits `pkg load image; pkg load signal; pkg load nan`
+# into every extraction, and without them Octave exits before writing its output.
+# Aletheia then reports "Cannot extract feactures from <file>" and carries on to
+# the next image, so a run against a whole corpus completes, produces nothing,
+# and never returns a non-zero status. That is the failure mode this image is
+# built to make impossible, and it is why the smoke test at the end exists.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        git build-essential libjpeg-dev zlib1g-dev libmagic1 \
-       octave \
+       octave octave-image octave-signal octave-nan \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/daniellerch/aletheia /opt/aletheia \
-    && cd /opt/aletheia \
-    && git checkout "${ALETHEIA_REF}" \
-    && git rev-parse HEAD > /opt/aletheia/.pinned-commit
+# No clone: /opt/aletheia comes from the base image, at the commit recorded in
+# its own .pinned-commit. Assert it is there rather than assume, because a
+# rebuild against a differently named base would otherwise fail much later and
+# much less clearly.
+RUN test -f /opt/aletheia/aletheia.py \
+    && echo "inherited aletheia at $(cat /opt/aletheia/.pinned-commit)"
 
 # hdf5storage is what Ensemble4Stego writes its feature matrices with, and
 # scikit-learn is imported by the e4s entry point. Both are absent from the lean
@@ -100,6 +111,26 @@ RUN if [ -d /opt/aletheia/aletheia-cache/octave/code ]; then \
     && test -f /opt/aletheia/aletheia-cache/octave/ensemble_training.m \
     && octave -q --no-gui --eval "disp('octave ok')" \
     && echo "staged: SRM, DCTR, ensemble_training"
+
+# Extract SRM from one real image at build time and refuse the image if it does
+# not produce a feature vector.
+#
+# This is here because the alternative was measured. Aletheia catches a failed
+# extraction per image, prints "Cannot extract feactures", and continues, so a
+# broken image still exits zero on a corpus of any size and writes an empty
+# feature file. The first run against 2,000 images looked like it worked and had
+# produced nothing, and the cause was three missing Octave packages rather than
+# anything about the corpus. A build-time smoke test turns that into a failure
+# at the only point where it is cheap to read.
+RUN python3 -c "import numpy; from PIL import Image; \
+      Image.fromarray((numpy.random.default_rng(0).integers(0,256,(256,256))).astype('uint8'), 'L').save('/tmp/smoke.png')" \
+    && python3 /opt/aletheia/aletheia.py srm /tmp/smoke.png /tmp/smoke.fea \
+    && test -s /tmp/smoke.fea \
+    && python3 -c "import numpy,sys; \
+       f=numpy.loadtxt('/tmp/smoke.fea'); \
+       print('SRM smoke test:', f.shape, 'features'); \
+       sys.exit(0 if f.size > 1000 else 1)" \
+    && rm -f /tmp/smoke.png /tmp/smoke.fea /tmp/smoke.fea.label
 
 WORKDIR /data
 ENTRYPOINT ["python3", "/opt/aletheia/aletheia.py"]
