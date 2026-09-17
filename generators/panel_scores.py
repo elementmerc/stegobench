@@ -126,7 +126,8 @@ def run(cmd: list[str], timeout: int, what: str, check: bool = True):
 
 
 def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
-                 shards: int = 1) -> dict[str, dict]:
+                 shards: int = 1,
+                 budget_gib: float = MEMORY_BUDGET_GIB) -> dict[str, dict]:
     """SPA and RS over a whole directory, split across `shards` containers.
 
     One container per image would spend a second of startup on every image, and
@@ -136,7 +137,7 @@ def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
     The threads here only wait on subprocesses, so the interpreter lock is
     irrelevant and the parallelism is real.
     """
-    mem = memory_flag(shards)
+    mem = memory_flag(shards, budget_gib)
 
     def one(shard: int) -> str:
         cmd = [
@@ -174,7 +175,8 @@ def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
 
 
 def stegexpose_dir(image: str, directory: pathlib.Path, scratch: pathlib.Path,
-                   timeout: int) -> dict[str, float]:
+                   timeout: int,
+                   budget_gib: float = MEMORY_BUDGET_GIB) -> dict[str, float]:
     """The fusion score per file.
 
     StegExpose writes its CSV into the directory it was given, so the images are
@@ -195,7 +197,7 @@ def stegexpose_dir(image: str, directory: pathlib.Path, scratch: pathlib.Path,
     if csv.exists():
         csv.unlink()
     run([
-        "docker", "run", "--rm", *HARDENING, *memory_flag(1),
+        "docker", "run", "--rm", *HARDENING, *memory_flag(1, budget_gib),
         "--user", f"{os.getuid()}:{os.getgid()}",
         "-v", f"{scratch}:/data", image,
         "/data", "default", "0.2", "/data/stegexpose.csv",
@@ -215,7 +217,8 @@ def stegexpose_dir(image: str, directory: pathlib.Path, scratch: pathlib.Path,
     return scores
 
 
-def zsteg_file(image: str, path: pathlib.Path, timeout: int) -> bool:
+def zsteg_file(image: str, path: pathlib.Path, timeout: int,
+               budget_gib: float = MEMORY_BUDGET_GIB) -> bool:
     """Did zsteg report anything? A verdict, deliberately, not a score.
 
     zsteg does not estimate a payload. It hunts for readable content, so the
@@ -223,7 +226,7 @@ def zsteg_file(image: str, path: pathlib.Path, timeout: int) -> bool:
     from a boolean would be a category error.
     """
     proc = run([
-        "docker", "run", "--rm", *HARDENING, *memory_flag(1),
+        "docker", "run", "--rm", *HARDENING, *memory_flag(1, budget_gib),
         "-v", f"{path.parent}:/data:ro", image, f"/data/{path.name}",
     ], timeout=timeout, what=f"zsteg on {path.name}", check=False)
     for line in proc.stdout.splitlines():
@@ -246,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--zsteg-arms", default="",
                     help="comma separated arms to run zsteg on; it is slow and "
                          "only meaningful on structural arms")
+    ap.add_argument("--memory-budget", type=float, default=MEMORY_BUDGET_GIB,
+                    help="GiB the whole panel may use, across all its "
+                         "containers. Lower it when something else on the box "
+                         "needs the memory; the per container ceiling follows")
     ap.add_argument("--shards", type=int, default=4,
                     help="parallel Aletheia containers per directory. Each one\n                         starts its own worker pool inside, so this multiplies:\n                         12 here put a 16 core box at a load average of 76")
     ap.add_argument("--timeout", type=int, default=14400)
@@ -296,14 +303,15 @@ def main(argv: list[str] | None = None) -> int:
                       f"({time.monotonic() - started:.0f}s)")
                 try:
                     alet = aletheia_dir(args.aletheia_image, directory, args.timeout,
-                                        shards=args.shards)
+                                        shards=args.shards,
+                                        budget_gib=args.memory_budget)
                 except RuntimeError as e:
                     print(f"  aletheia: {e}", file=sys.stderr)
                     alet = {}
                 try:
                     expose = stegexpose_dir(args.stegexpose_image, directory,
                                             scratch_root / d.replace("/", "_"),
-                                            args.timeout)
+                                            args.timeout, args.memory_budget)
                 except RuntimeError as e:
                     print(f"  stegexpose: {e}", file=sys.stderr)
                     expose = {}
@@ -333,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
                         rel = row[key]
                         if scored.get(rel, {}).get("zsteg") is not None:
                             continue
-                        found = zsteg_file(args.zsteg_image, corpus / rel, 300)
+                        found = zsteg_file(args.zsteg_image, corpus / rel, 300,
+                                           args.memory_budget)
                         rec = dict(scored.get(rel, {"file": rel}))
                         rec["zsteg"] = found
                         f.write(json.dumps(rec) + "\n")
