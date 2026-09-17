@@ -1,0 +1,17 @@
+{
+  "arm": "suniward/0400",
+  "domain": "spatial",
+  "extractor": "srm",
+  "classifier": "FLD ensemble, bagged Fisher discriminants on random subspaces",
+  "features": 34671,
+  "train_pairs": 700,
+  "test_pairs": 300,
+  "d_sub": 200,
+  "oob_error": 0.1829,
+  "auc": 0.9634,
+  "tpr_at_1pct_fpr": 0.4133,
+  "tpr_at_10pct_fpr": 0.9033,
+  "accuracy": 0.8983,
+  "seed": 20260917,
+  "elapsed_seconds": 10754.8
+}
