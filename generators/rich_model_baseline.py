@@ -52,11 +52,13 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import time
 
 import numpy as np
+from concurrent import futures
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from fld_ensemble import FldEnsemble  # noqa: E402
@@ -67,6 +69,10 @@ from score_arms import roc_auc, tpr_at_fpr  # noqa: E402
 #: measures a weaker version of the signal, which would understate the baseline
 #: and therefore overstate our conclusion.
 EXTRACTOR_FOR = {"spatial": "srm", "jpeg": "dctr"}
+
+#: Label on every container this script starts, so a stopped run can take
+#: its containers with it. Killing the parent does not kill them.
+LABEL = "stegobench-rich"
 
 
 def run(cmd: list[str], timeout: int, what: str) -> subprocess.CompletedProcess:
@@ -107,15 +113,16 @@ def stage(rows: list[dict], corpus: pathlib.Path, dest: pathlib.Path, key: str) 
     return n
 
 
-def extract(image: str, extractor: str, images: pathlib.Path,
-            out_file: pathlib.Path, timeout: int) -> tuple[np.ndarray, list[str]]:
-    """Run the extractor in the container and read back features aligned to names."""
+def _extract_one(image: str, extractor: str, images: pathlib.Path,
+                 out_file: pathlib.Path, timeout: int) -> tuple[np.ndarray, list[str]]:
+    """One container over one directory."""
     out_file.parent.mkdir(parents=True, exist_ok=True)
     if not out_file.is_file():
         run([
             "docker", "run", "--rm",
             "--network=none", "--cap-drop=ALL",
             "--security-opt", "no-new-privileges",
+            "--label", LABEL,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{images}:/images:ro",
             "-v", f"{out_file.parent}:/out",
@@ -140,6 +147,57 @@ def extract(image: str, extractor: str, images: pathlib.Path,
     return features, names
 
 
+def extract(image: str, extractor: str, images: pathlib.Path,
+            out_file: pathlib.Path, timeout: int,
+            shards: int = 1) -> tuple[np.ndarray, list[str]]:
+    """Extract features, split across `shards` containers.
+
+    SRM measured at about 6.6 seconds per 512x512 greyscale image on this
+    hardware, which is nearly four hours for a thousand-pair arm in one
+    container. Aletheia parallelises a little inside a run, mostly by amortising
+    Octave's startup, so the rest has to come from running several.
+
+    The split is done by hard linking each shard's files into their own
+    directory, because Aletheia's `srm` takes a directory and has no notion of
+    a subset. Hard links cost nothing and the extractor only reads.
+    """
+    if shards <= 1:
+        return _extract_one(image, extractor, images, out_file, timeout)
+
+    files = sorted(p for p in images.iterdir() if p.is_file())
+    parts: list[tuple[pathlib.Path, pathlib.Path]] = []
+    for s in range(shards):
+        sub = images.parent / f"{images.name}__shard{s}"
+        sub.mkdir(parents=True, exist_ok=True)
+        for f in files[s::shards]:
+            target = sub / f.name
+            if not target.exists():
+                try:
+                    os.link(f, target)
+                except OSError:
+                    shutil.copy2(f, target)
+        parts.append((sub, out_file.with_name(f"{out_file.stem}__s{s}.fea")))
+
+    results: list[tuple[np.ndarray, list[str]] | None] = [None] * shards
+    with futures.ThreadPoolExecutor(max_workers=shards) as pool:
+        submitted = {
+            pool.submit(_extract_one, image, extractor, sub, out, timeout): i
+            for i, (sub, out) in enumerate(parts)
+        }
+        for fut in futures.as_completed(submitted):
+            results[submitted[fut]] = fut.result()
+
+    # Concatenate in shard order so a re-run produces the same matrix. Order
+    # does not affect the classifier, but a benchmark whose intermediate files
+    # differ run to run is one nobody can diff when a number moves.
+    feats = np.vstack([r[0] for r in results if r is not None])
+    names: list[str] = []
+    for r in results:
+        if r is not None:
+            names.extend(r[1])
+    return feats, names
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--corpus", required=True)
@@ -151,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="srm or dctr; default follows the arm's domain")
     ap.add_argument("--test-frac", type=float, default=0.3)
     ap.add_argument("--learners", type=int, default=200)
+    ap.add_argument("--shards", type=int, default=4,
+                    help="parallel extractor containers")
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--timeout", type=int, default=86400,
                     help="per extraction; rich models are slow and this is a whole job")
@@ -210,7 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             staged = stage(split_rows, corpus, images, key)
             print(f"  staged {staged:>5} new into {name}")
             feats, names = extract(args.image, extractor, images,
-                                   work / "features" / f"{name}.fea", args.timeout)
+                                   work / "features" / f"{name}.fea", args.timeout,
+                                   shards=args.shards)
             print(f"  {name}: {feats.shape[0]} vectors of {feats.shape[1]} features "
                   f"({time.monotonic() - started:.0f}s elapsed)")
             sets[name] = feats
@@ -258,5 +319,31 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def reap() -> int:
+    try:
+        listing = subprocess.run(["docker", "ps", "-q", "--filter", f"label={LABEL}"],
+                                 capture_output=True, text=True, timeout=60)
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    ids = [i for i in listing.stdout.split() if i]
+    if ids:
+        try:
+            subprocess.run(["docker", "kill", *ids], capture_output=True, timeout=120)
+        except (subprocess.SubprocessError, OSError):
+            pass
+    return len(ids)
+
+
+def _on_signal(signum, _frame):
+    n = reap()
+    print(f"\nsignal {signum}: stopped {n} container(s)", file=sys.stderr)
+    raise SystemExit(130)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+    try:
+        raise SystemExit(main())
+    finally:
+        reap()
