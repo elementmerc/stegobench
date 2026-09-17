@@ -36,11 +36,61 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
+import os
 import pathlib
 import sys
 import time
 
 VALID = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+#: Set once per worker by the pool initialiser. A module global rather than a
+#: closure because the pool has to pickle what it sends, and the imported
+#: detector functions are not picklable.
+_ROOT: pathlib.Path | None = None
+
+
+def _init_worker(root: pathlib.Path, aletheia_path: str) -> None:
+    global _ROOT
+    _ROOT = root
+    if aletheia_path not in sys.path:
+        sys.path.insert(0, aletheia_path)
+    # Import inside the worker so each process has its own copy. Importing
+    # before the fork works on Linux and breaks on any spawn-based start method,
+    # which is the kind of portability bug that only shows up on someone
+    # else's machine.
+    import aletheialib.attacks  # noqa: F401
+
+
+def _score_one(path: pathlib.Path) -> dict:
+    """SPA and RS for one image. Never raises: one bad file must not end a run."""
+    import numpy as np
+    from imageio.v2 import imread
+    import aletheialib.attacks as attacks
+
+    root = _ROOT
+    name = str(path.relative_to(root)) if root and root.is_dir() else path.name
+    record: dict = {"file": name}
+    try:
+        img = imread(path)
+        # A palette or alpha channel would change the channel count under the
+        # detector and silently alter what is being measured, so the shape is
+        # recorded rather than assumed.
+        channels = 1 if img.ndim == 2 else img.shape[2]
+        record["channels"] = int(channels)
+        for label, fn in (("spa", attacks.spa_image), ("rs", attacks.rs_image)):
+            if img.ndim == 2:
+                value = float(fn(img, None))
+            else:
+                value = max(float(fn(img, c)) for c in range(min(3, channels)))
+            # Both estimators can return a small negative rate on a clean image,
+            # which is meaningful: it is the estimator's noise about zero.
+            # Clamping it here would throw away exactly the spread the
+            # false-positive rate is measured from.
+            record[label] = value if np.isfinite(value) else None
+    except Exception as e:  # noqa: BLE001 - one image, not the run
+        record["error"] = f"{type(e).__name__}: {e}"
+    return record
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default="-", help="JSONL destination, - for stdout")
     ap.add_argument("--aletheia", default="/opt/aletheia",
                     help="where the checkout lives inside the container")
+    ap.add_argument("--shards", type=int, default=1,
+                    help="split the file list across this many scorers")
+    ap.add_argument("--shard", type=int, default=0, help="which shard this is")
     args = ap.parse_args(argv)
 
     # The CLI gets this for free by being run as /opt/aletheia/aletheia.py, which
@@ -57,10 +110,6 @@ def main(argv: list[str] | None = None) -> int:
     # broken image rather than a missing path entry.
     if args.aletheia not in sys.path:
         sys.path.insert(0, args.aletheia)
-
-    import numpy as np
-    from imageio.v2 import imread
-    import aletheialib.attacks as attacks
 
     root = pathlib.Path(args.images)
     if root.is_dir():
@@ -74,36 +123,45 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no images under {root}", file=sys.stderr)
         return 2
 
+    # SPA and RS are pure-Python pixel arithmetic, measured at about 22 seconds
+    # for a three-channel 512x512 image on this hardware, so a corpus of this
+    # size is nearly ten hours in one process and has to be spread out.
+    #
+    # It is spread across CONTAINERS rather than across a pool inside one,
+    # because `rs_image` starts its own worker processes. A pool here makes those
+    # workers daemonic, children of a daemon are forbidden, and every image comes
+    # back with "daemonic processes are not allowed to have children" AFTER spa
+    # has already succeeded, so the record looks half filled rather than failed.
+    # Sharding leaves Aletheia's own parallelism intact and is what the rest of
+    # this harness already does.
+    if args.shards < 1 or not (0 <= args.shard < args.shards):
+        print(f"bad shard {args.shard} of {args.shards}", file=sys.stderr)
+        return 2
+    if args.shards > 1:
+        files = [f for i, f in enumerate(files) if i % args.shards == args.shard]
+        print(f"shard {args.shard} of {args.shards}: {len(files)} images",
+              file=sys.stderr)
+    if not files:
+        return 0
+
+    started = time.monotonic()
+    _init_worker(root, args.aletheia)
+
     sink = sys.stdout if args.out == "-" else open(args.out, "w")
     failures = 0
     last = time.monotonic()
     try:
         for n, path in enumerate(files, 1):
-            record: dict = {"file": str(path.relative_to(root) if root.is_dir() else path.name)}
-            try:
-                img = imread(path)
-                # A palette or alpha channel would change the channel count under
-                # the detector and silently alter what is being measured, so the
-                # shape is recorded rather than assumed.
-                channels = 1 if img.ndim == 2 else img.shape[2]
-                record["channels"] = int(channels)
-                for name, fn in (("spa", attacks.spa_image), ("rs", attacks.rs_image)):
-                    if img.ndim == 2:
-                        value = float(fn(img, None))
-                    else:
-                        value = max(float(fn(img, c)) for c in range(min(3, channels)))
-                    # Both estimators can return a small negative rate on a clean
-                    # image, which is meaningful: it is the estimator's noise
-                    # about zero. Clamping it here would throw away exactly the
-                    # spread the false-positive rate is measured from.
-                    record[name] = value if np.isfinite(value) else None
-            except Exception as e:  # noqa: BLE001 - one image must not end the run
+            record = _score_one(path)
+            if "error" in record:
                 failures += 1
-                record["error"] = f"{type(e).__name__}: {e}"
             sink.write(json.dumps(record) + "\n")
             sink.flush()
             if time.monotonic() - last >= 30:
-                print(f"  ... {n}/{len(files)} scored, {failures} failed", file=sys.stderr)
+                rate = n / max(1e-9, time.monotonic() - started)
+                remaining = (len(files) - n) / rate if rate else 0
+                print(f"  ... {n}/{len(files)} scored, {failures} failed, "
+                      f"~{remaining / 60:.0f} min left", file=sys.stderr)
                 last = time.monotonic()
     finally:
         if sink is not sys.stdout:

@@ -40,7 +40,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent import futures
 import pathlib
+import signal
 import subprocess
 import sys
 import time
@@ -51,10 +53,40 @@ from score_arms import roc_auc, tpr_at_fpr  # noqa: E402
 HERE = pathlib.Path(__file__).resolve().parent
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp"}
 
+#: Every container this script starts carries this label, so they can all be
+#: found and stopped as a group.
+#:
+#: This exists because killing this process does NOT kill them. Measured: the
+#: scorer was stopped mid-run and its twelve containers carried on for as long
+#: as they were left alone, holding the machine at a load average of 76 while
+#: writing to a pipe whose reader had gone. Orphaned work that still costs the
+#: box is worse than work that fails, because nothing reports it.
+LABEL = "stegobench-panel"
+
 HARDENING = [
     "--network=none", "--cap-drop=ALL",
     "--security-opt", "no-new-privileges",
+    "--label", LABEL,
 ]
+
+
+def reap() -> int:
+    """Stop every container this run started. Safe to call more than once."""
+    try:
+        listing = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"label={LABEL}"],
+            capture_output=True, text=True, timeout=60)
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    ids = [i for i in listing.stdout.split() if i]
+    if not ids:
+        return 0
+    try:
+        subprocess.run(["docker", "kill", *ids], capture_output=True,
+                       text=True, timeout=120)
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return len(ids)
 
 
 def run(cmd: list[str], timeout: int, what: str, check: bool = True):
@@ -68,30 +100,49 @@ def run(cmd: list[str], timeout: int, what: str, check: bool = True):
     return proc
 
 
-def aletheia_dir(image: str, directory: pathlib.Path, timeout: int) -> dict[str, dict]:
-    """SPA and RS over a whole directory, in one container start.
+def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
+                 shards: int = 1) -> dict[str, dict]:
+    """SPA and RS over a whole directory, split across `shards` containers.
 
-    One invocation per directory rather than per image: container startup is
-    about a second and dominates the measurement otherwise, which on a corpus
-    this size is hours of nothing.
+    One container per image would spend a second of startup on every image, and
+    one container for the whole directory takes about 22 seconds per image
+    serially. So: a handful of containers, each taking every Nth file.
+
+    The threads here only wait on subprocesses, so the interpreter lock is
+    irrelevant and the parallelism is real.
     """
-    proc = run([
-        "docker", "run", "--rm", *HARDENING,
-        "--user", f"{os.getuid()}:{os.getgid()}",
-        "-v", f"{directory}:/images:ro",
-        "-v", f"{HERE}:/driver:ro",
-        "--entrypoint", "python3", image,
-        "/driver/aletheia_scores.py", "/images",
-    ], timeout=timeout, what=f"aletheia on {directory.name}")
+    def one(shard: int) -> str:
+        cmd = [
+            "docker", "run", "--rm", *HARDENING,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "-v", f"{directory}:/images:ro",
+            "-v", f"{HERE}:/driver:ro",
+            "--entrypoint", "python3", image,
+            "/driver/aletheia_scores.py", "/images",
+        ]
+        if shards > 1:
+            cmd += ["--shards", str(shards), "--shard", str(shard)]
+        return run(cmd, timeout=timeout,
+                   what=f"aletheia shard {shard} on {directory.name}").stdout
+
+    outputs: list[str] = []
+    if shards <= 1:
+        outputs.append(one(0))
+    else:
+        with futures.ThreadPoolExecutor(max_workers=shards) as pool:
+            for text in pool.map(one, range(shards)):
+                outputs.append(text)
+
     out: dict[str, dict] = {}
-    for line in proc.stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        out[rec["file"]] = rec
+    for text in outputs:
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            out[rec["file"]] = rec
     return out
 
 
@@ -168,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--zsteg-arms", default="",
                     help="comma separated arms to run zsteg on; it is slow and "
                          "only meaningful on structural arms")
+    ap.add_argument("--shards", type=int, default=4,
+                    help="parallel Aletheia containers per directory. Each one\n                         starts its own worker pool inside, so this multiplies:\n                         12 here put a 16 core box at a load average of 76")
     ap.add_argument("--timeout", type=int, default=14400)
     ap.add_argument("--report-only", action="store_true")
     args = ap.parse_args(argv)
@@ -215,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{n}/{len(by_dir)}] {d}: {len(rels)} files "
                       f"({time.monotonic() - started:.0f}s)")
                 try:
-                    alet = aletheia_dir(args.aletheia_image, directory, args.timeout)
+                    alet = aletheia_dir(args.aletheia_image, directory, args.timeout,
+                                        shards=args.shards)
                 except RuntimeError as e:
                     print(f"  aletheia: {e}", file=sys.stderr)
                     alet = {}
@@ -317,5 +371,17 @@ def report(rows: list[dict], scored: dict[str, dict]) -> None:
             print(f"{arm:<24} {n:>5}  {hit_s / n:>8.0%} {hit_c / n:>9.0%}")
 
 
+def _on_signal(signum, _frame):
+    """Ctrl+C and SIGTERM must take the containers with them, not leave them."""
+    n = reap()
+    print(f"\nsignal {signum}: stopped {n} container(s)", file=sys.stderr)
+    raise SystemExit(130)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+    try:
+        raise SystemExit(main())
+    finally:
+        reap()
