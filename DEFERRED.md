@@ -58,3 +58,19 @@ The fix is to key the cache on the image rather than on the shard: one feature
 file per image, or one file with an index by name, so concurrency becomes a
 runtime decision that costs nothing to change. Then a concurrency mistake is a
 slow hour rather than a committed one.
+
+## Round 1 era manifests use a different schema (2026-09-17)
+
+`ssprobe/structural`, `ssprobe/payload`, `ssprobe/payload2` and `ssprobe/sweep`
+predate the `arm` / `clean` / `stego` field names the scorers expect. The panel
+now defaults a missing `arm` to the corpus name, but it still requires `clean`
+and `stego` paths and those corpora carry only `source` plus digests.
+
+Nothing is blocked. The PNG appended-data arm would have been a nice second
+data point for zsteg, which crashes on JPEG after reporting its finding and
+would run cleanly on PNG, but the JPEG arm already answers the question at
+100% detection and 0% false positives.
+
+Worth an adapter only if those corpora are needed again. If they are, the honest
+option is a one-off translation script rather than teaching every scorer two
+schemas.
