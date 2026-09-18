@@ -26,3 +26,6 @@ Thumbs.db
 # build/
 __pycache__/
 *.pyc
+
+# Rust build output. The lockfile IS committed (baseline Section 5).
+/target/

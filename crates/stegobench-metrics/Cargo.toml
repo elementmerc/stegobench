@@ -1,0 +1,14 @@
+[package]
+name = "stegobench-metrics"
+description = "ROC AUC, detection at a fixed false-alarm rate, and confusion counts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# No dependencies, deliberately. These are pure functions over two slices, and
+# a metric with a dependency graph is a metric somebody has to audit before
+# they trust a number.
+[dependencies]

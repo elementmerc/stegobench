@@ -1,0 +1,7 @@
+# Pinned, for the same reason Stegcore is: a floating toolchain means a clippy
+# release can turn an untouched branch red, which happened on 2026-09-18.
+# Bumping is a deliberate act with its own commit.
+
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

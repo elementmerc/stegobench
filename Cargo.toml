@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stegobench-core",
+    "crates/stegobench-metrics",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "AGPL-3.0-or-later"
+authors = ["Daniel Iwugo"]
+repository = "https://github.com/elementmerc/stegobench"
+
+[workspace.dependencies]
+# Kept deliberately small. Every entry here runs with our privileges and is
+# reviewed like any other design decision (baseline Section 5). Anything that
+# three lines of our own code would replace does not get added.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+sha2 = "0.10"
+tempfile = "3"
+
+[profile.release]
+# A benchmark that reports a wrong number because of an arithmetic wrap is
+# worse than one that stops, and the harness is IO bound anyway.
+overflow-checks = true
