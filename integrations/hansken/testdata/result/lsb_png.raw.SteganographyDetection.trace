@@ -1,0 +1,24 @@
+{
+  "trace" : {
+    "id" : "0",
+    "name" : "lsb-0.4bpp.png",
+    "path" : "/test-input-trace",
+    "file" : {
+      "extension" : "png",
+      "name" : "lsb-0.4bpp.png"
+    },
+    "picture" : {
+      "misc" : {
+        "stegCalibration" : "thresholds hold 4% combined false positive rate, calibrated 2026-06-14 on Cassavia 2022, BOSSbase 1.01, ALASKA2 (5.6k cover sample)",
+        "stegDetectorsFiring" : "Sample Pair Analysis, RS Analysis, Weighted Stego",
+        "stegRSAnalysis" : "0.449621 (threshold 0.305266)",
+        "stegSamplePairAnalysis" : "0.431448 (threshold 0.376977)",
+        "stegStatistical" : "above threshold",
+        "stegStructural" : "none",
+        "stegWeightedStego" : "0.376633 (threshold 0.194851)"
+      },
+      "height" : 256,
+      "width" : 256
+    }
+  }
+}

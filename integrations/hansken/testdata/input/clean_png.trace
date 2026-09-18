@@ -1,0 +1,13 @@
+{
+  "trace": {
+    "name": "clean.png",
+    "file": {
+      "name": "clean.png",
+      "extension": "png"
+    },
+    "picture": {
+      "width": 256,
+      "height": 256
+    }
+  }
+}

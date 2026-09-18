@@ -1,0 +1,28 @@
+{
+  "trace" : {
+    "id" : "0",
+    "name" : "appended.png",
+    "path" : "/test-input-trace",
+    "file" : {
+      "extension" : "png",
+      "name" : "appended.png"
+    },
+    "picture" : {
+      "misc" : {
+        "stegAppendedBytes" : "4096",
+        "stegAppendedLooksLike" : "text",
+        "stegAppendedOffset" : "34874",
+        "stegCalibration" : "thresholds hold 4% combined false positive rate, calibrated 2026-06-14 on Cassavia 2022, BOSSbase 1.01, ALASKA2 (5.6k cover sample)",
+        "stegRSAnalysis" : "0.015213 (threshold 0.305266)",
+        "stegSamplePairAnalysis" : "0.035714 (threshold 0.376977)",
+        "stegStatistical" : "below threshold",
+        "stegStructural" : "appended data",
+        "stegToolFingerprint" : "appended data after EOF (heuristic match)",
+        "stegToolFingerprintTier" : "heuristic",
+        "stegWeightedStego" : "0.014611 (threshold 0.194851)"
+      },
+      "height" : 256,
+      "width" : 256
+    }
+  }
+}

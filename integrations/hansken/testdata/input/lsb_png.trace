@@ -1,0 +1,13 @@
+{
+  "trace": {
+    "name": "lsb-0.4bpp.png",
+    "file": {
+      "name": "lsb-0.4bpp.png",
+      "extension": "png"
+    },
+    "picture": {
+      "width": 256,
+      "height": 256
+    }
+  }
+}

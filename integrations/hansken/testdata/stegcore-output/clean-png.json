@@ -1,0 +1,307 @@
+{
+  "data": [
+    {
+      "file": "<fixture>",
+      "format": "png",
+      "overall_score": 0.02184589518867039,
+      "tests": [
+        {
+          "confidence": "medium",
+          "detail": "LSB pair distribution shows mild anomaly (score 0.87)",
+          "distribution": [
+            {
+              "expected": 5.0,
+              "label": "0\u201315",
+              "observed": 5.0
+            },
+            {
+              "expected": 1172.0,
+              "label": "16\u201331",
+              "observed": 1172.0
+            },
+            {
+              "expected": 1789.0,
+              "label": "32\u201347",
+              "observed": 1789.0
+            },
+            {
+              "expected": 2442.0,
+              "label": "48\u201363",
+              "observed": 2442.0
+            },
+            {
+              "expected": 4414.0,
+              "label": "64\u201379",
+              "observed": 4414.0
+            },
+            {
+              "expected": 5647.0,
+              "label": "80\u201395",
+              "observed": 5647.0
+            },
+            {
+              "expected": 6833.0,
+              "label": "96\u2013111",
+              "observed": 6833.0
+            },
+            {
+              "expected": 9350.0,
+              "label": "112\u2013127",
+              "observed": 9350.0
+            },
+            {
+              "expected": 9014.0,
+              "label": "128\u2013143",
+              "observed": 9014.0
+            },
+            {
+              "expected": 8548.0,
+              "label": "144\u2013159",
+              "observed": 8548.0
+            },
+            {
+              "expected": 6240.0,
+              "label": "160\u2013175",
+              "observed": 6240.0
+            },
+            {
+              "expected": 4599.0,
+              "label": "176\u2013191",
+              "observed": 4599.0
+            },
+            {
+              "expected": 2431.0,
+              "label": "192\u2013207",
+              "observed": 2431.0
+            },
+            {
+              "expected": 1933.0,
+              "label": "208\u2013223",
+              "observed": 1933.0
+            },
+            {
+              "expected": 1109.0,
+              "label": "224\u2013239",
+              "observed": 1109.0
+            },
+            {
+              "expected": 10.0,
+              "label": "240\u2013255",
+              "observed": 10.0
+            }
+          ],
+          "name": "Chi-Squared",
+          "score": 0.8684210526315791
+        },
+        {
+          "confidence": "low",
+          "detail": "Pair symmetry within natural range (score 0.04)",
+          "distribution": [
+            {
+              "expected": 15.0,
+              "label": "0",
+              "observed": 10.0
+            },
+            {
+              "expected": 3516.0,
+              "label": "16",
+              "observed": 2675.0
+            },
+            {
+              "expected": 5367.0,
+              "label": "32",
+              "observed": 4057.0
+            },
+            {
+              "expected": 7326.0,
+              "label": "48",
+              "observed": 5521.0
+            },
+            {
+              "expected": 13242.0,
+              "label": "64",
+              "observed": 9975.0
+            },
+            {
+              "expected": 16941.0,
+              "label": "80",
+              "observed": 12747.0
+            },
+            {
+              "expected": 20499.0,
+              "label": "96",
+              "observed": 15373.0
+            },
+            {
+              "expected": 28049.0,
+              "label": "112",
+              "observed": 21071.0
+            },
+            {
+              "expected": 27042.0,
+              "label": "128",
+              "observed": 20246.0
+            },
+            {
+              "expected": 25644.0,
+              "label": "144",
+              "observed": 19222.0
+            },
+            {
+              "expected": 18720.0,
+              "label": "160",
+              "observed": 14030.0
+            },
+            {
+              "expected": 13797.0,
+              "label": "176",
+              "observed": 10395.0
+            },
+            {
+              "expected": 7293.0,
+              "label": "192",
+              "observed": 5447.0
+            },
+            {
+              "expected": 5799.0,
+              "label": "208",
+              "observed": 4347.0
+            },
+            {
+              "expected": 3327.0,
+              "label": "224",
+              "observed": 2530.0
+            },
+            {
+              "expected": 30.0,
+              "label": "240",
+              "observed": 20.0
+            }
+          ],
+          "name": "Sample Pair Analysis",
+          "score": 0.03571350609723396
+        },
+        {
+          "confidence": "low",
+          "detail": "R/S groups are symmetric (score 0.02)",
+          "distribution": [
+            {
+              "expected": 0.0,
+              "label": "channel 0 estimate",
+              "observed": 0.015213425662235151
+            },
+            {
+              "expected": 0.0,
+              "label": "channel 1 estimate",
+              "observed": 0.015213425662235151
+            },
+            {
+              "expected": 0.0,
+              "label": "channel 2 estimate",
+              "observed": 0.015213425662235151
+            }
+          ],
+          "name": "RS Analysis",
+          "score": 0.015213425662235151
+        },
+        {
+          "confidence": "medium",
+          "detail": "LSB plane correlation mildly reduced (score 1.00)",
+          "distribution": [
+            {
+              "expected": 0.5,
+              "label": "Blk 0",
+              "observed": 0.49755859375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 1",
+              "observed": 0.507568359375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 2",
+              "observed": 0.50146484375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 3",
+              "observed": 0.506591796875
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 4",
+              "observed": 0.49951171875
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 5",
+              "observed": 0.503662109375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 6",
+              "observed": 0.493896484375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 7",
+              "observed": 0.490234375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 8",
+              "observed": 0.515380859375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 9",
+              "observed": 0.498291015625
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 10",
+              "observed": 0.502197265625
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 11",
+              "observed": 0.486083984375
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 12",
+              "observed": 0.5107421875
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 13",
+              "observed": 0.50634765625
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 14",
+              "observed": 0.51220703125
+            },
+            {
+              "expected": 0.5,
+              "label": "Blk 15",
+              "observed": 0.49072265625
+            }
+          ],
+          "name": "LSB Entropy",
+          "score": 0.9969408421185224
+        },
+        {
+          "confidence": "low",
+          "detail": "Weighted-stego residual within natural range (score 0.01)",
+          "name": "Weighted Stego",
+          "score": 0.014610753806542056
+        }
+      ],
+      "tool_fingerprint": null,
+      "verdict": "clean"
+    }
+  ],
+  "ok": true
+}

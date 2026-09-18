@@ -1,0 +1,20 @@
+{
+  "trace" : {
+    "id" : "0",
+    "name" : "clean.jpg",
+    "path" : "/test-input-trace",
+    "file" : {
+      "extension" : "jpg",
+      "name" : "clean.jpg"
+    },
+    "picture" : {
+      "misc" : {
+        "stegCalibration" : "thresholds hold 4% combined false positive rate, calibrated 2026-06-14 on Cassavia 2022, BOSSbase 1.01, ALASKA2 (5.6k cover sample)",
+        "stegStatistical" : "not assessed: the calibrated detectors are validated for spatial formats and this is jpg",
+        "stegStructural" : "none"
+      },
+      "height" : 256,
+      "width" : 256
+    }
+  }
+}
