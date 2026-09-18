@@ -95,6 +95,8 @@ from PIL import Image
 import cover_quality
 import provenance
 from dedup import DedupError, DedupStore, fingerprint_bytes
+from manifest_repair import (attribution_for, capture_class, stable_split,
+                             undouble, LICENCE_URLS)
 
 API = "https://commons.wikimedia.org/w/api.php"
 UA = "stegobench/0.1 (steganalysis research corpus; https://github.com/elementmerc/stegobench)"
@@ -160,7 +162,14 @@ def fetch_bytes(url: str, retries: int = 3) -> bytes:
 
 
 def strip_html(value: str) -> str:
-    """Commons returns artist and credit as HTML fragments. Keep the text."""
+    """Commons returns artist and credit as HTML fragments. Keep the text.
+
+    The result is passed through `undouble` because Commons embeds a hidden
+    microformat copy of the same text inside the fragment, and a tag stripper
+    concatenates both. That produced 96 rows reading "Unknown authorUnknown
+    author" in the 10,000 cover corpus, corrupting exactly the field a CC BY
+    user has to rely on. Found by a hostile review on 2026-09-18.
+    """
     out, depth = [], 0
     for ch in value or "":
         if ch == "<":
@@ -169,7 +178,7 @@ def strip_html(value: str) -> str:
             depth = max(0, depth - 1)
         elif depth == 0:
             out.append(ch)
-    return " ".join("".join(out).split())
+    return undouble(" ".join("".join(out).split()))
 
 
 def centre_crop(img: Image.Image, size: int) -> Image.Image:
@@ -485,6 +494,11 @@ def main() -> int:
                          "Sensor noise roughly doubles per stop and dominates "
                          "detection, so a corpus that is nearly all base ISO "
                          "measures one noise regime and calls it steganalysis")
+    ap.add_argument("--split-salt", default="pentimento-v1",
+                    help="fixed and recorded. Changing it after publication "
+                         "reassigns every cover's train/test split, which "
+                         "silently invalidates every result built on the corpus")
+    ap.add_argument("--test-fraction", type=float, default=0.2)
     ap.add_argument("--dedup-db", default=None,
                     help="path to the shared dedup store. Without it this fetcher "
                          "cannot tell that a cover already arrived from another "
@@ -696,7 +710,7 @@ def main() -> int:
                 part.write_bytes(payload)
                 part.replace(path)
 
-                mf.write(json.dumps({
+                record = {
                     "file": name,
                     "pageid": page["pageid"],
                     "title": page["title"],
@@ -722,7 +736,21 @@ def main() -> int:
                     "mode": cropped.mode,
                     "quality": quality.as_dict(),
                     "sha256": digest,
-                }) + "\n")
+                }
+                # Fields a downstream user has to act on, derived here so they
+                # cannot drift from the row they describe. `tier_order` is
+                # deliberately NOT among them: a tier is a prefix of an ordering
+                # over the whole corpus, which no single fetch can know, so
+                # manifest_repair.py assigns it once the set is complete.
+                record["licence_url"] = LICENCE_URLS.get((lic or "").strip())
+                record["capture_class"], record["capture_class_basis"] = \
+                    capture_class(record)
+                record["attribution"], record["attribution_required"] = \
+                    attribution_for(record)
+                record["split"] = stable_split(record, args.split_salt,
+                                               args.test_fraction)
+                record["split_salt"] = args.split_salt
+                mf.write(json.dumps(record) + "\n")
                 mf.flush()
                 caps.record(uploader, camera)
                 iso_quota.record(band)
