@@ -24,5 +24,5 @@ Thumbs.db
 # node_modules/
 # dist/
 # build/
-# __pycache__/
-# *.pyc
+__pycache__/
+*.pyc
