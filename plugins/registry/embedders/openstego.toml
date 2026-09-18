@@ -7,7 +7,7 @@ notes = "PNG, LSB with an optional random seed."
 [image]
 reference = "stegobench/openstego@sha256:c8be427da41a1f0389762ee9c50ac27b7dc7ff14013d2dc83b361925da722ee2"
 size_mb = 911
-bundled = true
+bundled = false
 
 [emits]
 output = "score"

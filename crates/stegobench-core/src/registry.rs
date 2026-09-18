@@ -29,6 +29,17 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// The size at or below which a tool ships inside the default image.
+///
+/// Operator's rule, 2026-09-18. It falls in a real gap in the measured data
+/// rather than being a round number picked for looking tidy: the tools sit at
+/// 118, 120, 287 and 512 MB, then jump to 836, 911, 1250, 1410, 8340 and 9090.
+/// Nothing is near 750, so the line does not have to be argued about twice.
+///
+/// `bundled` is checked against this rather than set by hand, because a flag a
+/// human maintains beside a number a machine measures drifts from it.
+pub const BUNDLE_THRESHOLD_MB: u64 = 750;
+
 /// A registered tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -183,6 +194,11 @@ impl Image {
 pub struct Binary {
     /// Argv. The first element is looked up on PATH unless it is absolute.
     pub command: Vec<String>,
+    /// Size of the executable, for the toolkit image budget. A binary is
+    /// always bundled: Stegcore's release build is 8.6 MB against a default
+    /// image measured in hundreds, so the question does not arise.
+    #[serde(default)]
+    pub size_mb: Option<u64>,
     /// Arguments that make it print its version, so a run can record what it
     /// actually invoked rather than what was installed when this was written.
     #[serde(default)]
@@ -302,6 +318,22 @@ impl Entry {
                      which build it invoked"
                         .into(),
                 );
+            }
+        }
+
+        // The bundling flag is derived, not decided. Letting it be set freely
+        // would mean the default image's contents drift from the sizes that
+        // justify them, and nobody would notice until a pull took nine minutes.
+        if let Some(img) = &self.image {
+            if let Some(size) = img.size_mb {
+                let should = size <= BUNDLE_THRESHOLD_MB;
+                if img.bundled != should {
+                    bad.push(format!(
+                        "bundled is {} but the image is {} MB, and the rule is \
+                         bundled at or below {} MB",
+                        img.bundled, size, BUNDLE_THRESHOLD_MB
+                    ));
+                }
             }
         }
 
@@ -561,5 +593,56 @@ mod preflight_tests {
     fn an_image_with_no_declared_size_is_refused_rather_than_pulled_blind() {
         let e = img(None).pull_preflight("mystery", false, true, 999_999).unwrap_err();
         assert!(e.to_string().contains("declares no size"));
+    }
+}
+
+#[cfg(test)]
+mod bundling_tests {
+    use super::*;
+
+    fn entry_with(size: u64, bundled: bool) -> Entry {
+        let mut e: Entry = toml::from_str(
+            r#"name = "x"
+kind = "detector"
+licence = "MIT"
+[selftest]
+must_detect = "a.png"
+must_clear = "b.png"
+"#,
+        )
+        .unwrap();
+        e.image = Some(Image {
+            reference: "x@sha256:a".into(),
+            needs_network: false,
+            size_mb: Some(size),
+            bundled,
+        });
+        e
+    }
+
+    #[test]
+    fn a_small_tool_must_be_bundled() {
+        assert_eq!(entry_with(512, true).validate(), Ok(()));
+        assert!(entry_with(512, false).validate().is_err());
+    }
+
+    #[test]
+    fn a_large_tool_must_not_be() {
+        // openstego at 911 MB and stegosuite at 836 MB were both bundled until
+        // the rule was written down, which is exactly the drift this prevents.
+        assert_eq!(entry_with(911, false).validate(), Ok(()));
+        assert!(entry_with(911, true).validate().is_err());
+    }
+
+    #[test]
+    fn the_boundary_is_inclusive_and_stated() {
+        assert_eq!(entry_with(BUNDLE_THRESHOLD_MB, true).validate(), Ok(()));
+        assert_eq!(entry_with(BUNDLE_THRESHOLD_MB + 1, false).validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_refusal_names_both_numbers_so_it_can_be_acted_on() {
+        let e = entry_with(836, true).validate().unwrap_err();
+        assert!(e[0].contains("836") && e[0].contains("750"), "got: {:?}", e[0]);
     }
 }

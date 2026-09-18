@@ -6,7 +6,7 @@ maintainer = "third_party"
 [image]
 reference = "stegobench/stegosuite@sha256:f3d9110af92cf4eea396a9a8b4aaa61bc67160e2f316b1db36f57f9b9f216906"
 size_mb = 836
-bundled = true
+bundled = false
 
 [emits]
 output = "score"

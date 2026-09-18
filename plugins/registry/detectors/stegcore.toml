@@ -21,6 +21,9 @@ notes = "Strong on spatial LSB and structural fingerprints; weak at low payload;
 
 [binary]
 command = ["stegcore", "analyse", "--json"]
+# 8.6 MB, measured from a release build 2026-09-18. Bundled without
+# question: a binary this size is free against an image measured in hundreds.
+size_mb = 9
 version_args = ["--version"]
 
 [emits]
