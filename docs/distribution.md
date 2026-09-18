@@ -3,6 +3,37 @@
 Two decisions live here: what sizes the corpus ships in, and where it is hosted.
 Both were settled on 2026-09-16.
 
+## What this corpus is, stated before anything else
+
+**Pentimento is a JPEG-decompressed spatial corpus. It is not a never-compressed
+one, and it is not comparable to BOSSbase.**
+
+Every one of the 10,000 covers was a JPEG before we cropped it. The manifest has
+always said so on every row (`original_mime: image/jpeg`, `pristine: false`,
+10,000 of 10,000), and an earlier version of this document claimed BOSSbase
+comparability anyway. That claim was false and it is gone.
+
+The consequence is concrete rather than theoretical. The 8x8 JPEG block lattice
+survives decompression and is recoverable from the pixels: measured across a
+random sample, the block phase can be predicted exactly from the `crop_box` this
+manifest publishes, in 7 cases out of 8. The least significant bit plane is
+therefore a function of quantised DCT coefficients rather than of sensor noise,
+and on the two thirds of covers with chroma subsampling, two of three channels
+are upsampler output.
+
+**What that means for a user.** Thresholds calibrated here will not transfer
+unchanged to never-compressed covers. This project has already measured that
+exact domain shift once, when thresholds set on never-JPEG corpora leaked around
+22% false positives against JPEG-decompressed ALASKA2. A corpus of 10,000 more
+JPEG-decompressed covers does not fix that; it is the other side of it.
+
+**Why it is still worth publishing.** Almost all real imagery is JPEG at some
+point, so this is the realistic regime rather than the laboratory one, and no
+corpus of this size offers it with verified per-file licensing and this
+diversity. It is a different contribution from BOSSbase, not a replacement for
+it. A never-compressed arm, drawn from Commons TIFF and PNG originals, is worth
+building and is not in version 1.
+
 ## Tiers, and why the nesting is the load-bearing part
 
 Almost nobody needs the whole corpus. A developer wiring a detector into a
@@ -11,12 +42,12 @@ sane; a researcher training a network wants everything. Shipping only the second
 means the first downloads a terabyte to run a smoke test, and most of them
 simply will not.
 
-| Tier | Covers | Approximate size | Intended reader |
+| Tier | Covers | Size (covers only / with stego arms) | Intended reader |
 |---|---|---|---|
-| **Nano** | 200 | ~1 GB | Continuous integration and smoke tests. Downloads in seconds |
-| **Lite** | 1,000 | ~20 GB | A developer checking their integration against real data |
-| **Core** | 10,000 | ~107 GB | **Version 1.** The publishable corpus, comparable to BOSSbase by construction |
-| **Full** | 100,000 | ~1.1 TB | Training. The tier that needs sponsored storage |
+| **Nano** | 200 | 64 MB / ~1 GB | Continuous integration and smoke tests. Downloads in seconds |
+| **Lite** | 1,000 | 310 MB / ~20 GB | A developer checking their integration against real data |
+| **Core** | 10,000 | 3.1 GB covers, ~107 GB with stego arms | **Version 1.** The publishable corpus |
+| **Full** | 100,000 | 31 GB / ~1.1 TB | Training. The tier that needs sponsored storage |
 
 ### The requirement that makes tiers safe
 
@@ -44,6 +75,29 @@ So, concretely:
   unchanged against Full and only the numbers move.
 - The manifest of a smaller tier is a strict subset of the larger one's, line for
   line, so a checksum comparison proves the nesting rather than asserting it.
+
+### How it is implemented, and what each field guarantees
+
+These were described here before they existed. A hostile review on 2026-09-18
+found the manifest carried neither field, so the whole guarantee above was
+unbacked prose. Both are now written by `generators/manifest_repair.py`, and the
+fetcher emits `split` directly.
+
+| Field | Derived from | What it survives |
+|---|---|---|
+| `split` | SHA-256 of the cover's own Commons content hash plus a fixed salt | The corpus growing, being reordered, or being rebuilt. No existing assignment ever moves |
+| `tier_order` | Assigned once over the covers present, recorded, and appended to thereafter | New covers arriving. They take positions after the existing ones rather than interleaving |
+| `split_salt` | Recorded on every row | Somebody changing the salt later without noticing what it invalidates |
+
+The ordering is append-stable rather than a hash sort, and that is the whole
+point. A hash sort reshuffles every position each time a cover is added, so
+Nano's first 200 would be a different 200 in every release, and a prefix that
+stops being a prefix is worse than having no tiers at all.
+
+Current assignment over the 10,000 covers: 8,032 train and 1,968 test, with
+Nano at 16.5% test and Lite at 19.0%. Those fractions differ slightly by tier
+because the split is a property of the cover rather than of the tier, which is
+exactly the property being bought.
 
 Nobody else tiers a steganalysis corpus. Done properly it is a differentiator;
 done carelessly it is a way to poison every result built on the dataset.
@@ -95,3 +149,22 @@ likely way this corpus becomes the thing it was built to correct.
 Publishing to one destination and then to the others must be one command with
 one source of truth. A human copying a licence string into a web form is the
 failure mode being designed out.
+
+## Reproducible, or re-derivable? Only one of these is true
+
+The corpus is **re-derivable, not reproducible**, and the distinction is not
+pedantry.
+
+Re-running `fetch_commons.py` will not rebuild this corpus. Acquisition draws
+from Commons' live random generator, no acquisition seed is recorded, and both
+the diversity caps and the deduplication store depend on arrival order. Two runs
+with identical arguments produce two different corpora.
+
+What the manifest does guarantee is exact re-derivation. Every row carries
+`pageid`, `commons_sha1`, `crop_box` and `sha256`, all unique across the corpus,
+which is enough for anyone to fetch the same source file from Commons, take the
+same crop, and verify they got the same bytes we did.
+
+So the honest claim is: **you cannot regenerate this corpus, and you can verify
+every image in it.** Earlier drafts of this document said "reproducible", which
+promised the first.
