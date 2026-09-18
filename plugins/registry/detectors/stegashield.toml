@@ -49,6 +49,11 @@ host = true
 adapter = "plugins/adapters/stegashield_one.py"
 entrypoint = "python3"
 argv = ["{adapter}", "{file}"]
+# Recovered from the evaluation's own session records, 2026-09-18. It is an
+# INTERNAL docker network: `internal=true`, so the container has no route to
+# the internet and serves anyway. Recorded here rather than left in a shell,
+# which is how it got lost in the first place.
+env = ["STEGASHIELD_ENDPOINT=http://172.24.0.2:3000/api/analyze"]
 parser = "number"
 
 [selftest]

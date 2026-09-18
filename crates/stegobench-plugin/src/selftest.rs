@@ -26,6 +26,18 @@ pub enum Verified {
     Failed(String),
     /// Could not be asked, which is not the same as being wrong.
     Skipped(String),
+    /// It answered, and got the fixture wrong, and that is not a fault.
+    ///
+    /// A SUBJECT is a tool under evaluation. The entire question being asked
+    /// of it is whether it detects things, so reporting "does not detect the
+    /// fixture" as broken would be both wrong and prejudicial: it would mean
+    /// doctor permanently describing the thing we are measuring as faulty,
+    /// and it would confuse a real installation problem with the finding.
+    ///
+    /// Installed correctly and detects things are the same question for a
+    /// reference tool and different questions for a subject. This is the
+    /// distinction.
+    Answered(String),
 }
 
 /// Runs one image through a containerised tool and parses what comes back.
@@ -266,11 +278,20 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
     let on_stego = run_any(entry, &detect_path);
     let on_clean = run_any(entry, &clear_path);
 
+    let subject = entry.maintainer == stegobench_core::registry::Maintainer::Subject;
+
     match (
         on_stego.says_stego(higher, threshold),
         on_clean.says_stego(higher, threshold),
     ) {
         (Some(true), Some(false)) => Verified::Passed,
+        // It responded to both, which is all a subject has to do to be
+        // installed. What it answered is the measurement's business.
+        (Some(_), Some(_)) if subject => Verified::Answered(
+            "reachable and answering; it did not separate the fixtures, which \
+             is a result rather than a fault"
+                .into(),
+        ),
         // Both halves are named separately, because "says yes to everything"
         // and "says no to everything" are different faults with different
         // fixes, and a single "failed" would hide which one it is.
@@ -283,6 +304,8 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         (Some(false), Some(true)) => Verified::Failed(
             "has both answers exactly backwards".into(),
         ),
+        // A failure to answer at all IS an installation problem, for a
+        // subject as much as anything else.
         (None, _) => Verified::Failed(format!("could not read the stego fixture: {on_stego:?}")),
         (_, None) => Verified::Failed(format!("could not read the clean fixture: {on_clean:?}")),
     }

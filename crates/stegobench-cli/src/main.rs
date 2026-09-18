@@ -261,7 +261,7 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
     };
 
     let mut rows = Vec::new();
-    let (mut missing, mut broken, mut passed, mut skipped) = (0, 0, 0, 0);
+    let (mut missing, mut broken, mut passed, mut skipped, mut answered) = (0, 0, 0, 0, 0);
 
     for entry in reg.entries.values() {
         let mut check = availability::check(entry);
@@ -276,7 +276,7 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
         check.verified = match &verdict {
             Verified::Passed => Some(true),
             Verified::Failed(_) => Some(false),
-            Verified::Skipped(_) => None,
+            Verified::Skipped(_) | Verified::Answered(_) => None,
         };
         if !check.presence.is_present() {
             missing += 1;
@@ -284,10 +284,14 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
         match &verdict {
             Verified::Passed => passed += 1,
             Verified::Failed(_) => broken += 1,
+            Verified::Answered(_) => answered += 1,
             Verified::Skipped(_) => skipped += 1,
         }
         let detail = match &verdict {
             Verified::Failed(why) => format!("{}  ({why})", check.summary()),
+            Verified::Answered(why) => {
+                format!("{}  ({why})", check.summary().replace("not verified", "answering "))
+            }
             Verified::Skipped(why) if !no_selftest && check.presence.is_present() => {
                 format!("{}  ({why})", check.summary())
             }
@@ -299,10 +303,18 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
     let mut human: Vec<String> = rows.iter().map(|(_, _, d)| d.clone()).collect();
     human.push(String::new());
     human.push(format!(
-        "{} tool(s): {passed} verified, {broken} broken, {missing} not installed, \
-         {skipped} not checked.",
+        "{} tool(s): {passed} verified, {answered} answering, {broken} broken, \
+         {missing} not installed, {skipped} not checked.",
         rows.len()
     ));
+    if answered > 0 {
+        human.push(
+            "An answering subject is installed and responding. Whether it \n\
+             detects anything is what the benchmark measures, not what this \n\
+             check decides."
+                .into(),
+        );
+    }
     if skipped > 0 {
         // Never let "we did not look" read as "it is fine".
         human.push(
@@ -318,6 +330,7 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
         "broken": broken,
         "missing": missing,
         "not_checked": skipped,
+        "answering": answered,
         "tools": rows.iter().map(|(c, v, d)| serde_json::json!({
             "name": c.name,
             "present": c.presence.is_present(),
@@ -325,6 +338,7 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
             "status": match v {
                 Verified::Passed => "passed",
                 Verified::Failed(_) => "failed",
+                Verified::Answered(_) => "answering",
                 Verified::Skipped(_) => "not_checked",
             },
             "detail": d,

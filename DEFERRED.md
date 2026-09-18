@@ -74,7 +74,7 @@ Worth an adapter only if those corpora are needed again. If they are, the honest
 option is a one-off translation script rather than teaching every scorer two
 schemas.
 
-## StegaShield's analysis endpoint is not recorded anywhere (2026-09-18)
+## RESOLVED: StegaShield's analysis endpoint (2026-09-18)
 
 The registry entry, the host-adapter mode and the multipart client are all
 built and the machinery is proven on every other tool. What is missing is one
@@ -85,13 +85,17 @@ a shell invocation and never reached a log, a manifest or a note. Probing the
 running instance found `/analyze` behind CSRF (that is the web UI, not the API)
 and `/api/analyses` answering 405 to a POST.
 
-**This needs the operator, not more guessing.** Enumerating a third party's API
-surface is both a poor use of time and not a courteous way to treat a company
-that agreed to be evaluated. Ask Franco, or find the command in shell history.
+Found in this project's own session records rather than in shell history, which
+had been rotated: `http://172.24.0.2:3000/api/analyze`. The address is an
+INTERNAL docker network, which is why probing localhost only ever reached the
+web UI and its CSRF guard.
 
-Once known: set `STEGASHIELD_ENDPOINT` and `stegobench doctor` verifies it like
-any other tool. Nothing else is outstanding.
+It now lives in the registry entry as `invoke.env`, so it travels with the
+result instead of living in somebody's shell, which is how it got lost.
 
-Related and worth fixing at the same time: the endpoint belongs in the registry
-entry as `invoke.env` so it is recorded with the result rather than living in
-somebody's shell.
+**Two things fell out of recovering it.** The network is `internal=true`, so the
+container has no route to the internet and serves anyway: that answers the
+phone-home question the original plan raised, by measurement. And on the smoke
+fixtures it moves by 0.0005 between a clean image and one carrying 0.4 bits per
+pixel, while scoring the appended-data fixture identically to the clean one,
+which is the 560-of-560 container finding reproduced in a single comparison.
