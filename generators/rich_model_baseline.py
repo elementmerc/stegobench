@@ -70,9 +70,26 @@ from score_arms import roc_auc, tpr_at_fpr  # noqa: E402
 #: and therefore overstate our conclusion.
 EXTRACTOR_FOR = {"spatial": "srm", "jpeg": "dctr"}
 
-#: Label on every container this script starts, so a stopped run can take
-#: its containers with it. Killing the parent does not kill them.
+#: Two labels on every container this run starts.
+#:
+#: `stegobench-rich` marks it as one of this tool's containers at all, so an operator can
+#: find every one of them by hand. `stegobench-rich-run=<id>` marks it as
+#: belonging to THIS process, and that is the one cleanup filters on.
+#:
+#: The distinction exists because the first version had only the shared label and
+#: reaped on it. That cleanup was added to stop a killed run orphaning its
+#: containers, and it promptly did something worse: a second panel run finishing
+#: normally ran its `finally: reap()` and killed the containers of a DIFFERENT
+#: run that was still working. The victim reported `exit 137` on one shard,
+#: discarded that whole directory, and carried on for three hours producing a
+#: result with 200 covers missing from it, which read as a detector failure
+#: rather than as a cleanup collision.
+#:
+#: Killing by a shared label is killing by category. A run may only clean up
+#: after itself.
 LABEL = "stegobench-rich"
+RUN_ID = f"{os.getpid()}-{int(time.time())}"
+RUN_LABEL = f"{LABEL}-run={RUN_ID}"
 
 #: The memory the WHOLE run may use, not the per container figure.
 #:
@@ -141,6 +158,7 @@ def _extract_one(image: str, extractor: str, images: pathlib.Path,
             "--network=none", "--cap-drop=ALL",
             "--security-opt", "no-new-privileges",
             "--label", LABEL,
+            "--label", RUN_LABEL,
             "--memory", memory,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{images}:/images:ro",
@@ -355,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def reap() -> int:
     try:
-        listing = subprocess.run(["docker", "ps", "-q", "--filter", f"label={LABEL}"],
+        listing = subprocess.run(["docker", "ps", "-q", "--filter", f"label={RUN_LABEL}"],
                                  capture_output=True, text=True, timeout=60)
     except (subprocess.SubprocessError, OSError):
         return 0

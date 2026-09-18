@@ -53,15 +53,28 @@ from score_arms import roc_auc, tpr_at_fpr  # noqa: E402
 HERE = pathlib.Path(__file__).resolve().parent
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp"}
 
-#: Every container this script starts carries this label, so they can all be
-#: found and stopped as a group.
+#: Two labels on every container this run starts.
 #:
-#: This exists because killing this process does NOT kill them. Measured: the
-#: scorer was stopped mid-run and its twelve containers carried on for as long
-#: as they were left alone, holding the machine at a load average of 76 while
-#: writing to a pipe whose reader had gone. Orphaned work that still costs the
-#: box is worse than work that fails, because nothing reports it.
+#: `stegobench-panel` marks it as a panel container at all, so an operator can
+#: find every one of them by hand. That label exists because killing this
+#: process does NOT kill its containers: a stopped scorer once left twelve of
+#: them running against a dead pipe, holding the box at a load average of 76. `stegobench-panel-run=<id>` marks it as
+#: belonging to THIS process, and that is the one cleanup filters on.
+#:
+#: The distinction exists because the first version had only the shared label and
+#: reaped on it. That cleanup was added to stop a killed run orphaning its
+#: containers, and it promptly did something worse: a second panel run finishing
+#: normally ran its `finally: reap()` and killed the containers of a DIFFERENT
+#: run that was still working. The victim reported `exit 137` on one shard,
+#: discarded that whole directory, and carried on for three hours producing a
+#: result with 200 covers missing from it, which read as a detector failure
+#: rather than as a cleanup collision.
+#:
+#: Killing by a shared label is killing by category. A run may only clean up
+#: after itself.
 LABEL = "stegobench-panel"
+RUN_ID = f"{os.getpid()}-{int(time.time())}"
+RUN_LABEL = f"{LABEL}-run={RUN_ID}"
 
 #: The memory the whole panel may use, split between its containers.
 #:
@@ -72,13 +85,17 @@ LABEL = "stegobench-panel"
 #: which is what stops a wider run looking free at the point it is typed.
 MEMORY_BUDGET_GIB = 12.0
 
-#: Measured floor for a SPA/RS container, which is far lighter than an SRM one.
+#: Measured floor for a SPA/RS container. Probed at 366 MiB peak on colour
+#: JPEGs, so 1 GiB is comfortable. Recorded because an exit 137 on this scorer
+#: was once read as the cap biting when it was a cleanup collision, and the
+#: measured figure is what ruled memory out in a minute rather than an hour.
 MIN_CONTAINER_GIB = 1.0
 
 HARDENING = [
     "--network=none", "--cap-drop=ALL",
     "--security-opt", "no-new-privileges",
     "--label", LABEL,
+    "--label", RUN_LABEL,
 ]
 
 
@@ -86,7 +103,7 @@ def reap() -> int:
     """Stop every container this run started. Safe to call more than once."""
     try:
         listing = subprocess.run(
-            ["docker", "ps", "-q", "--filter", f"label={LABEL}"],
+            ["docker", "ps", "-q", "--filter", f"label={RUN_LABEL}"],
             capture_output=True, text=True, timeout=60)
     except (subprocess.SubprocessError, OSError):
         return 0
@@ -302,6 +319,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no manifest at {manifest}", file=sys.stderr)
         return 2
     rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+    # Round 1 era manifests predate the arm field. Naming them after the corpus
+    # keeps them scorable rather than crashing on a KeyError, and the name still
+    # says where the number came from.
+    fallback_arm = corpus.name
+    for row in rows:
+        row.setdefault("arm", fallback_arm)
 
     out_path = pathlib.Path(args.out) if args.out else corpus / "panel.jsonl"
     scored: dict[str, dict] = {}
