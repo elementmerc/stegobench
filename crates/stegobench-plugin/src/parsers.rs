@@ -88,12 +88,36 @@ pub fn number(stdout: &str, stderr: &str) -> Reading {
     Reading::Failed(format!("no number on stdout: {why}"))
 }
 
+/// Stegcore prints a JSON envelope; the score is in the first data record.
+///
+/// The envelope, not just the number, because `ok: false` is a real outcome
+/// and reading a missing score as zero would turn a refusal into a confident
+/// "clean".
+pub fn stegcore(stdout: &str, stderr: &str) -> Reading {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        let why = stderr.lines().next_back().unwrap_or("no output").trim();
+        return Reading::Failed(format!("stegcore printed no JSON: {why}"));
+    };
+    if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+        let why = v.get("error").and_then(|e| e.as_str()).unwrap_or("unspecified");
+        return Reading::Failed(format!("stegcore reported failure: {why}"));
+    }
+    let first = v
+        .get("data")
+        .and_then(|d| d.as_array().and_then(|a| a.first()).or(Some(d)));
+    match first.and_then(|r| r.get("overall_score")).and_then(|s| s.as_f64()) {
+        Some(s) => Reading::Score(s),
+        None => Reading::Failed("no overall_score in stegcore output".into()),
+    }
+}
+
 /// Dispatches by the name a registry entry declares.
 pub fn parse(parser: &str, stdout: &str, stderr: &str) -> Reading {
     match parser {
         "zsteg" => zsteg(stdout, stderr),
         "stegexpose" => stegexpose(stdout, stderr),
         "number" => number(stdout, stderr),
+        "stegcore" => stegcore(stdout, stderr),
         other => Reading::Failed(format!("no built-in parser named {other:?}")),
     }
 }
@@ -204,6 +228,28 @@ mod tests {
     #[test]
     fn a_non_finite_estimate_is_not_a_score() {
         assert!(matches!(number("NaN\n", "bad"), Reading::Failed(_)));
+    }
+
+    #[test]
+    fn stegcore_reads_the_score_out_of_its_envelope() {
+        let out = r#"{"ok":true,"data":[{"overall_score":0.4192,"verdict":"suspicious"}]}"#;
+        assert_eq!(stegcore(out, ""), Reading::Score(0.4192));
+    }
+
+    #[test]
+    fn a_stegcore_failure_is_not_read_as_a_clean_image() {
+        // ok:false with no score would parse to zero under a naive reader,
+        // turning a refusal into the most confident possible "clean".
+        let out = r#"{"ok":false,"error":"unsupported format"}"#;
+        match stegcore(out, "") {
+            Reading::Failed(why) => assert!(why.contains("unsupported format")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stegcore_without_json_says_so_rather_than_scoring_zero() {
+        assert!(matches!(stegcore("not json", "boom"), Reading::Failed(_)));
     }
 
     #[test]

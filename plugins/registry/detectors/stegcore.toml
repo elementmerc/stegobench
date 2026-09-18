@@ -38,6 +38,18 @@ seconds_per_image = 0.2
 peak_rss_mb = 260
 cores_per_worker = 1
 
+[invoke]
+# The binary's own command already carries "analyse --json", so this only adds
+# the file. No container: a binary entry means the operator installed this
+# program themselves, which is a different statement from pulling a stranger's
+# image and gets a different level of isolation.
+argv = ["{file}"]
+parser = "stegcore"
+
 [selftest]
 must_detect = "fixtures/lsb-0.4bpp.png"
 must_clear = "fixtures/clean.png"
+# Measured on these fixtures: 0.0218 clean, 0.4192 stego. A smoke-test
+# decision point; the shipped thresholds are calibrated against a
+# false-positive budget on real corpora and are not this number.
+threshold = 0.2

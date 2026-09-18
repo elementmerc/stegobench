@@ -73,3 +73,25 @@ would run cleanly on PNG, but the JPEG arm already answers the question at
 Worth an adapter only if those corpora are needed again. If they are, the honest
 option is a one-off translation script rather than teaching every scorer two
 schemas.
+
+## StegaShield's analysis endpoint is not recorded anywhere (2026-09-18)
+
+The registry entry, the host-adapter mode and the multipart client are all
+built and the machinery is proven on every other tool. What is missing is one
+string: the HTTP route the September evaluation actually posted to.
+
+`score_arms.py` takes `--endpoint` on the command line, so the address lived in
+a shell invocation and never reached a log, a manifest or a note. Probing the
+running instance found `/analyze` behind CSRF (that is the web UI, not the API)
+and `/api/analyses` answering 405 to a POST.
+
+**This needs the operator, not more guessing.** Enumerating a third party's API
+surface is both a poor use of time and not a courteous way to treat a company
+that agreed to be evaluated. Ask Franco, or find the command in shell history.
+
+Once known: set `STEGASHIELD_ENDPOINT` and `stegobench doctor` verifies it like
+any other tool. Nothing else is outstanding.
+
+Related and worth fixing at the same time: the endpoint belongs in the registry
+entry as `invoke.env` so it is recorded with the result rather than living in
+somebody's shell.

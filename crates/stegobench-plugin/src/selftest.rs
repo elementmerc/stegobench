@@ -151,6 +151,98 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
     parsers::parse(&invoke.parser, &text, &String::from_utf8_lossy(&out.stderr))
 }
 
+/// Runs a binary plugin directly, with no container.
+///
+/// Our own tool and anything else already installed on the machine. There is
+/// no isolation here and that is a deliberate limit: a binary entry says the
+/// operator already trusts this program enough to have installed it, which is
+/// a different statement from pulling a stranger's image.
+fn run_binary(entry: &Entry, fixture: &Path) -> Reading {
+    let (Some(bin), Some(invoke)) = (&entry.binary, &entry.invoke) else {
+        return Reading::Failed("entry is not a runnable binary".into());
+    };
+    let Some(program) = bin.command.first() else {
+        return Reading::Failed("binary.command is empty".into());
+    };
+    let Some(path) = crate::which(program) else {
+        return Reading::Failed(format!("{program} is not on PATH"));
+    };
+    if !fixture.is_file() {
+        return Reading::Failed(format!("fixture {} not found", fixture.display()));
+    }
+    let file = fixture.display().to_string();
+    let mut argv: Vec<String> = bin.command[1..].to_vec();
+    argv.extend(invoke.argv.iter().map(|a| a.replace("{file}", &file)));
+
+    match Command::new(&path).args(&argv).output() {
+        Ok(out) => parsers::parse(
+            &invoke.parser,
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(e) => Reading::Failed(format!("could not run {program}: {e}")),
+    }
+}
+
+/// Dispatches to whichever kind of plugin this entry is.
+fn run_any(entry: &Entry, fixture: &Path) -> Reading {
+    // A host adapter wins over the image: the entry names an image to identify
+    // the subject, but the thing to run is here, not in it.
+    if entry.invoke.as_ref().is_some_and(|i| i.host) {
+        return run_host_adapter(entry, fixture);
+    }
+    match (&entry.image, &entry.binary) {
+        (Some(img), _) => run_one(entry, &img.reference.clone(), fixture),
+        (_, Some(_)) => run_binary(entry, fixture),
+        _ => Reading::Failed("entry declares neither an image nor a binary".into()),
+    }
+}
+
+/// Runs an adapter on this machine, for tools that are services.
+///
+/// Environment is passed through from the host so the adapter can be told
+/// where the service lives. Secrets are NOT handled here: a service consumes
+/// its credentials when it starts, which is the operator's business, and this
+/// only asks it a question.
+fn run_host_adapter(entry: &Entry, fixture: &Path) -> Reading {
+    let Some(invoke) = &entry.invoke else {
+        return Reading::Failed("entry declares no invoke block".into());
+    };
+    let Some(rel) = &invoke.adapter else {
+        return Reading::Failed("a host invoke needs an adapter".into());
+    };
+    if !fixture.is_file() {
+        return Reading::Failed(format!("fixture {} not found", fixture.display()));
+    }
+    let adapter = match Path::new(rel).canonicalize() {
+        Ok(p) => p.display().to_string(),
+        Err(e) => return Reading::Failed(format!("adapter {rel} not found: {e}")),
+    };
+    let file = fixture.display().to_string();
+    let program = invoke.entrypoint.clone().unwrap_or_else(|| "python3".into());
+    let argv: Vec<String> = invoke
+        .argv
+        .iter()
+        .map(|a| a.replace("{adapter}", &adapter).replace("{file}", &file))
+        .collect();
+
+    let mut cmd = Command::new(&program);
+    cmd.args(&argv);
+    for kv in &invoke.env {
+        if let Some((k, v)) = kv.split_once('=') {
+            cmd.env(k, v);
+        }
+    }
+    match cmd.output() {
+        Ok(out) => parsers::parse(
+            &invoke.parser,
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(e) => Reading::Failed(format!("could not run {program}: {e}")),
+    }
+}
+
 /// Asks a tool both questions.
 ///
 /// `fixtures_dir` holds the files the entry's selftest block names.
@@ -163,9 +255,7 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
             "no invoke block yet, so this tool cannot be driven by the host".into(),
         );
     }
-    let Some(image) = entry.image.as_ref().map(|i| i.reference.clone()) else {
-        return Verified::Skipped("self-test currently covers containerised tools".into());
-    };
+
 
     let detect_path = fixtures_dir.join(strip_prefix(&test.must_detect));
     let clear_path = fixtures_dir.join(strip_prefix(&test.must_clear));
@@ -173,8 +263,8 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
     let threshold = test.threshold;
     let higher = entry.emits.higher_means_stego;
 
-    let on_stego = run_one(entry, &image, &detect_path);
-    let on_clean = run_one(entry, &image, &clear_path);
+    let on_stego = run_any(entry, &detect_path);
+    let on_clean = run_any(entry, &clear_path);
 
     match (
         on_stego.says_stego(higher, threshold),
@@ -225,14 +315,32 @@ mod tests {
     }
 
     #[test]
-    fn a_binary_tool_is_skipped_with_a_reason() {
+    fn a_binary_tool_is_now_run_rather_than_skipped() {
+        // It used to be skipped as "containerised tools only". Binaries run
+        // directly now, so a missing one is a FAILURE naming the program
+        // rather than a silent pass: the whole point of the check is that a
+        // tool we cannot run is not a tool that works.
         let e = entry(
-            "[binary]\ncommand = [\"x\"]\nversion_args = [\"-v\"]\n\
-             [invoke]\nargv = [\"x\"]\nparser = \"zsteg\"",
+            "[binary]\ncommand = [\"definitely-not-real-xyzzy\"]\nversion_args = [\"-v\"]\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"stegcore\"",
         );
         match run(&e, Path::new(".")) {
-            Verified::Skipped(r) => assert!(r.contains("containerised")),
-            other => panic!("expected Skipped, got {other:?}"),
+            Verified::Failed(r) => assert!(r.contains("not on PATH"), "got {r}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_host_adapter_entry_is_dispatched_to_the_host_not_the_image() {
+        // A service names an image to identify the subject, but there is
+        // nothing to run inside it.
+        let e = entry(
+            "[image]\nreference = \"x@sha256:a\"\nsize_mb = 10\nbundled = true\n\
+             [invoke]\nhost = true\nargv = [\"{adapter}\"]\nparser = \"number\"",
+        );
+        match run(&e, Path::new(".")) {
+            Verified::Failed(r) => assert!(r.contains("adapter"), "got {r}"),
+            other => panic!("expected Failed about the adapter, got {other:?}"),
         }
     }
 

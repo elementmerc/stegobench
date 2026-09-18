@@ -321,6 +321,18 @@ pub struct Invoke {
     /// from stdout. Requires `writable_workdir`.
     #[serde(default)]
     pub output_file: Option<String>,
+    /// Run the argv on the host rather than inside the container.
+    ///
+    /// For tools that are SERVICES rather than commands. StegaShield runs as
+    /// a container serving HTTP, so scoring an image means posting it to a
+    /// running instance; there is no command to run inside the image. The
+    /// adapter runs here and asks the service a question.
+    ///
+    /// The image reference stays in the entry because it is still what
+    /// identifies the subject in a result. It is never vendored: it is a third
+    /// party's artefact, referenced by digest and pulled by whoever runs it.
+    #[serde(default)]
+    pub host: bool,
     /// Which built-in parser reads the output. Named rather than described,
     /// because these formats are quirky enough that a rule in TOML would be a
     /// small programming language nobody wants to debug.
