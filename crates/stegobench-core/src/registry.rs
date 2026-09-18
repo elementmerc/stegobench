@@ -432,6 +432,58 @@ impl Registry {
     pub fn of_kind(&self, kind: Kind) -> Vec<&Entry> {
         self.entries.values().filter(|e| e.kind == kind).collect()
     }
+
+    /// How much disk the registry actually costs, counting each image once.
+    ///
+    /// Summing per entry is wrong and wrong by a lot. `aletheia-spa` and
+    /// `aletheia-rs` are two tools in one 8.3 GB image, so a per-entry total
+    /// reported 30 GB of on-demand tools where the truth is 21.8 GB. Telling
+    /// somebody to free nine gigabytes they do not need is not a rounding
+    /// error, it is a wrong answer to the only question they asked.
+    pub fn footprint(&self) -> Footprint {
+        let mut seen: BTreeMap<&str, (u64, bool)> = BTreeMap::new();
+        let mut binaries_mb = 0;
+        for e in self.entries.values() {
+            match (&e.image, &e.binary) {
+                (Some(img), _) => {
+                    // Keyed on the reference, so two tools sharing an image
+                    // are one entry here however they are named.
+                    seen.insert(
+                        img.reference.as_str(),
+                        (img.size_mb.unwrap_or(0), img.bundled),
+                    );
+                }
+                (_, Some(bin)) => binaries_mb += bin.size_mb.unwrap_or(0),
+                _ => {}
+            }
+        }
+        let bundled_images: u64 = seen.values().filter(|(_, b)| *b).map(|(s, _)| s).sum();
+        Footprint {
+            bundled_mb: bundled_images + binaries_mb,
+            on_demand_mb: seen.values().filter(|(_, b)| !*b).map(|(s, _)| s).sum(),
+            unique_images: seen.len(),
+            tools: self.entries.len(),
+        }
+    }
+}
+
+/// What the registry costs on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Footprint {
+    /// Sum of the distinct bundled images plus every binary.
+    ///
+    /// This is an UPPER BOUND on the default image, not its size. The bundled
+    /// tools share base layers (steghide and outguess are both Debian, and the
+    /// Java tools share a JRE), so the built image is smaller than the sum of
+    /// its parts. Reporting the sum as the image size would be a different
+    /// bookkeeping error in the opposite direction.
+    pub bundled_mb: u64,
+    /// Sum of the distinct images not in the default image.
+    pub on_demand_mb: u64,
+    /// Distinct images, which is fewer than the tool count whenever one image
+    /// provides several tools.
+    pub unique_images: usize,
+    pub tools: usize,
 }
 
 #[cfg(test)]
@@ -644,5 +696,92 @@ must_clear = "b.png"
     fn the_refusal_names_both_numbers_so_it_can_be_acted_on() {
         let e = entry_with(836, true).validate().unwrap_err();
         assert!(e[0].contains("836") && e[0].contains("750"), "got: {:?}", e[0]);
+    }
+}
+
+#[cfg(test)]
+mod footprint_tests {
+    use super::*;
+
+    fn reg(entries: Vec<(&str, &str, u64, bool)>) -> Registry {
+        let mut r = Registry::default();
+        for (name, reference, size, bundled) in entries {
+            let mut e: Entry = toml::from_str(
+                r#"name = "x"
+kind = "detector"
+licence = "MIT"
+[selftest]
+must_detect = "a.png"
+must_clear = "b.png"
+"#,
+            )
+            .unwrap();
+            e.name = name.into();
+            e.image = Some(Image {
+                reference: reference.into(),
+                needs_network: false,
+                size_mb: Some(size),
+                bundled,
+            });
+            r.entries.insert(name.into(), e);
+        }
+        r
+    }
+
+    #[test]
+    fn two_tools_in_one_image_are_counted_once() {
+        // The real case: aletheia-spa and aletheia-rs are one 8.3 GB image.
+        // Counting per entry said 16.7 GB and would have told somebody to
+        // free eight gigabytes they do not need.
+        let r = reg(vec![
+            ("aletheia-spa", "aletheia@sha256:a", 8340, false),
+            ("aletheia-rs", "aletheia@sha256:a", 8340, false),
+        ]);
+        let f = r.footprint();
+        assert_eq!(f.on_demand_mb, 8340);
+        assert_eq!(f.unique_images, 1);
+        assert_eq!(f.tools, 2);
+    }
+
+    #[test]
+    fn distinct_images_still_add_up() {
+        let r = reg(vec![
+            ("a", "a@sha256:1", 100, true),
+            ("b", "b@sha256:2", 200, true),
+        ]);
+        assert_eq!(r.footprint().bundled_mb, 300);
+    }
+
+    #[test]
+    fn bundled_and_on_demand_are_kept_apart() {
+        let r = reg(vec![
+            ("small", "s@sha256:1", 500, true),
+            ("large", "l@sha256:2", 9000, false),
+        ]);
+        let f = r.footprint();
+        assert_eq!((f.bundled_mb, f.on_demand_mb), (500, 9000));
+    }
+
+    #[test]
+    fn a_binary_counts_toward_the_bundle_because_it_is_compiled_in() {
+        let mut r = reg(vec![("img", "i@sha256:1", 100, true)]);
+        let mut e: Entry = toml::from_str(
+            r#"name = "stegcore"
+kind = "detector"
+licence = "AGPL-3.0-or-later"
+[binary]
+command = ["stegcore"]
+version_args = ["--version"]
+size_mb = 9
+
+[selftest]
+must_detect = "a.png"
+must_clear = "b.png"
+"#,
+        )
+        .unwrap();
+        e.name = "stegcore".into();
+        r.entries.insert("stegcore".into(), e);
+        assert_eq!(r.footprint().bundled_mb, 109);
     }
 }

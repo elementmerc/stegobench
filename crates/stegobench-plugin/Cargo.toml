@@ -1,6 +1,6 @@
 [package]
-name = "stegobench-cli"
-description = "The stegobench command"
+name = "stegobench-plugin"
+description = "The plugin protocol and the host that runs plugins"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,19 +8,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "stegobench"
-path = "src/main.rs"
-
 [dependencies]
 stegobench-core = { path = "../stegobench-core" }
-stegobench-metrics = { path = "../stegobench-metrics" }
-stegobench-plugin = { path = "../stegobench-plugin" }
-clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-schemars.workspace = true
-toml.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+toml.workspace = true

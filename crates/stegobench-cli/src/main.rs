@@ -24,6 +24,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use stegobench_core::registry::{Kind, Registry};
+use stegobench_plugin::availability;
 use stegobench_core::{exit, Result1};
 
 #[derive(Parser)]
@@ -112,6 +113,14 @@ enum Command {
     },
 
     /// Check that this machine can run what it claims to
+    ///
+    /// Reports what is installed and what is missing. It does NOT yet run each
+    /// tool against a known positive and a known negative, and says so per
+    /// line rather than letting "present" read as "working": a rich-model
+    /// extraction once ran over 2,000 images, exited zero every time and
+    /// produced nothing, because a support package was missing.
+    ///
+    /// Exits 8 when something needed is missing.
     Doctor,
 
     /// Score a corpus with one or more detectors
@@ -191,18 +200,28 @@ fn cmd_list(dir: &PathBuf, kind: &str) -> Output {
             )
         }
     };
-    let human = wanted
+    let mut human = wanted
         .iter()
         .map(|e| e.summary())
         .collect::<Vec<_>>()
         .join("\n");
+    if human.is_empty() {
+        human = format!("nothing registered under {kind:?}");
+    } else {
+        let f = reg.footprint();
+        human.push_str(&format!(
+            "\n\n{} tools in {} images. Default image at most {} MB \
+             (they share base layers, so the built image is smaller); \
+             {:.1} GB more available on demand.",
+            f.tools,
+            f.unique_images,
+            f.bundled_mb,
+            f.on_demand_mb as f64 / 1024.0
+        ));
+    }
     Output::ok(
-        serde_json::to_value(&wanted).unwrap_or(serde_json::Value::Null),
-        if human.is_empty() {
-            format!("nothing registered under {kind:?}")
-        } else {
-            human
-        },
+        serde_json::json!({ "tools": wanted, "footprint": reg.footprint() }),
+        human,
     )
 }
 
@@ -224,6 +243,53 @@ fn cmd_describe(dir: &PathBuf, name: &str) -> Output {
             )
         }
     }
+}
+
+fn cmd_doctor(dir: &PathBuf) -> Output {
+    let reg = match load_registry(dir) {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let checks: Vec<_> = reg.entries.values().map(availability::check).collect();
+
+    let missing: Vec<_> = checks
+        .iter()
+        .filter(|c| !c.presence.is_present())
+        .map(|c| c.name.as_str())
+        .collect();
+    let unverified = checks.len();
+
+    let mut human: Vec<String> = checks.iter().map(|c| c.summary()).collect();
+    human.push(String::new());
+    human.push(format!(
+        "{} tool(s) checked, {} not installed.",
+        checks.len(),
+        missing.len()
+    ));
+    // Stated every run, not once in a README. The gap between installed and
+    // working is where three hours of silent failure went.
+    human.push(format!(
+        "{unverified} have NOT been run against a known positive and a known \n\
+         negative, so this reports what is here rather than what works."
+    ));
+
+    let json = serde_json::json!({
+        "checked": checks.len(),
+        "missing": missing,
+        "verified": 0,
+        "tools": checks.iter().map(|c| serde_json::json!({
+            "name": c.name,
+            "present": c.presence.is_present(),
+            "detail": c.summary(),
+            "missing_secrets": c.missing_secrets,
+        })).collect::<Vec<_>>(),
+    });
+
+    let mut out = Output::ok(json, human.join("\n"));
+    if !missing.is_empty() {
+        out.code = exit::ENVIRONMENT_UNFIT;
+    }
+    out
 }
 
 fn cmd_validate(file: &PathBuf) -> Output {
@@ -285,7 +351,7 @@ fn run(cli: &Cli) -> Output {
         Command::List { kind } => cmd_list(&cli.registry, kind),
         Command::Describe { name } => cmd_describe(&cli.registry, name),
         Command::Plan { .. } => not_yet("plan", "V10, needs the governor"),
-        Command::Doctor => not_yet("doctor", "V6, needs the plugin host"),
+        Command::Doctor => cmd_doctor(&cli.registry),
         Command::Score { .. } => not_yet("score", "needs the plugin host"),
     }
 }
