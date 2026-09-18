@@ -1,0 +1,50 @@
+{
+  "arm": {
+    "domain": "spatial",
+    "embedder": "suniward",
+    "format": "png",
+    "rate": {
+      "unit": "bpp",
+      "value": 0.4
+    }
+  },
+  "corpus": {
+    "digest": "sha256:d93e9720af0c3ab7a21dd9e81f2d4b4cbc2f6025fa3d8ef00110d76aea2c97b4",
+    "name": "rich-suniward",
+    "pairs": 1000
+  },
+  "declarations": {
+    "pairing": "single-variable",
+    "self_reported": false,
+    "split_discipline": "not-applicable"
+  },
+  "metrics": {
+    "auc": 0.5097,
+    "n_clean": 1000,
+    "n_error": 0,
+    "n_stego": 1000,
+    "tpr_at_fpr": {
+      "0.01": 0.009,
+      "0.1": 0.099
+    }
+  },
+  "provenance": {
+    "elapsed_seconds": 0.0,
+    "harness_version": "0.1.0",
+    "network_reachable": false,
+    "plugins": [
+      {
+        "determinism": "exact",
+        "image": "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5",
+        "name": "stegexpose"
+      }
+    ],
+    "started_utc": "2026-09-18T20:13:57Z"
+  },
+  "schema": "stegobench/result-v1",
+  "subject": {
+    "kind": "detector",
+    "name": "stegexpose",
+    "version": "sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5"
+  }
+}

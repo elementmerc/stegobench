@@ -1,0 +1,50 @@
+{
+  "arm": {
+    "domain": "jpeg",
+    "embedder": "steghide",
+    "format": "jpeg",
+    "rate": {
+      "unit": "capacity_fraction",
+      "value": 0.5
+    }
+  },
+  "corpus": {
+    "digest": "sha256:481a17f2592dd6042b9298f436150ae08d0d0c70d0ccffebe647f075166d77b6",
+    "name": "round3-q95",
+    "pairs": 200
+  },
+  "declarations": {
+    "pairing": "single-variable",
+    "self_reported": false,
+    "split_discipline": "not-applicable"
+  },
+  "metrics": {
+    "auc": 0.5073,
+    "n_clean": 197,
+    "n_error": 3,
+    "n_stego": 200,
+    "tpr_at_fpr": {
+      "0.01": 0.0,
+      "0.1": 0.11
+    }
+  },
+  "provenance": {
+    "elapsed_seconds": 0.0,
+    "harness_version": "0.1.0",
+    "network_reachable": false,
+    "plugins": [
+      {
+        "determinism": "exact",
+        "image": "stegobench/aletheia@sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d",
+        "name": "aletheia-rs"
+      }
+    ],
+    "started_utc": "2026-09-18T20:13:57Z"
+  },
+  "schema": "stegobench/result-v1",
+  "subject": {
+    "kind": "detector",
+    "name": "aletheia-rs",
+    "version": "sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d"
+  }
+}

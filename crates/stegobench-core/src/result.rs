@@ -75,12 +75,37 @@ pub struct CorpusRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Arm {
     pub embedder: String,
-    /// Payload rate in bits per pixel, or None for an arm where rate is not
-    /// the variable, such as the appended-data control.
+    /// How much was hidden, or None where strength is not the variable, as in
+    /// the appended-data control.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_bpp: Option<f64>,
+    pub rate: Option<Rate>,
     pub domain: Domain,
     pub format: String,
+}
+
+/// A payload size, carrying its unit.
+///
+/// The unit is not decoration and this type replaced a bare `rate_bpp` field
+/// within hours of that field existing. The adaptive schemes are driven in
+/// bits per pixel, so `suniward/0400` is 0.4 bpp. The JPEG tools are driven as
+/// a fraction of whatever capacity the tool reports for that cover, so
+/// `outguess/0050` is 5% of capacity and is not 0.05 bpp or any other fixed
+/// number of bits. Recording both under one name would publish a false unit
+/// for half the arms, and a reader comparing 0.4 against 0.05 would be
+/// comparing nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Rate {
+    pub value: f64,
+    pub unit: RateUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RateUnit {
+    /// Bits per pixel. The usual axis for spatial adaptive schemes.
+    Bpp,
+    /// A fraction of the capacity the embedding tool reports for that cover.
+    CapacityFraction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -230,6 +255,20 @@ impl Result1 {
         if self.metrics.n_clean == 0 || self.metrics.n_stego == 0 {
             bad.push("a measurement needs both clean and stego images".into());
         }
+        if let Some(rate) = self.arm.rate {
+            let sane = match rate.unit {
+                // A fraction of capacity above 1 is more than the cover holds.
+                RateUnit::CapacityFraction => rate.value > 0.0 && rate.value <= 1.0,
+                // 8 bits per pixel is every bit of an 8-bit channel.
+                RateUnit::Bpp => rate.value > 0.0 && rate.value <= 8.0,
+            };
+            if !sane {
+                bad.push(format!(
+                    "rate {} is not a sensible {:?}",
+                    rate.value, rate.unit
+                ));
+            }
+        }
         // A tag where a digest belongs is the single most common way a result
         // becomes unreproducible, so it is named rather than left to the reader.
         for p in &self.provenance.plugins {
@@ -269,7 +308,7 @@ mod tests {
             },
             arm: Arm {
                 embedder: "suniward".into(),
-                rate_bpp: Some(0.4),
+                rate: Some(Rate { value: 0.4, unit: RateUnit::Bpp }),
                 domain: Domain::Spatial,
                 format: "png".into(),
             },
@@ -348,6 +387,24 @@ mod tests {
         let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         v["metrics"].as_object_mut().unwrap().remove("n_error");
         assert!(serde_json::from_value::<Result1>(v).is_err());
+    }
+
+    #[test]
+    fn a_capacity_fraction_above_one_is_refused() {
+        // 5% of capacity and 0.4 bits per pixel are different quantities, and
+        // the unit is what stops a reader comparing them.
+        let mut r = sample();
+        r.arm.rate = Some(Rate { value: 1.6, unit: RateUnit::CapacityFraction });
+        assert!(r.validate().unwrap_err()[0].contains("not a sensible"));
+    }
+
+    #[test]
+    fn the_same_number_can_be_valid_in_one_unit_and_not_the_other() {
+        let mut r = sample();
+        r.arm.rate = Some(Rate { value: 4.0, unit: RateUnit::Bpp });
+        assert_eq!(r.validate(), Ok(()));
+        r.arm.rate = Some(Rate { value: 4.0, unit: RateUnit::CapacityFraction });
+        assert!(r.validate().is_err());
     }
 
     #[test]
