@@ -58,6 +58,8 @@ import json
 import pathlib
 import random
 import sys
+
+from tiers import TierError, covers_in_tier_order, tier_name
 import time
 
 from PIL import Image
@@ -102,7 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--covers", required=True, help="the Pentimento cover directory")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--count", type=int, default=200, help="covers per arm")
+    ap.add_argument("--count", type=int, default=200,
+                    help="covers per arm, taken in tier order: 200 is Nano, "
+                         "1000 Lite, 10000 Core")
+    ap.add_argument("--manifest", default=None,
+                    help="default: manifest.jsonl beside the covers")
     ap.add_argument("--quality", type=int, default=95,
                     help="JPEG quality for BOTH halves of every pair")
     ap.add_argument("--seed", type=int, default=20260917)
@@ -115,16 +121,21 @@ def main(argv: list[str] | None = None) -> int:
     out = pathlib.Path(args.out)
     rates = [float(r) for r in args.rates.split(",") if r.strip()]
 
-    pool = sorted(covers_dir.glob("*.png"))
-    if not pool:
-        print(f"no covers under {covers_dir}", file=sys.stderr)
+    # Covers are taken in tier order, NOT sampled.
+    #
+    # A seeded sample is reproducible, which is why the previous version looked
+    # correct, and it is still wrong: sample(pool, 200) and sample(pool, 1000)
+    # from one seed do not nest, so Nano would have contained covers absent from
+    # Lite. distribution.md promises a tier is a prefix of one ordering, and a
+    # prefix is the only thing that makes the promise true.
+    manifest = pathlib.Path(args.manifest) if args.manifest else covers_dir / "manifest.jsonl"
+    try:
+        chosen = covers_in_tier_order(manifest, covers_dir, args.count)
+    except TierError as e:
+        print(f"cannot select a tier: {e}", file=sys.stderr)
         return 1
-    # Seeded sample, so the arm is rebuildable and the same covers are used by
-    # every tool. Sharing covers across tools is deliberate: it makes the
-    # per-tool numbers comparable on identical pictures.
-    rng = random.Random(args.seed)
-    chosen = rng.sample(pool, min(args.count, len(pool)))
-    print(f"{len(chosen)} covers sampled from {len(pool)} available")
+    print(f"{len(chosen)} covers, tier order 0..{len(chosen) - 1} "
+          f"[{tier_name(len(chosen))}], from {manifest}")
 
     # Outguess re-encodes; it must do so at the quality both halves share.
     embedders = [SteghideEmbedder(), OutguessEmbedder(quality=args.quality)]

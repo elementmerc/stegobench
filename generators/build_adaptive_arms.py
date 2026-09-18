@@ -66,6 +66,8 @@ import sys
 import time
 
 import numpy as np
+
+from tiers import TierError, covers_in_tier_order, tier_name
 from PIL import Image
 
 try:
@@ -137,7 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--jpeg-covers", default=None,
                     help="the round 3 clean JPEGs, for the JPEG adaptive arms")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--count", type=int, default=100)
+    ap.add_argument("--count", type=int, default=100,
+                    help="covers per arm, taken in tier order: 200 is Nano, "
+                         "1000 Lite, 10000 Core")
+    ap.add_argument("--manifest", default=None,
+                    help="default: manifest.jsonl beside the covers")
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--rates", default=",".join(str(r) for r in DEFAULT_RATES))
@@ -150,13 +156,19 @@ def main(argv: list[str] | None = None) -> int:
     rates = [float(r) for r in args.rates.split(",") if r.strip()]
     schemes = [s.strip() for s in args.schemes.split(",") if s.strip()]
 
-    pool = sorted(pathlib.Path(args.covers).glob("*.png"))
-    if not pool:
-        print(f"no covers under {args.covers}", file=sys.stderr)
+    # Covers are taken in tier order, NOT sampled. A seeded sample is
+    # reproducible and does not nest: sample(pool, 200) is not the first 200 of
+    # sample(pool, 1000), so Nano would have held covers absent from Lite and
+    # the prefix guarantee in distribution.md would have been false.
+    covers_dir = pathlib.Path(args.covers)
+    manifest = pathlib.Path(args.manifest) if args.manifest else covers_dir / "manifest.jsonl"
+    try:
+        chosen = covers_in_tier_order(manifest, covers_dir, args.count)
+    except TierError as e:
+        print(f"cannot select a tier: {e}", file=sys.stderr)
         return 1
-    rng = random.Random(args.seed)
-    chosen = rng.sample(pool, min(args.count, len(pool)))
-    print(f"{len(chosen)} covers sampled from {len(pool)}")
+    print(f"{len(chosen)} covers, tier order 0..{len(chosen) - 1} "
+          f"[{tier_name(len(chosen))}], from {manifest}")
 
     jpeg_pool: list[pathlib.Path] = []
     wants_jpeg = any(s in JPEG_SCHEMES for s in schemes)
