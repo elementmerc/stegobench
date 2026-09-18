@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Daniel Iwugo
+//! The `stegobench` command.
+//!
+//! THE TWO RULES THIS FILE EXISTS TO HOLD
+//! --------------------------------------
+//! **Machine output on stdout, human output on stderr.** This is the opposite
+//! of what most tools do and it is deliberate: it means `stegobench ... --json
+//! | jq` works while progress still reaches the terminal. A tool that mixes
+//! them forces every caller to choose between being readable and being usable.
+//!
+//! **Every subcommand takes `--json`.** Not most of them. A caller that has to
+//! remember which commands speak JSON will parse the ones that do not, and
+//! retrofitting the flag later is far more work than carrying it from the
+//! first commit.
+//!
+//! Exit codes are a contract and live in `stegobench_core::exit`. Codes 3 and
+//! 7 are refusals rather than failures: the tool is capable of the thing and is
+//! declining, so a caller that cannot tell them from an error will retry them
+//! forever.
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use stegobench_core::{exit, Result1};
+
+#[derive(Parser)]
+#[command(
+    name = "stegobench",
+    version,
+    about = "A reproducible benchmark for image steganalysis",
+    long_about = "Build a labelled corpus, run detectors over identical bytes, \
+                  and report numbers somebody else can check.\n\n\
+                  Machine-readable output goes to stdout with --json; progress \
+                  and diagnostics go to stderr, so the two can be separated."
+)]
+struct Cli {
+    /// Machine-readable output on stdout. Accepted by every subcommand.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Print a published schema, generated from the types the tool writes
+    ///
+    /// The schema is not maintained by hand beside the code; it is derived
+    /// from it, so a document that validates is one this version can read.
+    ///
+    /// Example:
+    ///   stegobench schema result-v1 > result-v1.schema.json
+    Schema {
+        /// Which schema. Currently only `result-v1`.
+        #[arg(value_name = "NAME", default_value = "result-v1")]
+        name: String,
+    },
+
+    /// Check a document against its schema and the rules the schema cannot hold
+    ///
+    /// Exits 6 when the document is invalid, naming every problem rather than
+    /// only the first, because fixing them one round trip at a time is how a
+    /// format gets a reputation for being fussy.
+    ///
+    /// Example:
+    ///   stegobench validate results/rich-model-suniward-0400.json
+    Validate {
+        /// Path to a JSON document.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+
+    /// List what this installation can do
+    List {
+        /// One of: detectors, embedders, corpora.
+        #[arg(value_name = "KIND")]
+        kind: String,
+    },
+
+    /// Estimate what a run would cost, without running anything
+    Plan {
+        /// The command that would be run, as it would be typed.
+        #[arg(value_name = "COMMAND", trailing_var_arg = true, num_args = 0..)]
+        command: Vec<String>,
+    },
+
+    /// Check that this machine can run what it claims to
+    Doctor,
+
+    /// Score a corpus with one or more detectors
+    Score {
+        /// Corpus name or directory.
+        #[arg(long, value_name = "NAME_OR_PATH")]
+        corpus: String,
+    },
+}
+
+/// What a subcommand produced: a JSON value for stdout, and human text for stderr.
+struct Output {
+    json: serde_json::Value,
+    human: String,
+    code: i32,
+}
+
+impl Output {
+    fn ok(json: serde_json::Value, human: impl Into<String>) -> Self {
+        Output { json, human: human.into(), code: exit::OK }
+    }
+
+    /// A refusal or a failure. `code` says which, and the distinction is the
+    /// whole reason the codes are enumerated.
+    fn err(code: i32, human: impl Into<String>) -> Self {
+        let human = human.into();
+        Output {
+            json: serde_json::json!({ "ok": false, "error": human }),
+            human,
+            code,
+        }
+    }
+}
+
+fn cmd_schema(name: &str) -> Output {
+    match name {
+        "result-v1" => {
+            let schema = schemars::schema_for!(Result1);
+            Output::ok(
+                serde_json::to_value(&schema).expect("a generated schema serialises"),
+                "result-v1 schema written to stdout",
+            )
+        }
+        other => Output::err(
+            exit::USAGE,
+            format!("unknown schema {other:?}. Known schemas: result-v1"),
+        ),
+    }
+}
+
+fn cmd_validate(file: &PathBuf) -> Output {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            return Output::err(exit::FAILURE, format!("cannot read {}: {e}", file.display()))
+        }
+    };
+    let parsed: Result1 = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Output::err(
+                exit::SCHEMA_INVALID,
+                format!("{} is not a result-v1 document: {e}", file.display()),
+            )
+        }
+    };
+    match parsed.validate() {
+        Ok(()) => Output::ok(
+            serde_json::json!({ "ok": true, "schema": parsed.schema }),
+            format!("{} is a valid result-v1 document", file.display()),
+        ),
+        Err(problems) => {
+            let mut out = Output::err(
+                exit::SCHEMA_INVALID,
+                format!(
+                    "{} is not valid:\n  {}",
+                    file.display(),
+                    problems.join("\n  ")
+                ),
+            );
+            out.json = serde_json::json!({ "ok": false, "problems": problems });
+            out
+        }
+    }
+}
+
+/// Subcommands whose behaviour is scoped and planned but not yet built.
+///
+/// They exist in the tree from the first release so the vocabulary is fixed
+/// before anyone depends on it, and they exit 8 with the reason rather than
+/// pretending to work.
+fn not_yet(what: &str, tracked_as: &str) -> Output {
+    Output::err(
+        exit::ENVIRONMENT_UNFIT,
+        format!(
+            "`{what}` is not built yet in this release.\n\
+             It is scoped as {tracked_as}. This command exists now so the \
+             vocabulary is settled before anything depends on it."
+        ),
+    )
+}
+
+fn run(cli: &Cli) -> Output {
+    match &cli.command {
+        Command::Schema { name } => cmd_schema(name),
+        Command::Validate { file } => cmd_validate(file),
+        Command::List { .. } => not_yet("list", "V13, needs the registry"),
+        Command::Plan { .. } => not_yet("plan", "V10, needs the governor"),
+        Command::Doctor => not_yet("doctor", "V6, needs the plugin host"),
+        Command::Score { .. } => not_yet("score", "needs the plugin host"),
+    }
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let out = run(&cli);
+
+    if cli.json {
+        let mut stdout = std::io::stdout().lock();
+        let _ = serde_json::to_writer_pretty(&mut stdout, &out.json);
+        let _ = writeln!(stdout);
+    } else if out.code == exit::OK {
+        // Human mode still puts the payload on stdout when the payload IS the
+        // point, as it is for `schema`, so redirecting to a file works without
+        // remembering a flag.
+        if matches!(cli.command, Command::Schema { .. }) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = serde_json::to_writer_pretty(&mut stdout, &out.json);
+            let _ = writeln!(stdout);
+        } else {
+            eprintln!("{}", out.human);
+        }
+    } else {
+        eprintln!("{}", out.human);
+    }
+
+    std::process::exit(out.code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_command_tree_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn json_is_accepted_by_every_subcommand() {
+        // The rule in the module docstring, asserted rather than trusted.
+        // A subcommand added later without --json fails here.
+        for args in [
+            vec!["stegobench", "--json", "schema", "result-v1"],
+            vec!["stegobench", "--json", "validate", "x.json"],
+            vec!["stegobench", "--json", "list", "detectors"],
+            vec!["stegobench", "--json", "doctor"],
+            vec!["stegobench", "--json", "score", "--corpus", "x"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_ok(), "rejected: {args:?}");
+        }
+    }
+
+    #[test]
+    fn schema_generates_and_names_the_format() {
+        let out = cmd_schema("result-v1");
+        assert_eq!(out.code, exit::OK);
+        let text = serde_json::to_string(&out.json).unwrap();
+        assert!(text.contains("Result1"), "schema should describe the result type");
+        assert!(text.contains("n_error"), "the required honesty field must be in the schema");
+    }
+
+    #[test]
+    fn an_unknown_schema_name_is_a_usage_error_not_a_crash() {
+        assert_eq!(cmd_schema("result-v9").code, exit::USAGE);
+    }
+
+    #[test]
+    fn validating_a_missing_file_fails_without_panicking() {
+        let out = cmd_validate(&PathBuf::from("/definitely/not/here.json"));
+        assert_eq!(out.code, exit::FAILURE);
+    }
+
+    #[test]
+    fn a_non_result_document_exits_schema_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.json");
+        std::fs::write(&p, r#"{"hello":"world"}"#).unwrap();
+        assert_eq!(cmd_validate(&p).code, exit::SCHEMA_INVALID);
+    }
+
+    #[test]
+    fn unbuilt_commands_refuse_clearly_rather_than_pretending() {
+        let out = not_yet("score", "needs the plugin host");
+        assert_eq!(out.code, exit::ENVIRONMENT_UNFIT);
+        assert!(out.human.contains("not built yet"));
+    }
+}

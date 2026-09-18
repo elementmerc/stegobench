@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/stegobench-core",
     "crates/stegobench-metrics",
+    "crates/stegobench-cli",
 ]
 
 [workspace.package]
