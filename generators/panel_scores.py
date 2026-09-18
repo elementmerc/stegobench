@@ -327,13 +327,30 @@ def main(argv: list[str] | None = None) -> int:
         row.setdefault("arm", fallback_arm)
 
     out_path = pathlib.Path(args.out) if args.out else corpus / "panel.jsonl"
+    # A record counts as done only if it actually carries a detector's answer.
+    #
+    # The first version keyed on the filename alone, so a record written after a
+    # detector failed, which is just {"file": ...}, looked identical to a
+    # finished one. A run whose Aletheia pass died on the first directory wrote
+    # 200 such records, and every re-run then reported "resuming: 1480 files
+    # already scored" and exited having scored nothing, over and over, while the
+    # report showed arms pairing against three survivors. Resume has to be able
+    # to tell an answer from an absence.
+    DETECTOR_FIELDS = ("aletheia_spa", "aletheia_rs", "stegexpose", "zsteg",
+                       "aletheia_error")
     scored: dict[str, dict] = {}
     if out_path.exists():
+        empty = 0
         for line in out_path.read_text().splitlines():
-            if line.strip():
-                rec = json.loads(line)
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if any(f in rec for f in DETECTOR_FIELDS):
                 scored[rec["file"]] = rec
-        print(f"resuming: {len(scored)} files already scored")
+            else:
+                empty += 1
+        note = f", {empty} empty record(s) ignored" if empty else ""
+        print(f"resuming: {len(scored)} files already scored{note}")
 
     wanted: list[str] = []
     seen = set()
