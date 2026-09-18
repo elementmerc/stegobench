@@ -25,6 +25,22 @@ seconds_per_image = 0.8
 peak_rss_mb = 420
 cores_per_worker = 1
 
+[invoke]
+# Driven through the library, not the command line, because the CLI compares
+# its own estimate to a threshold and prints a sentence. See the adapter.
+adapter = "plugins/adapters/aletheia_one.py"
+entrypoint = "python3"
+# The library is cloned to /opt/aletheia but the image's workdir is /data, so
+# an import fails without this. Image layout belongs in the entry, not in the
+# adapter, which should outlive any one image.
+env = ["PYTHONPATH=/opt/aletheia"]
+argv = ["{adapter}", "{file}", "spa"]
+parser = "number"
+
 [selftest]
 must_detect = "fixtures/lsb-0.4bpp.png"
 must_clear = "fixtures/clean.png"
+# These estimate an embedding RATE, not a probability. The fixture carries
+# 0.4 bpp and a clean image sits near zero, so 0.1 separates them with room on
+# both sides. A smoke-test decision point, not a calibrated operating point.
+threshold = 0.1

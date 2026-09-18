@@ -71,11 +71,29 @@ pub fn stegexpose(stdout: &str, _stderr: &str) -> Reading {
     Reading::Failed("no numeric score in StegExpose output".into())
 }
 
+/// One bare number on stdout, which is what an adapter prints.
+///
+/// Anything else is a failure rather than a zero. A zero here would be
+/// indistinguishable from a confident "clean", which is how a broken tool
+/// starts looking like a working one.
+pub fn number(stdout: &str, stderr: &str) -> Reading {
+    for line in stdout.lines() {
+        if let Ok(v) = line.trim().parse::<f64>() {
+            if v.is_finite() {
+                return Reading::Score(v);
+            }
+        }
+    }
+    let why = stderr.lines().next_back().unwrap_or("no output").trim();
+    Reading::Failed(format!("no number on stdout: {why}"))
+}
+
 /// Dispatches by the name a registry entry declares.
 pub fn parse(parser: &str, stdout: &str, stderr: &str) -> Reading {
     match parser {
         "zsteg" => zsteg(stdout, stderr),
         "stegexpose" => stegexpose(stdout, stderr),
+        "number" => number(stdout, stderr),
         other => Reading::Failed(format!("no built-in parser named {other:?}")),
     }
 }
@@ -159,6 +177,33 @@ mod tests {
         // A zero here would be indistinguishable from a confident "clean",
         // which is how a broken tool starts looking like a working one.
         assert!(matches!(stegexpose("File name,Fusion (mean)\n", ""), Reading::Failed(_)));
+    }
+
+    #[test]
+    fn a_bare_number_is_read_as_a_score() {
+        assert_eq!(number("0.0412345678\n", ""), Reading::Score(0.0412345678));
+    }
+
+    #[test]
+    fn a_negative_estimate_is_kept_because_it_is_the_noise_floor() {
+        // Both Aletheia estimators go slightly negative on some clean images.
+        // That spread is what a false-positive rate is measured from, so
+        // clamping it would make every clean image look identical.
+        assert_eq!(number("-0.0093\n", ""), Reading::Score(-0.0093));
+    }
+
+    #[test]
+    fn no_number_reports_why_rather_than_returning_zero() {
+        let r = number("", "aletheia is not importable in this container: no module");
+        match r {
+            Reading::Failed(why) => assert!(why.contains("not importable"), "got {why}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_finite_estimate_is_not_a_score() {
+        assert!(matches!(number("NaN\n", "bad"), Reading::Failed(_)));
     }
 
     #[test]

@@ -141,6 +141,32 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{stego_path}  sha256 {stego_sha[:16]}")
     print(f"{changed} samples changed, about {expected} expected "
           f"(half the payload bits already match)")
+    # RGB variants, because some tools have nothing to say about greyscale.
+    #
+    # StegExpose analyses colour planes and prints no row at all for a mode-L
+    # PNG: it exits zero having said nothing, which reads exactly like "found
+    # nothing" and would fail a working tool. This is the same lesson the
+    # appended fixture taught, in a second place: what a tool needs is a
+    # property of the tool, and one fixture cannot serve them all.
+    rgb_cover = np.stack([cover, np.roll(cover, 7, axis=0), np.roll(cover, 13, axis=1)], axis=2)
+    rgb_stego = rgb_cover.copy().reshape(-1)
+    rgb_rng = np.random.default_rng(SEED + 1)
+    rgb_count = int(rgb_stego.size * args.rate)
+    rgb_pos = rgb_rng.choice(rgb_stego.size, size=rgb_count, replace=False)
+    rgb_stego[rgb_pos] = (rgb_stego[rgb_pos] & 0xFE) | rgb_rng.integers(
+        0, 2, size=rgb_count, dtype=np.uint8
+    )
+    rgb_stego = rgb_stego.reshape(rgb_cover.shape)
+
+    clean_rgb = out / "clean-rgb.png"
+    stego_rgb = out / f"lsb-{args.rate}bpp-rgb.png"
+    Image.fromarray(rgb_cover, mode="RGB").save(clean_rgb, format="PNG", optimize=False)
+    Image.fromarray(rgb_stego, mode="RGB").save(stego_rgb, format="PNG", optimize=False)
+    print(f"{clean_rgb}  sha256 "
+          f"{hashlib.sha256(clean_rgb.read_bytes()).hexdigest()[:16]}")
+    print(f"{stego_rgb}  sha256 "
+          f"{hashlib.sha256(stego_rgb.read_bytes()).hexdigest()[:16]}")
+
     appended_path = out / "appended.png"
     appended_sha = write_appended(clean_path, appended_path, appended_payload)
     print(f"{appended_path}  sha256 {appended_sha[:16]}  "

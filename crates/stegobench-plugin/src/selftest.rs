@@ -43,7 +43,27 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
     let Some(name) = absolute.file_name().and_then(|n| n.to_str()) else {
         return Reading::Failed("fixture has no usable filename".into());
     };
-    let mount = format!("{}:/work/{}:ro", absolute.display(), name);
+    // A writable working directory, when the tool writes beside its input.
+    // The scratch directory is dropped when this function returns, so nothing
+    // a tool leaves behind outlives the check.
+    let scratch = if invoke.writable_workdir {
+        match tempfile::tempdir() {
+            Ok(d) => {
+                if let Err(e) = std::fs::copy(&absolute, d.path().join(name)) {
+                    return Reading::Failed(format!("could not stage the fixture: {e}"));
+                }
+                Some(d)
+            }
+            Err(e) => return Reading::Failed(format!("no scratch directory: {e}")),
+        }
+    } else {
+        None
+    };
+
+    let mount = match &scratch {
+        Some(d) => format!("{}:/work", d.path().display()),
+        None => format!("{}:/work/{}:ro", absolute.display(), name),
+    };
     let inner = format!("/work/{name}");
 
     let mut args: Vec<String> = vec![
@@ -54,23 +74,81 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
         "--read-only".into(),
         "--memory=2g".into(),
         "-v".into(), mount,
-        image.into(),
     ];
-    args.extend(
-        invoke
-            .argv
-            .iter()
-            .map(|a| a.replace("{file}", &inner)),
-    );
 
-    match Command::new("docker").args(&args).output() {
-        Ok(out) => parsers::parse(
-            &invoke.parser,
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        ),
-        Err(e) => Reading::Failed(format!("could not run the container: {e}")),
+    // An adapter is mounted read-only beside the image it reads.
+    let mut adapter_inner = String::new();
+    if let Some(rel) = &invoke.adapter {
+        let Ok(abs) = Path::new(rel).canonicalize() else {
+            return Reading::Failed(format!("adapter {rel} not found"));
+        };
+        let Some(base) = abs.file_name().and_then(|n| n.to_str()) else {
+            return Reading::Failed("adapter has no usable filename".into());
+        };
+        adapter_inner = format!("/adapter/{base}");
+        args.push("-v".into());
+        args.push(format!("{}:{}:ro", abs.display(), adapter_inner));
     }
+
+    for kv in &invoke.env {
+        args.push("-e".into());
+        args.push(kv.clone());
+    }
+
+    // Several of these images set an entrypoint to the tool itself, which
+    // would swallow the adapter's argv.
+    if let Some(ep) = &invoke.entrypoint {
+        args.push("--entrypoint".into());
+        args.push(ep.clone());
+    }
+
+    args.push(image.into());
+    args.extend(invoke.argv.iter().map(|a| {
+        a.replace("{file}", &inner).replace("{adapter}", &adapter_inner)
+    }));
+
+    // Run as this user, so a tool writing into the scratch directory does not
+    // leave root-owned files the cleanup then fails to remove.
+    //
+    // The ids come from the scratch directory's own metadata rather than from
+    // libc: we created it, so it already carries them, and asking the
+    // filesystem needs neither a dependency nor an unsafe block.
+    #[cfg(unix)]
+    if let Some(dir) = &scratch {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(dir.path()) {
+            args.insert(2, "--user".into());
+            args.insert(3, format!("{}:{}", meta.uid(), meta.gid()));
+        }
+    }
+
+    let out = match Command::new("docker").args(&args).output() {
+        Ok(out) => out,
+        Err(e) => return Reading::Failed(format!("could not run the container: {e}")),
+    };
+
+    // Some tools answer in a file rather than on stdout. Reading an empty or
+    // absent file as "found nothing" is how silence becomes a measurement, so
+    // a missing file is a failure with its name.
+    let text = match (&invoke.output_file, &scratch) {
+        (Some(rel), Some(dir)) => {
+            let path = dir.path().join(rel.trim_start_matches("/work/"));
+            match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Reading::Failed(format!(
+                        "{} wrote no {}: {e}. stderr: {}",
+                        entry.name,
+                        rel,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                }
+            }
+        }
+        _ => String::from_utf8_lossy(&out.stdout).into_owned(),
+    };
+
+    parsers::parse(&invoke.parser, &text, &String::from_utf8_lossy(&out.stderr))
 }
 
 /// Asks a tool both questions.
@@ -92,7 +170,7 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
     let detect_path = fixtures_dir.join(strip_prefix(&test.must_detect));
     let clear_path = fixtures_dir.join(strip_prefix(&test.must_clear));
 
-    let threshold = 0.5;
+    let threshold = test.threshold;
     let higher = entry.emits.higher_means_stego;
 
     let on_stego = run_one(entry, &image, &detect_path);

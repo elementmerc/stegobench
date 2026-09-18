@@ -277,8 +277,50 @@ pub struct Cost {
 /// How to run a tool that does not speak the protocol.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Invoke {
-    /// Argv inside the container. `{file}` is replaced by the mounted path.
+    /// Argv inside the container. `{file}` is replaced by the mounted image
+    /// and `{adapter}` by the mounted adapter, if one is declared.
     pub argv: Vec<String>,
+    /// A small script mounted read-only into the container, for tools whose
+    /// own command line throws away the number we need.
+    ///
+    /// Aletheia is the case that forces this to exist. Its CLI compares its
+    /// own estimate to a threshold and prints a sentence, so driving it
+    /// through the command line discards the statistic an ROC curve is made
+    /// of. The adapter calls the same functions the CLI calls, unmodified,
+    /// and prints the estimate instead of a verdict. Nothing is
+    /// reimplemented; the detector stays Aletheia's.
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// Override the container entrypoint, which several of these images set to
+    /// the tool itself.
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// Environment for the container, as `NAME=value`.
+    ///
+    /// This is where image-specific knowledge belongs. Aletheia installs its
+    /// library at /opt/aletheia while the image's working directory is /data,
+    /// so an import fails unless PYTHONPATH says otherwise. Putting that in
+    /// the adapter would hardcode one image's layout into a script meant to
+    /// outlive it; putting it here keeps the adapter about the detector and
+    /// the entry about the container.
+    ///
+    /// Secrets never appear here. They are named in `secrets` and their values
+    /// are read from the host environment at run time.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Give the tool a writable working directory with the image copied into
+    /// it, rather than a read-only mount of the file.
+    ///
+    /// StegExpose is the case: it takes a directory, and it writes its CSV to
+    /// a path you hand it. Given a read-only mount it prints nothing at all
+    /// and exits zero, which is silence that looks exactly like "found
+    /// nothing". Several other tools write beside their input the same way.
+    #[serde(default)]
+    pub writable_workdir: bool,
+    /// Read the answer from this file inside the working directory instead of
+    /// from stdout. Requires `writable_workdir`.
+    #[serde(default)]
+    pub output_file: Option<String>,
     /// Which built-in parser reads the output. Named rather than described,
     /// because these formats are quirky enough that a rule in TOML would be a
     /// small programming language nobody wants to debug.
@@ -297,6 +339,25 @@ pub struct Invoke {
 pub struct Selftest {
     pub must_detect: String,
     pub must_clear: String,
+    /// The score above which this tool's output means "carrying something",
+    /// for the self-test only.
+    ///
+    /// It has to be per tool because the outputs are not the same quantity.
+    /// Aletheia's estimators return an embedding RATE, so a 0.4 bpp fixture
+    /// scores near 0.4 and a fixed 0.5 would fail a perfectly good detector.
+    /// StegExpose returns a fused statistic on its own scale. Picking one
+    /// number for all of them would be measuring the threshold rather than
+    /// the tool.
+    ///
+    /// This is NOT a calibrated operating point and must never be used as one:
+    /// it is a smoke-test decision point against a deliberately loud fixture.
+    /// Real thresholds come from a false-positive budget on a real corpus.
+    #[serde(default = "default_threshold")]
+    pub threshold: f64,
+}
+
+fn default_threshold() -> f64 {
+    0.5
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -368,6 +429,35 @@ impl Entry {
                  worse than no check"
                     .into(),
             );
+        }
+
+        if let Some(inv) = &self.invoke {
+            if inv.output_file.is_some() && !inv.writable_workdir {
+                bad.push(
+                    "invoke.output_file needs writable_workdir, or there is \
+                     nowhere for the tool to write it"
+                        .into(),
+                );
+            }
+        }
+
+        // env is for layout, not credentials. A token pasted here would be
+        // written into a file that is committed, which is the failure the
+        // secrets field exists to prevent, so it is refused in both places.
+        if let Some(inv) = &self.invoke {
+            for kv in &inv.env {
+                let looks_secret = ["TOKEN", "SECRET", "KEY", "PASSWORD", "LICENCE", "LICENSE"]
+                    .iter()
+                    .any(|k| kv.split('=').next().is_some_and(|n| n.to_uppercase().contains(k)));
+                if looks_secret {
+                    bad.push(format!(
+                        "invoke.env entry {:?} names a credential. Declare it in \
+                         secrets instead, so its value is read from the \
+                         environment and never committed",
+                        kv.split('=').next().unwrap_or(kv)
+                    ));
+                }
+            }
         }
 
         // A secret that looks like it holds a value rather than naming one.
