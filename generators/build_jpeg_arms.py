@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """The JPEG arms: the gap round 2 named and could not fill.
 
 WHY THIS ROUND EXISTS
 ---------------------
-The round 2 evaluation of StegaShield closed with three limitations written
+An earlier evaluation round closed with three limitations written
 down, and this closes the one that matters most:
 
     "No JPEG-domain hiding. Everything here is spatial. The JPEG-DCT blind
      spot is untested against either tool."
 
-It matters because JPEG is what real imagery is. StegaShield accepts JPEG
+It matters because JPEG is what real imagery is. the detector under test accepts JPEG
 uploads, and a detector that has only ever been measured on PNG has been
 measured on the minority case. It also matters for us: Stegcore's own JPEG-DCT
 blind spot is a documented frontier, so this arm measures both tools on ground
@@ -42,7 +44,7 @@ chi-squared test and costs it capacity it never advertises.
 
 THE STRUCTURAL ARM IS THE CONTROL THAT ANSWERS A LIVE QUESTION
 --------------------------------------------------------------
-Round 2's headline finding was that StegaShield returned byte-identical scores
+Round 2's headline finding was that the detector under test returned byte-identical scores
 on 120 of 120 pairs where 4 kB had been appended after a PNG's end marker: it
 decodes the image and never looks at the container. The JPEG structural arm
 appends after the JPEG end-of-image marker instead. If the scores are identical

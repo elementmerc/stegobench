@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Content-adaptive spatial embedding: HUGO, WOW, S-UNIWARD, HILL, MiPOD.
 
 This is the arm the field's best current corpus does not have. REVEAL (Kombrink

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """The eight embedders, each with the quirk that makes it different.
 
 Tiers 1 and 2 of the Pentimento tool plan. Tier 3 is the Windows-only family and
@@ -133,7 +135,7 @@ class OutguessEmbedder(DockerTool, Embedder):
         # a quality 95 cover against a quality 75 stego differs in compression
         # as well as in payload, and a detector reading the difference is
         # measuring the re-encode. Measured on 119 pairs built that way, both
-        # StegaShield and Stegcore came out at AUC 0.40, BELOW chance, because
+        # the detector under test and a reference detector came out at AUC 0.40, BELOW chance, because
         # the stego half was smoother than its own cover.
         #
         # `-p` is passed through to the JPEG handler and sets the quality, which

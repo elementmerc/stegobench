@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Detection against payload rate, at a fixed image size.
 
 The size sweep refuted the resize hypothesis: detection got BETTER with image

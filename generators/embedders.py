@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """The real end-user tools, behind one interface.
 
 WHY THESE AND NOT THE ACADEMIC SCHEMES

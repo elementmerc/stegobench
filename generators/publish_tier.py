@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Turn a packed tier into a release, from one source of truth.
 
 THE FAILURE THIS IS DESIGNED AGAINST

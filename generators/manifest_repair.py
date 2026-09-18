@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Add the fields the manifest promised and did not carry, and fix one that lied.
 
 WHY THIS EXISTS

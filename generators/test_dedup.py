@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Tests for the deduplication store.
 
-Run them with the standard library alone, because the atlas virtual environment
+Run them with the standard library alone, because the build box's virtual environment
 that runs the corpus build has no pytest in it and a test suite that only runs
 on the laptop is a test suite that stops running:
 

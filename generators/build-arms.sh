@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 # Build every arm of the round 2 corpus: each cover source, crossed with each
 # embedding method, swept across payload rate.
 #
@@ -28,11 +30,25 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GEN="$HERE"
 
 # source name -> directory of clean covers. Add a row to add a source.
-declare -A SOURCES=(
-  [alaska2]="/path/to/alaska2/clean"
-  [pexels]="/path/to/pexels-covers"
-  [bossbase]="/path/to/bossbase-png"
-)
+#
+# Set these for your own machine, or export STEGOBENCH_SOURCES as a
+# space-separated list of name=path pairs. There are deliberately no defaults:
+# a path that happens to exist on somebody else's disk is worse than one that
+# does not, because the run succeeds against covers nobody chose.
+#
+#   STEGOBENCH_SOURCES="bossbase=/data/bossbase alaska2=/data/alaska2" \
+#     build-arms.sh /tmp/arms 40
+declare -A SOURCES=()
+if [ -n "${STEGOBENCH_SOURCES:-}" ]; then
+  for pair in $STEGOBENCH_SOURCES; do
+    SOURCES["${pair%%=*}"]="${pair#*=}"
+  done
+fi
+if [ ${#SOURCES[@]} -eq 0 ]; then
+  echo "no cover sources configured." >&2
+  echo "  Set STEGOBENCH_SOURCES=\"name=/path/to/covers ...\" or edit this file." >&2
+  exit 2
+fi
 
 METHODS=(replace match)
 

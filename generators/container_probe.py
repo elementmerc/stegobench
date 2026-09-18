@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Where can you hide data in a file without the pixels changing at all?
 
 WHY THIS EXISTS
 ---------------
-Rounds 2 and 3 found that StegaShield returns byte-identical scores when data is
+Rounds 2 and 3 found that a detector under test returned byte-identical scores when data is
 appended past the end marker: 120 of 120 PNG pairs and 200 of 200 JPEG pairs. The
 conclusion drawn was that it decodes an image and never reads the file.
 
@@ -90,8 +92,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--count", type=int, default=60)
     ap.add_argument("--endpoint",
-                    default="http://172.24.0.2:3000/api/analyze")
+                    default=None)
     args = ap.parse_args(argv)
+    if not args.endpoint:
+        print("--endpoint is required: give the HTTP address of the detector "
+              "under test. There is deliberately no default, because a default "
+              "would score against whatever answered on it.", file=sys.stderr)
+        return 2
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     from score_arms import post_image

@@ -61,8 +61,7 @@ slow hour rather than a committed one.
 
 ## Round 1 era manifests use a different schema (2026-09-17)
 
-`ssprobe/structural`, `ssprobe/payload`, `ssprobe/payload2` and `ssprobe/sweep`
-predate the `arm` / `clean` / `stego` field names the scorers expect. The panel
+The earliest corpora built here, before the arm naming settled, predate the `arm` / `clean` / `stego` field names the scorers expect. The panel
 now defaults a missing `arm` to the corpus name, but it still requires `clean`
 and `stego` paths and those corpora carry only `source` plus digests.
 

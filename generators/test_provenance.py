@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Tests for the acquisition facts a cover carries.
 
     python3 -m unittest discover -s generators -p 'test_*.py'

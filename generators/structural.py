@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """The structural control: data appended after the PNG end-of-image marker.
 
 This is the crudest hiding technique there is. The payload is not woven into the

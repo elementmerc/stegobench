@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Select covers in tier order, so that a smaller tier is a prefix of a larger one.
 
 WHY THIS EXISTS

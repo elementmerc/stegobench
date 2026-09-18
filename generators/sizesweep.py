@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Does StegaShield's 448x448 input resize destroy the signal it looks for?
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+"""Does a detector's 448x448 input resize destroy the signal it looks for?
 
 The hypothesis, from the image metadata (MODEL_INPUT_SIZE=448): every image is
 scaled to 448x448 before inference. LSB steganography lives in the lowest bit of

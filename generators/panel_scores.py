@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Score a corpus with the established detector panel, and report per arm.
 
 WHY A PANEL AND NOT OUR OWN TOOL
 --------------------------------
-Earlier rounds compared StegaShield against Stegcore, which we build. That is
+Earlier rounds compared a detector under test against a tool we build ourselves. That is
 marking our own homework: a reader does not have to believe we cheated to
 discount the comparison, they only have to notice the incentive.
 

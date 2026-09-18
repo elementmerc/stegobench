@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """What a cover carries with it: how it was compressed, and where it was cut from.
 
 These are acquisition facts rather than image-quality facts, and they are shared

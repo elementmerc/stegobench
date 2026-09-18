@@ -207,7 +207,7 @@ refused, which two independent noise sources will not do, and ordinary
 photographs are unaffected: a resave and a brightness shift are still caught at 0
 bits, an 8 pixel crop with resize at 2.
 
-## Resource budget on atlas
+## Resource budget on the build box
 
 Measured 2026-09-16, not estimated.
 
@@ -215,7 +215,7 @@ Measured 2026-09-16, not estimated.
 |---|---|
 | Throughput, one core | 0.22 s/image (HILL) to 1.25 s/image (MiPOD); mean 0.82 |
 | Peak resident per worker | 246 MB, or 546 MB for MiPOD, at 512px |
-| atlas | 16 cores, 28 GB, and **`llama-server` holds close to 20 GB of it** |
+| build box | 16 cores, 28 GB, and a resident language model holds close to 20 GB of it |
 
 **Three workers, not more.** CPU is idle (load 0.15) and memory is the binding
 constraint: the local model must not be pushed into swap, which is the exact

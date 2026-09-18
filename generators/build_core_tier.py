@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """Build every arm of a tier, with bounded parallelism and a resumable plan.
 
 WHY AN ORCHESTRATOR AND NOT A SHELL LOOP
@@ -42,7 +44,7 @@ from concurrent import futures
 
 HERE = pathlib.Path(__file__).resolve().parent
 
-#: Measured on atlas, 2026-09-18, single process and CPU bound.
+#: Measured on a 16 core build box, 2026-09-18, single process and CPU bound.
 SECONDS_PER_ADAPTIVE_PAIR = 1.96
 #: The JPEG tool arms shell out to containers and are I/O bound, so they cost
 #: far less CPU per pair and parallelise further than the adaptive ones.

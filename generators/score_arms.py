@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Score a built corpus with StegaShield and Stegcore, then report per arm.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+"""Score a built corpus with the detector under test and a reference detector, then report per arm.
 
 WHAT IT REPORTS AND WHY NOT ACCURACY
 ------------------------------------
@@ -15,7 +17,7 @@ So three numbers per arm, and they answer different questions:
 threshold sits. It is the question "is the information there at all?" A value of
 0.5 means the scores carry nothing; 1.0 means perfect separation even if the
 verdict never fires. Computed tie-aware, because a detector that returns the
-same float for many images, as StegaShield does on appended data, would
+same float for many images, as some detectors do on appended data, would
 otherwise be flattered by an arbitrary tie-break.
 
 **TPR at a fixed FPR** asks what the detector is worth in a queue where false
@@ -44,7 +46,11 @@ import sys
 import time
 import urllib.request
 
-DEFAULT_ENDPOINT = "http://172.24.0.2:3000/api/analyze"
+#: No default endpoint. A benchmark that ships one lab's network address as a
+#: default produces results whose provenance nobody can check, and silently
+#: scores against whatever happens to answer on that address. The caller says
+#: which detector is under test.
+DEFAULT_ENDPOINT = None
 
 
 def post_image(endpoint: str, path: pathlib.Path, timeout: int = 120) -> dict:
@@ -139,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report-only", action="store_true",
                     help="skip scoring and just read what is already recorded")
     args = ap.parse_args(argv)
+    if not args.endpoint:
+        print("--endpoint is required: give the HTTP address of the detector "
+              "under test. There is deliberately no default, because a default "
+              "would score against whatever answered on it.", file=sys.stderr)
+        return 2
 
     sys.stdout.reconfigure(line_buffering=True)
     corpus = pathlib.Path(args.corpus)

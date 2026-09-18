@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
 """The deduplication store: one image may enter the corpus once, and only once.
 
 WHY THIS IS A CORRECTNESS REQUIREMENT
@@ -229,7 +231,7 @@ def _dct_matrix(n: int) -> np.ndarray:
     """The DCT-II basis as a matrix, so the transform is two matrix multiplies.
 
     Built here rather than imported so the module needs numpy and Pillow only;
-    scipy is present on atlas but not everywhere this has to run.
+    scipy is present on the build box but not everywhere this has to run.
     """
     k = np.arange(n).reshape(-1, 1)
     x = np.arange(n).reshape(1, -1)
