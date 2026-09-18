@@ -137,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(chosen)} covers, tier order 0..{len(chosen) - 1} "
           f"[{tier_name(len(chosen))}], from {manifest}")
 
+    # Cover SELECTION is no longer random, but the payloads still are, and they
+    # still have to be reproducible. Seeded here rather than where the covers
+    # used to be chosen, because the two jobs are separate and conflating them
+    # is what let one edit silently remove the other.
+    rng = random.Random(args.seed)
+
     # Outguess re-encodes; it must do so at the quality both halves share.
     embedders = [SteghideEmbedder(), OutguessEmbedder(quality=args.quality)]
     for e in embedders:
