@@ -31,8 +31,42 @@ JPEG-decompressed covers does not fix that; it is the other side of it.
 point, so this is the realistic regime rather than the laboratory one, and no
 corpus of this size offers it with verified per-file licensing and this
 diversity. It is a different contribution from BOSSbase, not a replacement for
-it. A never-compressed arm, drawn from Commons TIFF and PNG originals, is worth
-building and is not in version 1.
+it.
+
+### A never-compressed arm has no source, and that is measured
+
+The obvious fix is to add an arm of never-compressed covers. The fetcher already
+supports it: `suitable()` accepts TIFF and PNG and `provenance.pristine()`
+identifies them. So the question is supply, and on 2026-09-18 it was measured
+rather than assumed, with `generators/probe_pristine_supply.py`.
+
+**Commons.** Six targeted searches, including ones naming camera makers
+directly, over 5,084 and 8,416 TIFF hits respectively:
+
+| Query | Hits | TIFFs checked | With camera EXIF |
+|---|---|---|---|
+| `filemime:tiff Nikon` | 5,084 | 40 | **0** |
+| `filemime:tiff Canon EOS` | 8,416 | 40 | **0** |
+| `filemime:tiff photograph landscape` | 325,809 | 40 | **0** |
+| `filemime:tiff portrait photo` | 10,429 | 40 | **0** |
+| `filemime:tiff DSLR` | 7 | 7 | **0** |
+| `filemime:tiff camera raw converted` | 53 | 40 | **0** |
+
+**207 TIFFs, not one with a camera Make.** The positive control, the identical
+extraction run over JPEGs, found 32 of 40 (80%), so the method works and the
+zero is the answer rather than a bug. Commons TIFFs are manuscript scans, maps
+and artwork reproductions: cameras write JPEG or RAW, and Commons hosts neither
+as a photographic original in any quantity.
+
+**Everywhere else.** `cover-source-licensing.md` already closes the academic
+lineage: ALASKA2 is no-derivatives, BOSSbase has no licence anyone can produce,
+and Dresden, RAISE, BOWS2 and DIV2K are non-commercial. There is no corpus of
+never-compressed camera originals that we may lawfully republish.
+
+**So the arm is not deferred for want of effort.** The only remaining route is
+photographing RAW ourselves, which is what the BOSS organisers did with seven
+cameras, and which buys unambiguous rights at a small volume. Until then this
+corpus is JPEG-decompressed and says so at the top.
 
 ## Tiers, and why the nesting is the load-bearing part
 
