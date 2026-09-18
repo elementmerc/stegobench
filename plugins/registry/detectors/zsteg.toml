@@ -32,6 +32,15 @@ seconds_per_image = 0.1
 peak_rss_mb = 120
 cores_per_worker = 1
 
+[invoke]
+argv = ["zsteg", "-a", "{file}"]
+parser = "zsteg"
+
 [selftest]
-must_detect = "fixtures/lsb-0.4bpp.png"
+# A STRUCTURAL fixture, not the LSB one. zsteg reads the container and looks
+# for extractable text or a file; it never decodes the picture. Asked about
+# uniform random bits in the LSB plane it correctly says nothing, so testing it
+# with the LSB fixture fails a working tool and proves nothing. This is the
+# arm it actually owns, and the one it caught 100% of with no false alarms.
+must_detect = "fixtures/appended.png"
 must_clear = "fixtures/clean.png"

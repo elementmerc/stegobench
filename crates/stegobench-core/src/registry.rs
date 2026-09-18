@@ -70,6 +70,19 @@ pub struct Entry {
     /// a manifest or in a result: see `secret_names`.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// How to invoke the tool, for the tools that do not speak the plugin
+    /// protocol themselves.
+    ///
+    /// Two supported paths, both first class. A third party ships a container
+    /// that answers `describe` and `run`, and needs nothing here. The classic
+    /// tools predate any such idea by a decade and are driven by a declared
+    /// argv plus a named parser, so the parsing lives in a small tested
+    /// function rather than inside a general-purpose orchestrator. The zsteg
+    /// parser alone had three bugs in one week while it lived in a 501 line
+    /// script: the wrong marker, then the wrong stream, then an operator
+    /// precedence error, and each was hard to see for the same reason.
+    #[serde(default)]
+    pub invoke: Option<Invoke>,
     #[serde(default)]
     pub selftest: Option<Selftest>,
     #[serde(default)]
@@ -259,6 +272,17 @@ pub struct Cost {
     pub peak_rss_mb: Option<u64>,
     #[serde(default)]
     pub cores_per_worker: Option<u32>,
+}
+
+/// How to run a tool that does not speak the protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Invoke {
+    /// Argv inside the container. `{file}` is replaced by the mounted path.
+    pub argv: Vec<String>,
+    /// Which built-in parser reads the output. Named rather than described,
+    /// because these formats are quirky enough that a rule in TOML would be a
+    /// small programming language nobody wants to debug.
+    pub parser: String,
 }
 
 /// Fixtures that prove the tool is installed and working.

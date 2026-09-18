@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Daniel Iwugo
+//! Reading what each classic tool actually prints.
+//!
+//! WHY THIS IS ITS OWN MODULE WITH ITS OWN FIXTURES
+//! ------------------------------------------------
+//! The zsteg parser had three separate bugs in one week while it lived inside
+//! a 501 line orchestrator: it matched the wrong marker, then read the wrong
+//! stream, then got an operator precedence wrong. Each was hard to see for the
+//! same reason, that a parser buried in a big function has no fixtures of its
+//! own and is only ever exercised by a twenty minute run.
+//!
+//! Every parser here is a pure function from captured output to an answer, and
+//! every known-bad case that has actually bitten us is a test below.
+
+use crate::Record;
+
+/// What a parser concluded about one image.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reading {
+    Score(f64),
+    Verdict(bool),
+    Failed(String),
+}
+
+/// zsteg: a structural scanner that reads the container rather than the pixels.
+///
+/// THREE THINGS THAT ARE NOT OBVIOUS AND EACH COST A BUG
+///
+/// 1. A finding is marked `[?]`, not `[+]` or anything else.
+/// 2. On a JPEG, zsteg writes **nothing to stdout**: both the finding and the
+///    crash that follows go to stderr. Reading only stdout sees a clean image
+///    every time, which is a detector that always says no.
+/// 3. `text:` and `file:` lines are findings too, and the check for them has
+///    to be grouped correctly or it collapses into something always true.
+///
+/// So both streams are searched, and the caller passes them joined.
+pub fn zsteg(stdout: &str, stderr: &str) -> Reading {
+    let combined = format!("{stdout}\n{stderr}");
+    for line in combined.lines() {
+        let line = line.trim();
+        if line.starts_with("[?]") {
+            return Reading::Verdict(true);
+        }
+        // Grouped deliberately. Written as `a || b && c` this reads as
+        // `a || (b && c)` and quietly stops testing what it looks like it
+        // tests, which is the third bug this comment exists to prevent.
+        if (line.contains("text:") || line.contains("file:"))
+            && !line.contains("nothing :(")
+        {
+            return Reading::Verdict(true);
+        }
+    }
+    // An empty result is a real answer for zsteg: it looked and found nothing.
+    Reading::Verdict(false)
+}
+
+/// StegExpose prints a CSV whose last column is its fused score.
+pub fn stegexpose(stdout: &str, _stderr: &str) -> Reading {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("File name") {
+            continue;
+        }
+        if let Some(last) = line.rsplit(',').next() {
+            if let Ok(v) = last.trim().parse::<f64>() {
+                return Reading::Score(v);
+            }
+        }
+    }
+    Reading::Failed("no numeric score in StegExpose output".into())
+}
+
+/// Dispatches by the name a registry entry declares.
+pub fn parse(parser: &str, stdout: &str, stderr: &str) -> Reading {
+    match parser {
+        "zsteg" => zsteg(stdout, stderr),
+        "stegexpose" => stegexpose(stdout, stderr),
+        other => Reading::Failed(format!("no built-in parser named {other:?}")),
+    }
+}
+
+impl Reading {
+    /// Turns a reading into a protocol record.
+    pub fn into_record(self, id: impl Into<String>) -> Record {
+        let id = id.into();
+        match self {
+            Reading::Score(s) => Record { id, score: Some(s), verdict: None, error: None, elapsed_ms: None },
+            Reading::Verdict(v) => Record { id, score: None, verdict: Some(v), error: None, elapsed_ms: None },
+            Reading::Failed(e) => Record { id, score: None, verdict: None, error: Some(e), elapsed_ms: None },
+        }
+    }
+
+    /// Whether this reading means "carrying something", for a self-test.
+    /// A failure is not a yes and not a no; it is neither.
+    pub fn says_stego(&self, higher_means_stego: bool, threshold: f64) -> Option<bool> {
+        match self {
+            Reading::Verdict(v) => Some(*v),
+            Reading::Score(s) => Some(if higher_means_stego { *s > threshold } else { *s < threshold }),
+            Reading::Failed(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zsteg_finds_the_question_mark_marker() {
+        assert_eq!(zsteg("[?] 4096 bytes of extra data\n", ""), Reading::Verdict(true));
+    }
+
+    #[test]
+    fn zsteg_reads_stderr_because_on_jpeg_stdout_is_empty() {
+        // Bug two, pinned. Reading only stdout made zsteg a detector that
+        // answered "clean" to every JPEG, which looked like a real result.
+        assert_eq!(
+            zsteg("", "[?] 4096 bytes of extra data after IEND\nerror: not a PNG"),
+            Reading::Verdict(true)
+        );
+    }
+
+    #[test]
+    fn zsteg_treats_a_text_finding_as_a_finding() {
+        assert_eq!(zsteg("b1,rgb,lsb,xy .. text: \"hello\"\n", ""), Reading::Verdict(true));
+    }
+
+    #[test]
+    fn zsteg_does_not_fire_on_its_own_nothing_found_line() {
+        // Bug three's shape: with the condition grouped wrongly, a line
+        // saying it found nothing still matched.
+        assert_eq!(zsteg("b1,rgb,lsb,xy .. text: nothing :(\n", ""), Reading::Verdict(false));
+    }
+
+    #[test]
+    fn zsteg_on_a_clean_image_says_no_rather_than_failing() {
+        // An empty result is an answer, not an error. Reporting it as an
+        // error would inflate n_error and shrink the clean set.
+        assert_eq!(zsteg("", ""), Reading::Verdict(false));
+    }
+
+    #[test]
+    fn zsteg_ignores_a_plus_marker_which_is_not_what_it_prints() {
+        // Bug one: the original parser looked for [+] and so matched nothing,
+        // ever, and reported a 0% detection rate that read as a finding.
+        assert_eq!(zsteg("[+] something unrelated\n", ""), Reading::Verdict(false));
+    }
+
+    #[test]
+    fn stegexpose_takes_the_last_column_of_the_last_row() {
+        let out = "File name,Secret size,Primary Sets,Chi Square,Sample Pairs,RS analysis,Fusion (mean)\n\
+                   a.png,1024,0.1,0.2,0.3,0.4,0.2751\n";
+        assert_eq!(stegexpose(out, ""), Reading::Score(0.2751));
+    }
+
+    #[test]
+    fn stegexpose_without_a_number_fails_rather_than_guessing_zero() {
+        // A zero here would be indistinguishable from a confident "clean",
+        // which is how a broken tool starts looking like a working one.
+        assert!(matches!(stegexpose("File name,Fusion (mean)\n", ""), Reading::Failed(_)));
+    }
+
+    #[test]
+    fn an_unknown_parser_name_fails_loudly() {
+        assert!(matches!(parse("nope", "", ""), Reading::Failed(_)));
+    }
+
+    #[test]
+    fn a_failed_reading_is_neither_yes_nor_no() {
+        assert_eq!(Reading::Failed("x".into()).says_stego(true, 0.5), None);
+    }
+
+    #[test]
+    fn a_score_is_compared_in_the_declared_direction() {
+        assert_eq!(Reading::Score(0.9).says_stego(true, 0.5), Some(true));
+        // outguess inverts StegaShield, so direction is not decoration.
+        assert_eq!(Reading::Score(0.9).says_stego(false, 0.5), Some(false));
+    }
+
+    #[test]
+    fn a_reading_becomes_a_complete_record() {
+        assert!(Reading::Verdict(false).into_record("1").is_complete());
+        assert!(Reading::Failed("x".into()).into_record("1").is_complete());
+    }
+}

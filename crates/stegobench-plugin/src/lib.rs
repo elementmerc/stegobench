@@ -32,8 +32,12 @@ use sha2::{Digest, Sha256};
 use stegobench_core::registry::Entry;
 
 pub mod availability;
+pub mod parsers;
+pub mod selftest;
 
 pub use availability::{Availability, Presence};
+pub use parsers::Reading;
+pub use selftest::Verified;
 
 /// One item of work handed to a plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

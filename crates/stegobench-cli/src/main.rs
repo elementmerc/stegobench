@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use stegobench_core::registry::{Kind, Registry};
-use stegobench_plugin::availability;
+use stegobench_plugin::{availability, selftest, Verified};
 use stegobench_core::{exit, Result1};
 
 #[derive(Parser)]
@@ -121,7 +121,16 @@ enum Command {
     /// produced nothing, because a support package was missing.
     ///
     /// Exits 8 when something needed is missing.
-    Doctor,
+    Doctor {
+        /// Where the self-test fixtures live.
+        #[arg(long, value_name = "DIR", default_value = "fixtures")]
+        fixtures: PathBuf,
+        /// Skip the self-tests and only report what is installed. Faster, and
+        /// honest about being weaker: it cannot tell a working tool from a
+        /// broken one.
+        #[arg(long)]
+        no_selftest: bool,
+    },
 
     /// Score a corpus with one or more detectors
     Score {
@@ -245,48 +254,86 @@ fn cmd_describe(dir: &PathBuf, name: &str) -> Output {
     }
 }
 
-fn cmd_doctor(dir: &PathBuf) -> Output {
+fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
     let reg = match load_registry(dir) {
         Ok(r) => r,
         Err(o) => return o,
     };
-    let checks: Vec<_> = reg.entries.values().map(availability::check).collect();
 
-    let missing: Vec<_> = checks
-        .iter()
-        .filter(|c| !c.presence.is_present())
-        .map(|c| c.name.as_str())
-        .collect();
-    let unverified = checks.len();
+    let mut rows = Vec::new();
+    let (mut missing, mut broken, mut passed, mut skipped) = (0, 0, 0, 0);
 
-    let mut human: Vec<String> = checks.iter().map(|c| c.summary()).collect();
+    for entry in reg.entries.values() {
+        let mut check = availability::check(entry);
+        // Only ask a tool to prove itself if its code is actually here. Running
+        // a self-test against a missing image produces a failure that says
+        // "broken" when the truth is "absent", and those need different fixes.
+        let verdict = if no_selftest || !check.presence.is_present() {
+            Verified::Skipped("not attempted".into())
+        } else {
+            selftest::run(entry, fixtures)
+        };
+        check.verified = match &verdict {
+            Verified::Passed => Some(true),
+            Verified::Failed(_) => Some(false),
+            Verified::Skipped(_) => None,
+        };
+        if !check.presence.is_present() {
+            missing += 1;
+        }
+        match &verdict {
+            Verified::Passed => passed += 1,
+            Verified::Failed(_) => broken += 1,
+            Verified::Skipped(_) => skipped += 1,
+        }
+        let detail = match &verdict {
+            Verified::Failed(why) => format!("{}  ({why})", check.summary()),
+            Verified::Skipped(why) if !no_selftest && check.presence.is_present() => {
+                format!("{}  ({why})", check.summary())
+            }
+            _ => check.summary(),
+        };
+        rows.push((check, verdict, detail));
+    }
+
+    let mut human: Vec<String> = rows.iter().map(|(_, _, d)| d.clone()).collect();
     human.push(String::new());
     human.push(format!(
-        "{} tool(s) checked, {} not installed.",
-        checks.len(),
-        missing.len()
+        "{} tool(s): {passed} verified, {broken} broken, {missing} not installed, \
+         {skipped} not checked.",
+        rows.len()
     ));
-    // Stated every run, not once in a README. The gap between installed and
-    // working is where three hours of silent failure went.
-    human.push(format!(
-        "{unverified} have NOT been run against a known positive and a known \n\
-         negative, so this reports what is here rather than what works."
-    ));
+    if skipped > 0 {
+        // Never let "we did not look" read as "it is fine".
+        human.push(
+            "A tool that was not checked is not a tool that works. Each skipped \n\
+             line says why."
+                .into(),
+        );
+    }
 
     let json = serde_json::json!({
-        "checked": checks.len(),
+        "checked": rows.len(),
+        "verified": passed,
+        "broken": broken,
         "missing": missing,
-        "verified": 0,
-        "tools": checks.iter().map(|c| serde_json::json!({
+        "not_checked": skipped,
+        "tools": rows.iter().map(|(c, v, d)| serde_json::json!({
             "name": c.name,
             "present": c.presence.is_present(),
-            "detail": c.summary(),
+            "verified": c.verified,
+            "status": match v {
+                Verified::Passed => "passed",
+                Verified::Failed(_) => "failed",
+                Verified::Skipped(_) => "not_checked",
+            },
+            "detail": d,
             "missing_secrets": c.missing_secrets,
         })).collect::<Vec<_>>(),
     });
 
     let mut out = Output::ok(json, human.join("\n"));
-    if !missing.is_empty() {
+    if missing > 0 || broken > 0 {
         out.code = exit::ENVIRONMENT_UNFIT;
     }
     out
@@ -351,7 +398,9 @@ fn run(cli: &Cli) -> Output {
         Command::List { kind } => cmd_list(&cli.registry, kind),
         Command::Describe { name } => cmd_describe(&cli.registry, name),
         Command::Plan { .. } => not_yet("plan", "V10, needs the governor"),
-        Command::Doctor => cmd_doctor(&cli.registry),
+        Command::Doctor { fixtures, no_selftest } => {
+            cmd_doctor(&cli.registry, fixtures, *no_selftest)
+        }
         Command::Score { .. } => not_yet("score", "needs the plugin host"),
     }
 }
@@ -401,6 +450,7 @@ mod tests {
             vec!["stegobench", "--json", "validate", "x.json"],
             vec!["stegobench", "--json", "list", "detectors"],
             vec!["stegobench", "--json", "doctor"],
+            vec!["stegobench", "--json", "doctor", "--no-selftest"],
             vec!["stegobench", "--json", "score", "--corpus", "x"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "rejected: {args:?}");
