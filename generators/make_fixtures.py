@@ -167,6 +167,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{stego_rgb}  sha256 "
           f"{hashlib.sha256(stego_rgb.read_bytes()).hexdigest()[:16]}")
 
+    # A JPEG cover, because steghide and outguess do not take PNG at all.
+    #
+    # Quality 95, matching the discipline that had to be learned the hard way:
+    # outguess re-encodes at 75 whatever it is given, so a clean half written
+    # at a different quality makes the detector learn the quality rather than
+    # the payload. That confound voided a whole measurement round.
+    jpeg_cover = out / "clean.jpg"
+    Image.fromarray(rgb_cover, mode="RGB").save(jpeg_cover, format="JPEG", quality=95)
+    print(f"{jpeg_cover}  sha256 "
+          f"{hashlib.sha256(jpeg_cover.read_bytes()).hexdigest()[:16]}  (quality 95)")
+
     appended_path = out / "appended.png"
     appended_sha = write_appended(clean_path, appended_path, appended_payload)
     print(f"{appended_path}  sha256 {appended_sha[:16]}  "

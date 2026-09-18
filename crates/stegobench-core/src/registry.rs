@@ -85,6 +85,19 @@ pub struct Entry {
     pub invoke: Option<Invoke>,
     #[serde(default)]
     pub selftest: Option<Selftest>,
+    /// How to prove an EMBEDDER works, which is a different question.
+    ///
+    /// A detector is asked whether it can tell two images apart. An embedder
+    /// cannot be asked that: the honest check is whether what goes in comes
+    /// back out. Hide a known payload, extract it, compare the bytes.
+    ///
+    /// This matters more than it sounds. A corpus built by an embedder that
+    /// silently wrote nothing would look exactly like an undetectable one, and
+    /// every detector scored against it would appear to fail. The manifest
+    /// already records samples changed for the same reason; this catches the
+    /// case before a twenty hour build rather than after it.
+    #[serde(default)]
+    pub roundtrip: Option<Roundtrip>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -272,6 +285,28 @@ pub struct Cost {
     pub peak_rss_mb: Option<u64>,
     #[serde(default)]
     pub cores_per_worker: Option<u32>,
+}
+
+/// Prove an embedder by hiding something and getting it back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Roundtrip {
+    /// Argv to hide `{payload}` in `{cover}`, writing `{stego}`.
+    pub embed_argv: Vec<String>,
+    /// Argv to recover `{stego}` into `{recovered}`.
+    pub extract_argv: Vec<String>,
+    /// The cover to use, from the fixtures directory.
+    pub cover: String,
+    /// Substituted for `{passphrase}`. Not a secret: it protects a fixture
+    /// that exists for three seconds inside a temporary directory, and a
+    /// constant here keeps the check reproducible.
+    #[serde(default = "default_passphrase")]
+    pub passphrase: String,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+}
+
+fn default_passphrase() -> String {
+    "stegobench-selftest".into()
 }
 
 /// How to run a tool that does not speak the protocol.

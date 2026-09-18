@@ -259,6 +259,11 @@ fn run_host_adapter(entry: &Entry, fixture: &Path) -> Reading {
 ///
 /// `fixtures_dir` holds the files the entry's selftest block names.
 pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
+    // An embedder cannot be asked to tell two images apart. The honest check
+    // is whether what goes in comes back out.
+    if entry.kind == stegobench_core::registry::Kind::Embedder {
+        return roundtrip::run(entry, fixtures_dir);
+    }
     let Some(test) = &entry.selftest else {
         return Verified::Skipped("no selftest declared".into());
     };
@@ -382,6 +387,137 @@ mod tests {
         match run(&e, Path::new("/definitely/not/here")) {
             Verified::Failed(r) => assert!(r.contains("not found"), "got {r}"),
             other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+}
+
+/// Proving an embedder: what goes in must come back out.
+pub mod roundtrip {
+    use std::path::Path;
+    use std::process::Command;
+
+    use stegobench_core::registry::Entry;
+
+    use super::Verified;
+
+    /// The payload. Short, recognisable, and not compressible into nothing,
+    /// so a tool that silently wrote an empty file cannot pass by accident.
+    pub const PAYLOAD: &[u8] = b"stegobench roundtrip fixture 2026: if you can read this, it survived.";
+
+    /// Hides the payload, recovers it, and compares the bytes.
+    ///
+    /// Byte comparison rather than a size check or a substring: a tool that
+    /// returns a truncated or padded payload has not worked, and every weaker
+    /// comparison has a way of passing when it should not.
+    pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
+        let Some(rt) = &entry.roundtrip else {
+            return Verified::Skipped("no roundtrip declared".into());
+        };
+        let Some(image) = entry.image.as_ref().map(|i| i.reference.clone()) else {
+            return Verified::Skipped("roundtrip currently covers containerised tools".into());
+        };
+        let cover_src = fixtures_dir.join(rt.cover.trim_start_matches("fixtures/"));
+        if !cover_src.is_file() {
+            return Verified::Failed(format!("cover {} not found", cover_src.display()));
+        }
+
+        let Ok(dir) = tempfile::tempdir() else {
+            return Verified::Failed("no scratch directory".into());
+        };
+        let work = dir.path();
+        let cover_name = cover_src.file_name().and_then(|n| n.to_str()).unwrap_or("cover");
+        if std::fs::copy(&cover_src, work.join(cover_name)).is_err() {
+            return Verified::Failed("could not stage the cover".into());
+        }
+        if std::fs::write(work.join("payload.bin"), PAYLOAD).is_err() {
+            return Verified::Failed("could not stage the payload".into());
+        }
+
+        // The stego file inherits the cover's extension. Several of these
+        // tools infer the format from the name and refuse anything else:
+        // outguess answers "Unknown data type" to a file called .out and
+        // exits 1, which looks like a broken tool rather than a bad filename.
+        let ext = Path::new(cover_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin");
+        let stego_name = format!("/work/stego.{ext}");
+
+        let subst = |a: &String| {
+            a.replace("{cover}", &format!("/work/{cover_name}"))
+                .replace("{payload}", "/work/payload.bin")
+                .replace("{stego}", &stego_name)
+                .replace("{recovered}", "/work/recovered.bin")
+                .replace("{passphrase}", &rt.passphrase)
+        };
+
+        let uid_gid = std::fs::metadata(work)
+            .ok()
+            .map(|m| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    format!("{}:{}", m.uid(), m.gid())
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = m;
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
+
+        let mut phase = |argv: &Vec<String>| -> Result<(), String> {
+            let mut args: Vec<String> = vec![
+                "run".into(), "--rm".into(),
+                "--network=none".into(),
+                "--cap-drop=ALL".into(),
+                "--security-opt".into(), "no-new-privileges".into(),
+                "--memory=2g".into(),
+            ];
+            if !uid_gid.is_empty() {
+                args.push("--user".into());
+                args.push(uid_gid.clone());
+            }
+            args.push("-v".into());
+            args.push(format!("{}:/work", work.display()));
+            if let Some(ep) = &rt.entrypoint {
+                args.push("--entrypoint".into());
+                args.push(ep.clone());
+            }
+            args.push(image.clone());
+            args.extend(argv.iter().map(&subst));
+            match Command::new("docker").args(&args).output() {
+                Ok(o) if o.status.success() => Ok(()),
+                Ok(o) => Err(format!(
+                    "exit {}: {}",
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stderr).trim().chars().take(160).collect::<String>()
+                )),
+                Err(e) => Err(format!("could not run the container: {e}")),
+            }
+        };
+
+        if let Err(e) = phase(&rt.embed_argv) {
+            return Verified::Failed(format!("embed failed: {e}"));
+        }
+        // A tool can exit zero having written nothing, which is the silent
+        // failure this whole check exists to catch.
+        match std::fs::metadata(work.join(format!("stego.{ext}"))) {
+            Ok(m) if m.len() > 0 => {}
+            _ => return Verified::Failed("embed exited cleanly but wrote no stego file".into()),
+        }
+        if let Err(e) = phase(&rt.extract_argv) {
+            return Verified::Failed(format!("extract failed: {e}"));
+        }
+        match std::fs::read(work.join("recovered.bin")) {
+            Ok(got) if got == PAYLOAD => Verified::Passed,
+            Ok(got) => Verified::Failed(format!(
+                "recovered {} bytes, expected {}: what went in did not come back",
+                got.len(),
+                PAYLOAD.len()
+            )),
+            Err(e) => Verified::Failed(format!("extract wrote no payload: {e}")),
         }
     }
 }
