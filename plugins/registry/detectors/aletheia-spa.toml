@@ -1,0 +1,30 @@
+# Sample Pair Analysis. Driven through aletheialib rather than the CLI: the
+# command line compares its own estimate to a threshold and prints a sentence,
+# discarding the number an ROC curve needs.
+name = "aletheia-spa"
+kind = "detector"
+upstream = "https://github.com/daniellerch/aletheia"
+licence = "MIT"
+maintainer = "third_party"
+
+[image]
+reference = "stegobench/aletheia@sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d"
+size_mb = 8340
+bundled = false
+needs_network = false
+
+[emits]
+output = "score"
+higher_means_stego = true
+
+[accepts]
+formats = ["png", "jpeg"]
+
+[cost]
+seconds_per_image = 0.8
+peak_rss_mb = 420
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

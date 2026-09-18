@@ -1,0 +1,25 @@
+name = "hstego"
+kind = "embedder"
+licence = "MIT"
+maintainer = "third_party"
+notes = "Modern, HILL based. Closer to what a capable adversary would actually use."
+
+[image]
+reference = "stegobench/hstego@sha256:59710f7b5fbaeb7c3b1d4333e64654c1721a3ddb60b489d8e54d5d0e8b269bfb"
+size_mb = 1410
+bundled = false
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["png"]
+
+[cost]
+seconds_per_image = 0.4
+peak_rss_mb = 300
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/roundtrip.png"
+must_clear = "fixtures/clean.png"

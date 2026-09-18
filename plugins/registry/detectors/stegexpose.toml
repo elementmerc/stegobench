@@ -1,0 +1,27 @@
+# A fusion of four classical statistics. The tool a practitioner is most likely
+# to have already tried.
+name = "stegexpose"
+kind = "detector"
+upstream = "https://github.com/b3dk7/StegExpose"
+licence = "GPL-3.0"
+maintainer = "third_party"
+
+[image]
+reference = "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5"
+size_mb = 512
+bundled = true
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["png", "jpeg", "bmp"]
+
+[cost]
+seconds_per_image = 0.3
+peak_rss_mb = 900
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

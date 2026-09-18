@@ -25,6 +25,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 sha2 = "0.10"
 tempfile = "3"
+toml = "0.8"
 
 [profile.release]
 # A benchmark that reports a wrong number because of an arithmetic wrap is

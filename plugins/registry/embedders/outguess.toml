@@ -1,0 +1,25 @@
+name = "outguess"
+kind = "embedder"
+licence = "BSD-3-Clause"
+maintainer = "third_party"
+notes = "Re-encodes at quality 75 whatever it is given, which voided a whole measurement round when the clean half had been written at 95. Both halves must come off the same writer."
+
+[image]
+reference = "stegobench/outguess@sha256:53eed9db453ffddd2ae2c0ec9877431def12d7340864c047e60dc546ed64aa2f"
+size_mb = 118
+bundled = true
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["jpeg"]
+
+[cost]
+seconds_per_image = 0.4
+peak_rss_mb = 300
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/roundtrip.jpeg"
+must_clear = "fixtures/clean.jpeg"

@@ -1,0 +1,29 @@
+# Regular/Singular. Note it spawns its own worker processes, so the host shards
+# it across containers rather than pooling inside one: pooling produced
+# "daemonic processes are not allowed to have children" AFTER SPA had already
+# succeeded, leaving records that looked half filled.
+name = "aletheia-rs"
+kind = "detector"
+upstream = "https://github.com/daniellerch/aletheia"
+licence = "MIT"
+maintainer = "third_party"
+
+[image]
+reference = "stegobench/aletheia@sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d"
+size_mb = 8340
+bundled = false
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["png", "jpeg"]
+
+[cost]
+seconds_per_image = 1.4
+peak_rss_mb = 520
+cores_per_worker = 2
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

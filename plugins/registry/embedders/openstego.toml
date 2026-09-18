@@ -1,0 +1,25 @@
+name = "openstego"
+kind = "embedder"
+licence = "GPL-2.0"
+maintainer = "third_party"
+notes = "PNG, LSB with an optional random seed."
+
+[image]
+reference = "stegobench/openstego@sha256:c8be427da41a1f0389762ee9c50ac27b7dc7ff14013d2dc83b361925da722ee2"
+size_mb = 911
+bundled = true
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["png"]
+
+[cost]
+seconds_per_image = 0.4
+peak_rss_mb = 300
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/roundtrip.png"
+must_clear = "fixtures/clean.png"

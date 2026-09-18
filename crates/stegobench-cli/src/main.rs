@@ -23,6 +23,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use stegobench_core::registry::{Kind, Registry};
 use stegobench_core::{exit, Result1};
 
 #[derive(Parser)]
@@ -39,6 +40,16 @@ struct Cli {
     /// Machine-readable output on stdout. Accepted by every subcommand.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Where the tool registry lives.
+    #[arg(
+        long,
+        global = true,
+        value_name = "DIR",
+        env = "STEGOBENCH_REGISTRY",
+        default_value = "plugins/registry"
+    )]
+    registry: PathBuf,
 
     #[command(subcommand)]
     command: Command,
@@ -74,10 +85,23 @@ enum Command {
     },
 
     /// List what this installation can do
+    ///
+    /// Generated from the registry, so what it prints is what the tool will
+    /// actually run. A README goes stale; this cannot.
+    ///
+    /// Example:
+    ///   stegobench list detectors --json | jq '.[].name'
     List {
-        /// One of: detectors, embedders, corpora.
-        #[arg(value_name = "KIND")]
+        /// One of: detectors, embedders, all.
+        #[arg(value_name = "KIND", default_value = "all")]
         kind: String,
+    },
+
+    /// Show everything registered about one tool
+    Describe {
+        /// A name as `list` prints it.
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 
     /// Estimate what a run would cost, without running anything
@@ -138,6 +162,70 @@ fn cmd_schema(name: &str) -> Output {
     }
 }
 
+fn load_registry(dir: &PathBuf) -> Result<Registry, Output> {
+    Registry::load(dir).map_err(|e| {
+        Output::err(
+            exit::FAILURE,
+            format!(
+                "{e}\n\nLooked in {}. Point --registry or STEGOBENCH_REGISTRY \
+                 at the directory holding the tool descriptions.",
+                dir.display()
+            ),
+        )
+    })
+}
+
+fn cmd_list(dir: &PathBuf, kind: &str) -> Output {
+    let reg = match load_registry(dir) {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let wanted: Vec<_> = match kind {
+        "detectors" => reg.of_kind(Kind::Detector),
+        "embedders" => reg.of_kind(Kind::Embedder),
+        "all" => reg.entries.values().collect(),
+        other => {
+            return Output::err(
+                exit::USAGE,
+                format!("unknown kind {other:?}. Known: detectors, embedders, all"),
+            )
+        }
+    };
+    let human = wanted
+        .iter()
+        .map(|e| e.summary())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Output::ok(
+        serde_json::to_value(&wanted).unwrap_or(serde_json::Value::Null),
+        if human.is_empty() {
+            format!("nothing registered under {kind:?}")
+        } else {
+            human
+        },
+    )
+}
+
+fn cmd_describe(dir: &PathBuf, name: &str) -> Output {
+    let reg = match load_registry(dir) {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    match reg.entries.get(name) {
+        Some(e) => Output::ok(
+            serde_json::to_value(e).unwrap_or(serde_json::Value::Null),
+            toml::to_string_pretty(e).unwrap_or_else(|_| format!("{e:#?}")),
+        ),
+        None => {
+            let known: Vec<_> = reg.entries.keys().cloned().collect();
+            Output::err(
+                exit::USAGE,
+                format!("no tool named {name:?}. Known: {}", known.join(", ")),
+            )
+        }
+    }
+}
+
 fn cmd_validate(file: &PathBuf) -> Output {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
@@ -194,7 +282,8 @@ fn run(cli: &Cli) -> Output {
     match &cli.command {
         Command::Schema { name } => cmd_schema(name),
         Command::Validate { file } => cmd_validate(file),
-        Command::List { .. } => not_yet("list", "V13, needs the registry"),
+        Command::List { kind } => cmd_list(&cli.registry, kind),
+        Command::Describe { name } => cmd_describe(&cli.registry, name),
         Command::Plan { .. } => not_yet("plan", "V10, needs the governor"),
         Command::Doctor => not_yet("doctor", "V6, needs the plugin host"),
         Command::Score { .. } => not_yet("score", "needs the plugin host"),

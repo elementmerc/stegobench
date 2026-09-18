@@ -1,0 +1,25 @@
+name = "steghide"
+kind = "embedder"
+licence = "GPL-2.0"
+maintainer = "third_party"
+notes = "JPEG and BMP. The everyday case, and nothing in the panel detects it."
+
+[image]
+reference = "stegobench/steghide@sha256:69ecb87c0f9cf99ff48636b1de7d7f8ea56d84d508cf65e5486e0acbe3c97150"
+size_mb = 120
+bundled = true
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["jpeg"]
+
+[cost]
+seconds_per_image = 0.4
+peak_rss_mb = 300
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/roundtrip.jpeg"
+must_clear = "fixtures/clean.jpeg"

@@ -1,0 +1,37 @@
+# A structural scanner: it reads the FILE rather than decoding the picture,
+# which is the half of the problem most detectors here never look at. On the
+# appended-data arm it caught 100% with no false alarms while every pixel-domain
+# detector sat at chance.
+#
+# Output is a verdict, not a score, so it contributes a detection rate and a
+# false-alarm rate but no ROC curve. That is a property of the tool, not a
+# shortcoming of the harness.
+#
+# Parsing note: on a JPEG it writes its finding AND its crash to stderr and
+# nothing to stdout. The parser reads both streams. Three separate bugs came
+# from not knowing that.
+name = "zsteg"
+kind = "detector"
+upstream = "https://github.com/zed-0xff/zsteg"
+licence = "MIT"
+maintainer = "third_party"
+
+[image]
+reference = "stegobench/zsteg@sha256:00c110ec4a37b87449872a565c2bb86eb6e93f28fde27829d98d1c7168ba68db"
+size_mb = 287
+bundled = true
+
+[emits]
+output = "verdict"
+
+[accepts]
+formats = ["png", "bmp"]
+
+[cost]
+seconds_per_image = 0.1
+peak_rss_mb = 120
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

@@ -1,0 +1,32 @@
+# SRM, DCTR and GFR feature extraction, 34,671 features for SRM.
+#
+# This entry is why selftest is mandatory. Without the Octave Forge packages
+# (octave-image, octave-signal, octave-nan) Aletheia catches the error per
+# image and exits zero, so a 2,000 image run "succeeds" and produces nothing.
+# doctor catches that in seconds; a silent run costs three hours.
+name = "aletheia-rich"
+kind = "detector"
+upstream = "https://github.com/daniellerch/aletheia"
+licence = "MIT"
+maintainer = "third_party"
+notes = "Feature extractor. Pair with a classifier; it does not decide anything on its own."
+
+[image]
+reference = "stegobench/aletheia-rich@sha256:5b08e93aaed2b2c30753ec3654df41d1406a4669f998384a04c26e24952f3ddf"
+size_mb = 9090
+bundled = false
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["png", "jpeg"]
+
+[cost]
+seconds_per_image = 5.4
+peak_rss_mb = 1800
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

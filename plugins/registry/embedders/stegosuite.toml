@@ -1,0 +1,24 @@
+name = "stegosuite"
+kind = "embedder"
+licence = "GPL-3.0"
+maintainer = "third_party"
+
+[image]
+reference = "stegobench/stegosuite@sha256:f3d9110af92cf4eea396a9a8b4aaa61bc67160e2f316b1db36f57f9b9f216906"
+size_mb = 836
+bundled = true
+
+[emits]
+output = "score"
+
+[accepts]
+formats = ["png"]
+
+[cost]
+seconds_per_image = 0.4
+peak_rss_mb = 300
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/roundtrip.png"
+must_clear = "fixtures/clean.png"

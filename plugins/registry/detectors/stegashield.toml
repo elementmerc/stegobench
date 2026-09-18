@@ -1,0 +1,41 @@
+# The subject of the September 2026 evaluation, registered so FiveInsights can
+# reproduce every number in that report themselves, on the same bytes, with one
+# command. A report you can check beats a report you have to trust.
+#
+# THE LICENCE TOKEN IS SUPPLIED BY WHOEVER RUNS IT.
+#
+# `secrets` names an environment variable and never holds a value. The harness
+# reads it at run time, passes it to the container with --env, and fails with a
+# clear message when it is missing. It does not reach a log, a manifest or a
+# result. The image is NOT vendored: it is a third party's artefact and we have
+# no right to redistribute it, so it is referenced by digest and pulled.
+name = "stegashield"
+kind = "detector"
+upstream = "https://hub.docker.com/r/5iprojects/stegashield"
+licence = "proprietary"
+maintainer = "subject"
+secrets = ["STEGASHIELD_LICENCE"]
+notes = "Evaluated September 2026. Never used as a reference detector for anything."
+
+[image]
+reference = "5iprojects/stegashield@sha256:64a6a378550f479c572c689bdb0af284cd81971e591a72077a6e74f7a97ea0e5"
+size_mb = 1250
+bundled = false
+needs_network = false
+
+[emits]
+output = "score"
+higher_means_stego = true
+
+[accepts]
+formats = ["png", "jpeg"]
+max_pixels = 16000000
+
+[cost]
+seconds_per_image = 0.9
+peak_rss_mb = 1400
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

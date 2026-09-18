@@ -1,0 +1,40 @@
+# Stegcore's own analysis ensemble: SPA, RS and WS with calibrated thresholds.
+#
+# IT IS HERE AS A SUBJECT, NOT AS A YARDSTICK.
+#
+# stegobench must not be built out of the product it judges, so Stegcore is
+# reached through exactly this file, the same way zsteg is, with no privileged
+# path anywhere in the harness. maintainer = "us" is what keeps it out of the
+# ranking: a benchmark run by a participant is not trusted, and mechanism is a
+# better answer to that than a promise.
+#
+# A binary rather than an image, for an honest reason: the published container
+# could not be resolved without a token scope nobody should need in order to run
+# a benchmark. The executable is hashed at run time instead, which pins it
+# harder than a tag would.
+name = "stegcore"
+kind = "detector"
+upstream = "https://github.com/The-Malware-Files/Stegcore"
+licence = "AGPL-3.0-or-later"
+maintainer = "us"
+notes = "Strong on spatial LSB and structural fingerprints; weak at low payload; blind in the JPEG DCT domain. Stated here so a null result is not read as a finding."
+
+[binary]
+command = ["stegcore", "analyse", "--json"]
+version_args = ["--version"]
+
+[emits]
+output = "score"
+higher_means_stego = true
+
+[accepts]
+formats = ["png", "jpeg", "bmp", "wav", "flac"]
+
+[cost]
+seconds_per_image = 0.2
+peak_rss_mb = 260
+cores_per_worker = 1
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"

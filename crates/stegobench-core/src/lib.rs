@@ -7,8 +7,10 @@
 //! beyond parsing: scoring, plugin execution and storage live elsewhere, so
 //! that the definition of a result never depends on how a result was obtained.
 
+pub mod registry;
 pub mod result;
 
+pub use registry::{Entry, Kind, Registry};
 pub use result::{Result1, RESULT_SCHEMA_ID};
 
 /// Process exit codes, which are part of the CLI's contract and are documented
