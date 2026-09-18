@@ -11,3 +11,8 @@ tests.log
 # machine. The `.trace` files next to these are the expected results and are
 # committed; these are not.
 testdata/result/*.profile.txt
+
+# Coverage data, regenerated on every run.
+.coverage
+coverage.xml
+htmlcov/
