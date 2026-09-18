@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
 
 #: Where the calibration came from and what it costs. Every one of these
@@ -61,7 +62,20 @@ NON_DECIDING = ("Chi-Squared", "LSB Entropy")
 #: Formats the statistical ensemble is validated against. A JPEG reaching this
 #: module gets its structural result and an explicit "not assessed" for the
 #: statistical one.
-SPATIAL_FORMATS = frozenset({"png", "bmp", "tiff", "wav", "flac"})
+#:
+#: **WAV and FLAC are deliberately absent.** The binary will happily analyse
+#: them, but Cassavia 2022, BOSSbase 1.01 and ALASKA2 are all *image* corpora
+#: and no audio was in any of them. Listing audio here would staple an image
+#: corpus false positive rate to an audio measurement, which is the same
+#: error, applying a threshold away from the distribution it was measured on,
+#: that the module docstring above complains about. They go back in when there
+#: is an audio calibration to point at.
+SPATIAL_FORMATS = frozenset({"png", "bmp", "tiff"})
+
+#: Truncate the analyser's error output before it reaches a trace. Nothing
+#: downstream bounds it, and an examiner does not need a megabyte of somebody
+#: else's stack trace in an evidence field.
+MAX_STDERR_CHARS = 300
 
 #: A picture should take a fraction of a second. This is the ceiling before we
 #: decide the subprocess is not coming back, so that one pathological file
@@ -118,20 +132,43 @@ def run(binary: str, path: str) -> Analysis:
             timeout=TIMEOUT_SECONDS,
             check=False,
         )
-    except FileNotFoundError as exc:
-        raise StegcoreUnavailable(f"the stegcore binary was not found at {binary!r}") from exc
     except subprocess.TimeoutExpired as exc:
         raise StegcoreUnavailable(
-            f"stegcore did not finish within {TIMEOUT_SECONDS} seconds on {path!r}"
+            f"stegcore did not finish within {TIMEOUT_SECONDS} seconds"
         ) from exc
+    except OSError as exc:
+        # OSError, not FileNotFoundError. A binary copied into an image
+        # without the execute bit, or a path that resolves to a directory,
+        # raises PermissionError instead, which is a sibling and used to
+        # escape this handler entirely and kill the whole trace: no
+        # structural finding, no "not assessed", nothing.
+        raise StegcoreUnavailable(f"the stegcore binary at {binary!r} could not be run: {exc.strerror}") from exc
 
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", "replace").strip()
+        if len(stderr) > MAX_STDERR_CHARS:
+            stderr = stderr[:MAX_STDERR_CHARS] + " (truncated)"
+        # The path is deliberately not quoted here: it is a temporary file
+        # this plugin created, it means nothing to an examiner, and it ends up
+        # written into evidence.
         raise StegcoreUnavailable(
-            f"stegcore exited {proc.returncode} on {path!r}: {stderr or 'no error output'}"
+            f"stegcore exited {proc.returncode}: {stderr or 'no error output'}"
         )
 
     return parse(proc.stdout)
+
+
+def preflight(binary: str) -> None:
+    """Check the binary can be run before any evidence is processed.
+
+    Baseline rule: pre-flight everything. Discovering that the analyser is not
+    executable on the first exhibit of a run, rather than at start up, means
+    every trace up to that point carries a failure that looked like a result.
+    """
+    if not os.path.isfile(binary):
+        raise StegcoreUnavailable(f"no analyser at {binary!r}")
+    if not os.access(binary, os.X_OK):
+        raise StegcoreUnavailable(f"the analyser at {binary!r} is not executable")
 
 
 def parse(stdout: bytes) -> Analysis:

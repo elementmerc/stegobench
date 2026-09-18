@@ -15,9 +15,12 @@ import pytest
 
 from likelihood_ratio import (
     LogisticCalibrator,
+    bound_cost,
     cllr,
+    cllr_null,
     cross_validated_lrs,
     decompose,
+    observed_cllr,
     pav,
 )
 
@@ -113,33 +116,80 @@ class TestDecomposition:
     def test_calibration_loss_is_never_negative(self):
         """Cllr_min is a floor, so the remainder cannot be below zero.
 
-        Checked across a range rather than once, because a floor that holds
-        for one sample and not another is an implementation bug in PAV.
+        **The separations here run negative on purpose.** The earlier version
+        of this test iterated (0.0, 0.5, 1.0, 2.0, 4.0), all non-negative, and
+        so could not fail in the direction the bug lived: an inverted detector
+        made the reported ratios beat their own floor and drove cllr_cal to
+        minus 0.5. A guard that cannot fire is not a guard.
         """
-        for separation in (0.0, 0.5, 1.0, 2.0, 4.0):
+        for separation in (-4.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 4.0):
             scores, labels = self._sample(separation)
             lrs = cross_validated_lrs(scores, labels, folds=5)
-            d = decompose(lrs, labels, scores)
+            d = decompose(lrs, labels)
             assert d.cllr_cal >= -1e-9, f"separation {separation} gave {d.cllr_cal}"
+
+    def test_the_floor_holds_on_cross_validated_noise(self):
+        """The other way the floor used to leak.
+
+        Cross validated ratios are not one monotone function of the score,
+        because every fold has its own calibrator. Fitting the floor to the
+        score therefore leaked even when the orientation was right: 9 of 200
+        seeds went negative, worst minus 0.0105. Fitting it to the reported
+        ratios removes the whole class.
+        """
+        worst = 0.0
+        for seed in range(40):
+            rng = np.random.default_rng(seed)
+            labels = np.array([0] * 100 + [1] * 100)
+            scores = rng.normal(size=200)
+            lrs = cross_validated_lrs(scores, labels, folds=10, seed=seed)
+            worst = min(worst, decompose(lrs, labels).cllr_cal)
+        assert worst >= -1e-9, f"floor leaked by {worst}"
+
+    def test_the_floor_and_the_system_share_a_bound(self):
+        """C1: the clip must not leak into the calibration loss.
+
+        An unbounded floor is allowed to be ten orders of magnitude more
+        confident than the bounded system it is the floor for, which inflated
+        reported calibration loss by 68 to 71% on the spatial corpus.
+        """
+        rng = np.random.default_rng(3)
+        labels = np.array([0] * 400 + [1] * 400)
+        scores = rng.normal(loc=4.0 * labels, scale=1.0)
+        lrs = cross_validated_lrs(scores, labels, folds=10, bound=100.0)
+        d = decompose(lrs, labels, bound=100.0)
+        # Nothing may be cheaper than a flawless system under the same clip.
+        assert d.cllr_min >= d.bound_cost - 1e-9
+        assert d.cllr_cal >= -1e-9
+
+    def test_bound_cost_is_reported_and_correct(self):
+        """A flawless bounded system does not score zero, and must say so."""
+        assert bound_cost(100.0) == pytest.approx(0.0144, abs=5e-4)
+        assert bound_cost(1000.0) < bound_cost(100.0) < bound_cost(10.0)
+        rng = np.random.default_rng(1)
+        labels = np.array([0] * 100 + [1] * 100)
+        scores = rng.normal(loc=labels)
+        d = decompose(cross_validated_lrs(scores, labels, folds=5), labels)
+        assert d.bound_cost == pytest.approx(bound_cost(100.0))
 
     def test_better_separated_scores_discriminate_better(self):
         floors = []
         for separation in (0.0, 1.0, 3.0):
             scores, labels = self._sample(separation)
             lrs = cross_validated_lrs(scores, labels, folds=5)
-            floors.append(decompose(lrs, labels, scores).cllr_min)
+            floors.append(decompose(lrs, labels).cllr_min)
         assert floors[0] > floors[1] > floors[2]
 
     def test_scores_carrying_nothing_are_reported_as_uninformative(self):
         scores, labels = self._sample(0.0)
         lrs = cross_validated_lrs(scores, labels, folds=5)
-        d = decompose(lrs, labels, scores)
+        d = decompose(lrs, labels)
         assert d.cllr == pytest.approx(1.0, abs=0.15)
 
     def test_the_counts_are_carried_through(self):
         scores, labels = self._sample(1.0, n=300)
         lrs = cross_validated_lrs(scores, labels, folds=5)
-        d = decompose(lrs, labels, scores)
+        d = decompose(lrs, labels)
         assert d.n_payload == 150 and d.n_clean == 150
 
 
@@ -239,8 +289,6 @@ class TestPermutationNull:
 
     def test_the_pipeline_is_biased_above_one_on_null_data(self):
         """Pinning the bias, so nobody later reads it as a finding."""
-        from likelihood_ratio import cllr_null
-
         scores, labels = self._identical_distributions()
         lrs = cross_validated_lrs(scores, labels, folds=10)
         observed = cllr(lrs[labels == 1], lrs[labels == 0])
@@ -249,8 +297,6 @@ class TestPermutationNull:
         assert observed < 1.02
 
     def test_the_null_covers_the_observed_value_on_null_data(self):
-        from likelihood_ratio import cllr_null
-
         scores, labels = self._identical_distributions()
         lrs = cross_validated_lrs(scores, labels, folds=10)
         observed = cllr(lrs[labels == 1], lrs[labels == 0])
@@ -265,8 +311,6 @@ class TestPermutationNull:
         produce exactly the table this module produced on JPEG arms, so it has
         to be shown answering the other way on data that does carry a signal.
         """
-        from likelihood_ratio import cllr_null
-
         rng = np.random.default_rng(2)
         labels = np.array([0] * 300 + [1] * 300)
         scores = rng.normal(loc=2.5 * labels, scale=1.0)
@@ -277,9 +321,137 @@ class TestPermutationNull:
         assert (null <= observed).mean() == 0.0
 
     def test_it_is_reproducible(self):
-        from likelihood_ratio import cllr_null
-
         scores, labels = self._identical_distributions(n=100)
         a = cllr_null(scores, labels, permutations=20, folds=5, seed=1)
         b = cllr_null(scores, labels, permutations=20, folds=5, seed=1)
         assert np.array_equal(a, b)
+
+
+class TestTheScaleOfTheScores:
+    """C3: a false negative made of arithmetic rather than of evidence."""
+
+    @staticmethod
+    def _shifted(offset: float, seed: int = 11):
+        rng = np.random.default_rng(seed)
+        labels = np.array([0] * 200 + [1] * 200)
+        return rng.normal(loc=labels, scale=1.0) + offset, labels
+
+    @pytest.mark.parametrize("offset", [0.0, 1e3, 1e5, 1e8])
+    def test_a_large_offset_does_not_destroy_the_fit(self, offset):
+        """Adding a constant to every score cannot change the evidence.
+
+        Before standardisation, an offset of 1e5 saturated the objective, the
+        gradient underflowed, BFGS stopped at the starting point and reported
+        success, and a genuine one sigma separation came back as Cllr exactly
+        1.000.
+        """
+        scores, labels = self._shifted(offset)
+        lrs = cross_validated_lrs(scores, labels, folds=10)
+        value = cllr(lrs[labels == 1], lrs[labels == 0])
+        assert value < 0.95, f"offset {offset:g} reported Cllr {value}"
+
+    def test_the_answer_is_invariant_to_offset_and_scale(self):
+        base, labels = self._shifted(0.0)
+        a = cllr(*(lambda l: (l[labels == 1], l[labels == 0]))(
+            cross_validated_lrs(base, labels, folds=10)))
+        moved = base * 1000.0 + 5e6
+        b = cllr(*(lambda l: (l[labels == 1], l[labels == 0]))(
+            cross_validated_lrs(moved, labels, folds=10)))
+        assert a == pytest.approx(b, abs=1e-6)
+
+    def test_a_constant_score_is_handled_rather_than_crashing(self):
+        """Nothing to calibrate against, so the honest answer is LR = 1."""
+        labels = np.array([0] * 50 + [1] * 50)
+        scores = np.full(100, 7.0)
+        cal = LogisticCalibrator().fit(scores, labels)
+        assert cal.coef_ == 0.0
+        assert cal.transform(scores, 1.0) == pytest.approx(np.ones(100))
+
+    def test_non_finite_scores_are_refused(self):
+        labels = np.array([0] * 10 + [1] * 10)
+        scores = np.concatenate([np.zeros(10), np.full(10, np.nan)])
+        with pytest.raises(ValueError, match="finite"):
+            LogisticCalibrator().fit(scores, labels)
+
+
+class TestPairedNull:
+    """M3: the null has to respect the design the analysis constructs."""
+
+    @staticmethod
+    def _paired_null_data(n: int = 150, seed: int = 0):
+        """Identical scores on both sides, paired by cover."""
+        rng = np.random.default_rng(seed)
+        per_cover = rng.normal(size=n)
+        scores = np.concatenate([per_cover, per_cover])
+        labels = np.concatenate([np.ones(n, int), np.zeros(n, int)])
+        pairs = np.concatenate([np.arange(n), np.arange(n)])
+        return scores, labels, pairs
+
+    def test_the_paired_null_covers_a_provably_null_arm(self):
+        scores, labels, pairs = self._paired_null_data()
+        mean, _, _ = observed_cllr(scores, labels, folds=10, seeds=10)
+        null = cllr_null(scores, labels, permutations=40, folds=10, pairs=pairs)
+        p = (1 + (null <= mean).sum()) / (1 + len(null))
+        assert 0.05 < p < 0.95, f"a provably null arm was called a finding at p={p}"
+
+    def test_pairing_changes_the_null(self):
+        """If it did not, the argument for it would be decoration."""
+        scores, labels, pairs = self._paired_null_data()
+        free = cllr_null(scores, labels, permutations=40, folds=10, seed=1)
+        paired = cllr_null(scores, labels, permutations=40, folds=10, seed=1, pairs=pairs)
+        assert paired.std() < free.std()
+
+    def test_mismatched_pair_ids_are_refused(self):
+        scores, labels, _ = self._paired_null_data(n=20)
+        with pytest.raises(ValueError, match="pair ids"):
+            cllr_null(scores, labels, permutations=2, folds=5, pairs=np.arange(3))
+
+    def test_a_real_signal_still_clears_the_paired_null(self):
+        rng = np.random.default_rng(5)
+        n = 150
+        cover = rng.normal(size=n)
+        scores = np.concatenate([cover + 2.5, cover])
+        labels = np.concatenate([np.ones(n, int), np.zeros(n, int)])
+        pairs = np.concatenate([np.arange(n), np.arange(n)])
+        mean, _, _ = observed_cllr(scores, labels, folds=10, seeds=5)
+        null = cllr_null(scores, labels, permutations=20, folds=10, pairs=pairs)
+        assert (null <= mean).sum() == 0
+
+
+class TestObservedCllrReportsItsSpread:
+    def test_the_spread_is_not_negligible(self):
+        """M3: one cross validation is a draw, not a measurement.
+
+        On a null arm the fold seed moved Cllr over a range of 0.0079, wider
+        than the bias the whole null apparatus exists to correct. Printing a
+        single draw to three decimals presented that as a measurement.
+        """
+        rng = np.random.default_rng(0)
+        per_cover = rng.normal(size=150)
+        scores = np.concatenate([per_cover, per_cover])
+        labels = np.concatenate([np.ones(150, int), np.zeros(150, int)])
+        mean, sd, draws = observed_cllr(scores, labels, folds=10, seeds=20)
+        assert len(draws) == 20
+        assert sd > 0, "the fold seed must move the answer, or this is not needed"
+        assert draws.min() < mean < draws.max()
+
+    def test_it_is_reproducible(self):
+        rng = np.random.default_rng(2)
+        labels = np.array([0] * 100 + [1] * 100)
+        scores = rng.normal(loc=labels)
+        a, _, _ = observed_cllr(scores, labels, folds=5, seeds=5)
+        b, _, _ = observed_cllr(scores, labels, folds=5, seeds=5)
+        assert a == b
+
+
+class TestInputValidation:
+    def test_labels_outside_zero_and_one_are_named(self):
+        with pytest.raises(ValueError, match="labels must be 0 or 1"):
+            decompose(np.ones(4), np.array([0, 2, 0, 2]))
+
+    def test_pav_accepts_plain_lists(self):
+        assert pav([1.0, 2.0, 3.0, 4.0], [0, 0, 1, 1]) == pytest.approx([0.0, 0.0, 1.0, 1.0])
+
+    def test_pav_refuses_mismatched_lengths(self):
+        with pytest.raises(ValueError, match="against"):
+            pav([1.0, 2.0, 3.0], [0, 1])

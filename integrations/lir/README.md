@@ -46,7 +46,42 @@ statistician's fault, and it is fixable without touching the detector.
 
 Reporting only Cllr hides which of the two is failing.
 
-## The correction that matters
+## Three corrections, all found by measurement rather than by reasoning
+
+### The floor has to be a floor, and on the same scale
+
+`Cllr_min` was fitted to the raw detector scores and left unbounded, while the
+reported ratios were clipped at 100. Two things went wrong at once.
+
+**The clip leaked into the calibration loss.** A floor free to be ten orders of
+magnitude more confident than the system it bounds is not a floor. On the
+spatial corpus, 68 to 71% of the reported calibration loss was the bound, and
+37 to 50% of the total reported Cllr was the arithmetic cost of clipping.
+
+**It was not a floor at all on an inverted detector.** Isotonic regression is
+monotone *non decreasing*; a logistic calibrator can fit a negative slope. On a
+detector pointing the wrong way, the system beat its own floor and `cllr_cal`
+went to **minus 0.50**. That is not hypothetical: outguess inverts StegaShield
+to AUC 0.360 on this very corpus. The guarding test iterated separations
+`(0.0, 0.5, 1.0, 2.0, 4.0)`, all non-negative, so it could not fail in the
+direction the bug lived.
+
+Both are fixed by fitting the floor to the **reported ratios** under the
+**same bound**. On the inverted StegaShield arms `cllr_cal` is now +0.040 and
+`cllr_min` reads 0.94, correctly recognising that an inverted detector carries
+information and is merely pointed backwards.
+
+### The scale of the scores broke the fit silently
+
+The logistic fit ran on raw scores. Offset them by 1e5, which a detector
+reporting byte counts or chi-square statistics does naturally, and the
+objective saturates, the gradient underflows, and BFGS stops at the starting
+point **and reports success**. A genuine one sigma separation with AUC 0.76
+came back as Cllr exactly 1.000: a false negative made of arithmetic. Scores
+are now standardised before fitting. Measured before and after: coefficient
+−7.7e-07 against 1.27.
+
+### The reference point
 
 **The textbook reference of 1.0 is the wrong one, and using it produced three
 false findings before it was caught.**
@@ -72,10 +107,30 @@ So the reference is measured instead. `cllr_null` permutes the labels, runs
 the whole pipeline again, and reports what it produces when there is provably
 nothing to find. A result has to beat that, not beat 1.0.
 
+**And it permutes within cover pairs.** A stego picture and the cover it came
+from are one unit; the null is that the label within that unit is arbitrary,
+not that labels are arbitrary across the corpus. Shuffling freely destroys the
+pairing the analysis is built around. On the structural arm:
+
+```
+observed                     1.00426
+free permutation    mean 1.00214, 5-95% [0.99586, 1.00687], p 0.800
+within-pair         mean 1.00425, 5-95% [1.00153, 1.00805], p 0.545
+```
+
+The paired null lands on the observed value to five decimals. The free one is
+centred 0.002 low and 1.7 times as wide; it errs conservative here by luck.
+
+**One cross validation is a draw, not a measurement.** Across 40 fold seeds on
+that arm, Cllr ranged 1.00084 to 1.00870, a spread wider than the bias this
+whole apparatus exists to correct. Every Cllr is now the mean over 20 seeds
+and is printed with its standard deviation beside it.
+
 ## Results on the round3-q95 JPEG corpus
 
 Every arm, every detector: **no evidential value.** AUCs between 0.476 and
-0.512, Cllr indistinguishable from the permutation null.
+0.512, Cllr indistinguishable from the within-pair permutation null at p
+between 0.32 and 0.71.
 
 That is the correct answer. Aletheia's SPA and RS and StegExpose model
 bit-level changes to pixels, and steghide and outguess change JPEG
@@ -84,27 +139,41 @@ coefficients instead. The detectors were used outside their stated range.
 It is also what a broken pipeline would print, which is why the next section
 exists.
 
+Reproduce with `python analyse_panel.py panel.jsonl`.
+
 ## The positive control
 
 `positive_control.py` runs the identical pipeline over the spatial LSB corpus
 from Stegcore's threshold calibration: 8,000 clean pictures and 36,000 stego.
+Every figure below comes from that script at its defaults.
 
-| arm | detector | n | AUC | Cllr | Cllr_min | Cllr_cal | verdict |
+| arm | detector | n | AUC | Cllr (sd) | Cllr_min | Cllr_cal | verdict |
 |---|---|---|---|---|---|---|---|
-| html/zip | spa | 2334 | 1.000 | 0.051 | 0.023 | 0.028 | informative |
-| html/zip | rs | 2334 | 1.000 | 0.032 | 0.010 | 0.021 | informative |
-| html/zip | ws | 2334 | 1.000 | 0.030 | 0.010 | 0.020 | informative |
-| eth/raw | rs | 9826 | 0.499 | 1.000 | 1.000 | 0.000 | no evidential value |
+| html/zip | spa | 2334 | 1.000 | 0.046 (0.001) | 0.036 | 0.011 | informative |
+| html/zip | rs | 2334 | 1.000 | 0.033 (0.001) | 0.027 | 0.006 | informative |
+| html/zip | ws | 2334 | 1.000 | 0.035 (0.001) | 0.027 | 0.007 | informative |
+| ps/raw | rs | 9690 | 0.824 | 0.657 (0.000) | 0.636 | 0.021 | informative |
+| eth/zip | rs | 2494 | 0.746 | 0.885 (0.001) | 0.835 | 0.051 | informative |
+| eth/b64 | spa | 2494 | 0.557 | 0.997 (0.000) | 0.988 | 0.008 | detectable, not useful |
+| eth/raw | rs | 9826 | 0.503 | 1.000 (0.000) | 1.000 | 0.000 | no evidential value |
 
-The pipeline can say both things, so the JPEG table is a measurement rather
+The pipeline says all three things, so the JPEG table is a measurement rather
 than a stuck needle.
 
-**One finding fell out of this that was not being looked for.** On `html/zip`,
-where the detector is essentially perfect, `Cllr_cal` is as large as
-`Cllr_min`: roughly half the total cost is the logistic calibrator failing to
-keep up with a detector that separates the classes completely. For a detector
-this good, the calibrator is the bottleneck, and that is invisible to AUC,
-which reads 1.000 and stops.
+**"detectable, not useful" is a verdict this needs.** `eth/b64` with SPA is
+distinguishable from the null at p = 0.02 and is worth nothing to an examiner:
+Cllr 0.997 against a reference of 1.000. Calling that "informative" because it
+cleared a significance test would be this module committing exactly the
+overstatement it exists to prevent. A result has to clear the null *and* beat
+a stated Cllr to earn the word.
+
+**A claim that used to be here has been withdrawn.** An earlier version
+reported that on a near-perfect detector `Cllr_cal` was as large as `Cllr_min`
+and concluded that the calibrator was the bottleneck. That was an artefact of
+the bound bug described above: the floor was unbounded and the system was
+clipped, so the difference between them counted the clip. Corrected,
+`Cllr_cal` on those arms is 0.006 to 0.011 against a `Cllr_min` of 0.027 to
+0.036, which is a fifth rather than a half, and is not a finding.
 
 ## Pairing
 
@@ -121,7 +190,7 @@ those three arms are dropped from both sides, so `steghide/0500` with
 ## Running it
 
 ```
-pytest                                  # 24 tests
+pytest                                  # 55 tests
 python analyse_panel.py panel.jsonl     # the LR table for a scored corpus
 python positive_control.py              # the control, needs the calibration corpus
 ```
@@ -133,7 +202,8 @@ library you imported is not a check.
 ## What is left
 
 - **Validate against `lir`.** Cllr and the PAV decomposition should agree to
-  floating point. Blocked on an install.
+  floating point. Blocked on an install: `lir` pulls in pymc, pytensor, numba,
+  llvmlite, optuna, scikit-learn and matplotlib, which is roughly 2 GB.
 - **Bounded LRs done properly.** The current bound is a flat clip at 100. The
   empirical lower and upper bound (ELUB) sets it from what the sample can
   actually support, which is the defensible version.

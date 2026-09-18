@@ -14,7 +14,16 @@ import pathlib
 
 import pytest
 
-from stegcore_adapter import CALIBRATION, NON_DECIDING, Analysis, StegcoreUnavailable, parse
+from stegcore_adapter import (
+    CALIBRATION,
+    NON_DECIDING,
+    SPATIAL_FORMATS,
+    Analysis,
+    StegcoreUnavailable,
+    parse,
+    preflight,
+    run,
+)
 
 CAPTURED = pathlib.Path(__file__).parent / "testdata" / "stegcore-output"
 
@@ -134,17 +143,32 @@ class TestMalformedOutputIsNeverReadAsClean:
             parse(json.dumps(doc).encode())
 
 
+#: The record these constants are transcribed from. Outside the repo, so a
+#: checkout without it skips rather than fails.
+CALIBRATION_SOURCE = pathlib.Path(
+    "/home/mercury/the-factory/Stegcore/private/calibration/recal-final.json"
+)
+
+
 class TestCalibrationRecord:
     def test_the_thresholds_match_the_calibration_file(self):
-        """These numbers are quoted from Stegcore's record and must not drift.
+        """Read the file this claims to come from, rather than restating it.
 
-        Source: `Stegcore/private/calibration/recal-final.json`, key
-        `combined_4pct`, recalibrated 2026-06-14.
+        The earlier version of this test asserted the literals against the
+        literals in `stegcore_adapter`, with a docstring naming a source file
+        it never opened. It could not detect drift from the thing it existed
+        to guard.
+
+        Source: `recal-final.json`, key `combined_4pct`, recalibrated
+        2026-06-14.
         """
+        if not CALIBRATION_SOURCE.exists():
+            pytest.skip(f"{CALIBRATION_SOURCE} is not on this machine")
+        recorded = json.loads(CALIBRATION_SOURCE.read_text())["combined_4pct"]
         assert CALIBRATION["thresholds"] == {
-            "Sample Pair Analysis": 0.3769769227919943,
-            "RS Analysis": 0.30526622463808484,
-            "Weighted Stego": 0.19485149015075318,
+            "Sample Pair Analysis": recorded["spa"],
+            "RS Analysis": recorded["rs"],
+            "Weighted Stego": recorded["ws"],
         }
 
     def test_the_worst_corpus_fpr_is_the_one_quoted(self):
@@ -154,3 +178,81 @@ class TestCalibrationRecord:
         2026-06-14 recalibration was carried out to fix.
         """
         assert CALIBRATION["combined_fpr"] >= max(CALIBRATION["per_corpus_fpr"].values())
+
+
+class TestTheBinaryCannotSilentlyKillATrace:
+    """M1: only FileNotFoundError was caught, and it is not the common case."""
+
+    def test_a_non_executable_binary_is_reported_not_raised(self, tmp_path):
+        """A COPY without +x in a Dockerfile is the classic way to hit this.
+
+        PermissionError is an OSError sibling, so it escaped the handler and
+        took `process()` down with it. The trace then carried a structural
+        finding and no statistical property at all: not even "not assessed".
+        """
+        noexec = tmp_path / "stegcore"
+        noexec.write_bytes(b"#!/bin/sh\nexit 0\n")
+        noexec.chmod(0o644)
+        with pytest.raises(StegcoreUnavailable, match="could not be run"):
+            run(str(noexec), "/dev/null")
+
+    def test_a_directory_in_place_of_the_binary(self, tmp_path):
+        with pytest.raises(StegcoreUnavailable, match="could not be run"):
+            run(str(tmp_path), "/dev/null")
+
+    def test_a_missing_binary_still_reports(self, tmp_path):
+        with pytest.raises(StegcoreUnavailable):
+            run(str(tmp_path / "absent"), "/dev/null")
+
+    def test_preflight_names_the_two_failures_apart(self, tmp_path):
+        missing = tmp_path / "absent"
+        with pytest.raises(StegcoreUnavailable, match="no analyser"):
+            preflight(str(missing))
+
+        noexec = tmp_path / "stegcore"
+        noexec.write_bytes(b"x")
+        noexec.chmod(0o644)
+        with pytest.raises(StegcoreUnavailable, match="not executable"):
+            preflight(str(noexec))
+
+        noexec.chmod(0o755)
+        preflight(str(noexec))  # must not raise
+
+    def test_the_error_does_not_carry_a_temp_path_or_an_unbounded_stderr(self):
+        """Evidence fields are not a place for our scratch paths.
+
+        A failing analyser used to put `/tmp/tmpXXXX.png` and the whole of its
+        stderr into `stegStatistical`, which is both meaningless to an
+        examiner and unbounded.
+        """
+        import subprocess
+        from unittest import mock
+
+        long_stderr = (b"boom " * 10_000)
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=b"", stderr=long_stderr
+        )
+        with mock.patch("subprocess.run", return_value=completed):
+            with pytest.raises(StegcoreUnavailable) as caught:
+                run("/opt/stegcore/stegcore", "/tmp/tmpsecret12345.png")
+        message = str(caught.value)
+        assert "tmpsecret12345" not in message
+        assert len(message) < 400
+        assert "truncated" in message
+
+
+class TestAudioIsOutOfRange:
+    """M6: an image corpus FPR must not be stapled to an audio measurement."""
+
+    def test_audio_formats_are_not_declared_in_range(self):
+        assert "wav" not in SPATIAL_FORMATS
+        assert "flac" not in SPATIAL_FORMATS
+
+    def test_every_declared_format_was_in_the_calibration_corpora(self):
+        """Cassavia, BOSSbase and ALASKA2 are all image corpora.
+
+        If a format is added here, there has to be a calibration that covers
+        it, otherwise the plugin writes a false positive rate beside a
+        measurement that rate was never established for.
+        """
+        assert SPATIAL_FORMATS <= {"png", "bmp", "tiff"}

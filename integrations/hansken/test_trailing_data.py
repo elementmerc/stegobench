@@ -16,7 +16,12 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from trailing_data import MalformedImage, find_trailing
+from trailing_data import (
+    PNG_SIGNATURE as PNG_SIG,
+    MalformedImage,
+    PrependedData,
+    find_trailing,
+)
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -47,6 +52,18 @@ def with_exif_thumbnail(data: bytes, seed: int = 3) -> tuple[bytes, int]:
     payload = b"Exif\x00\x00" + tb
     app1 = b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
     return data[:2] + app1 + data[2:], len(tb)
+
+
+def make_thumbnail_fixture() -> tuple[bytes, int]:
+    """The exact picture the module docstring quotes numbers from.
+
+    Deterministic, so the 147,023 / 2,913 / 2,925 / 144,098 figures in
+    `trailing_data`'s docstring can be checked rather than believed. An earlier
+    version of that comment quoted a throwaway run that was never saved; when
+    the picture was rebuilt it came out 34 bytes different, so those figures
+    were wrong as well as uncheckable.
+    """
+    return with_exif_thumbnail(noise_jpeg(size=400, quality=90, seed=3), seed=3)
 
 
 class TestFixtures:
@@ -80,6 +97,17 @@ class TestFixtures:
 
 
 class TestExifThumbnailIsTheHardCase:
+    def test_the_numbers_quoted_in_the_docstring_are_the_real_ones(self):
+        """Pin every figure the module docstring states."""
+        data, thumb_len = make_thumbnail_fixture()
+        naive = naive_first_eoi(data)
+        assert len(data) == 147023
+        assert thumb_len == 2913
+        assert naive == 2925
+        assert len(data) - naive == 144098
+        assert (len(data) - naive) / len(data) > 0.98
+        assert find_trailing(data).length == 0
+
     def test_naive_search_is_catastrophically_wrong(self):
         data, thumb_len = with_exif_thumbnail(noise_jpeg())
         naive = naive_first_eoi(data)
@@ -174,3 +202,100 @@ class TestSniffing:
     def test_unrecognised_binary_is_not_guessed_at(self):
         data = (FIXTURES / "clean.png").read_bytes() + bytes([0xDE, 0xAD, 0xBE, 0xEF] * 16)
         assert find_trailing(data).looks_like is None
+
+
+class TestTheRemainingRefusalPaths:
+    """Error branches that had no coverage.
+
+    Every one of these is a path where the alternative to raising is reporting
+    a picture as clean, so they matter more than their line count suggests.
+    """
+
+    def test_a_png_with_too_many_chunks(self):
+        from trailing_data import MAX_CHUNKS
+
+        # A minimal valid-looking chunk repeated past the ceiling.
+        chunk = (0).to_bytes(4, "big") + b"tEXt" + (0).to_bytes(4, "big")
+        data = PNG_SIG + chunk * (MAX_CHUNKS + 10)
+        with pytest.raises(MalformedImage, match="more than"):
+            find_trailing(data)
+
+    def test_a_png_header_truncated_mid_chunk(self):
+        with pytest.raises(MalformedImage, match="truncated"):
+            find_trailing(PNG_SIG + b"\x00\x00")
+
+    def test_a_jpeg_that_is_only_a_start_marker(self):
+        with pytest.raises(MalformedImage):
+            find_trailing(b"\xff\xd8")
+
+    def test_a_jpeg_ending_inside_a_marker(self):
+        # Two bytes of FF padding with nothing after them: the marker never
+        # arrives. `\xff\xd8\xff` alone is caught earlier as "no EOI".
+        with pytest.raises(MalformedImage, match="inside a marker"):
+            find_trailing(b"\xff\xd8\xff\xff")
+
+    def test_a_jpeg_whose_segment_length_is_truncated(self):
+        with pytest.raises(MalformedImage, match="length truncated"):
+            find_trailing(b"\xff\xd8\xff\xe0\x00")
+
+    def test_a_byte_that_is_not_a_marker_where_one_is_required(self):
+        with pytest.raises(MalformedImage, match="expected a JPEG marker"):
+            find_trailing(b"\xff\xd8\x41\x41\x41\x41")
+
+    def test_a_standalone_marker_is_walked_past(self):
+        """TEM (0x01) and the restart markers carry no length field."""
+        jpg = noise_jpeg()
+        with_tem = jpg[:2] + b"\xff\x01" + jpg[2:]
+        assert find_trailing(with_tem).length == 0
+
+    def test_scan_data_that_never_reaches_a_marker(self):
+        from trailing_data import MAX_SCAN_BYTES
+
+        # A scan that runs off the end without a terminating marker.
+        head = noise_jpeg()[:200]
+        with pytest.raises(MalformedImage):
+            find_trailing(head)
+
+    def test_the_scan_walking_limit_is_enforced(self):
+        """A hostile file must be refused rather than stalling a worker."""
+        from trailing_data import MAX_SCAN_BYTES
+
+        # SOS, then more scan bytes than the limit allows, none of them a marker.
+        header = b"\xff\xd8\xff\xda\x00\x03\x00"
+        data = header + b"\x41" * (MAX_SCAN_BYTES + 1024)
+        with pytest.raises(MalformedImage, match="walking limit"):
+            find_trailing(data)
+
+    def test_a_jpeg_with_more_segments_than_the_ceiling(self):
+        from trailing_data import MAX_CHUNKS
+
+        # Zero-payload COM segments, repeated past the count.
+        segment = b"\xff\xfe\x00\x02"
+        data = b"\xff\xd8" + segment * (MAX_CHUNKS + 10)
+        with pytest.raises(MalformedImage, match="more than"):
+            find_trailing(data)
+
+
+class TestPrependedData:
+    def test_a_png_behind_other_data_is_named_not_dismissed(self):
+        png = (FIXTURES / "clean.png").read_bytes()
+        with pytest.raises(PrependedData) as caught:
+            find_trailing(b"SECRET!!" + png)
+        assert caught.value.offset == 8
+
+    def test_a_jpeg_behind_other_data(self):
+        with pytest.raises(PrependedData) as caught:
+            find_trailing(b"\x00" * 32 + noise_jpeg())
+        assert caught.value.offset == 32
+
+    def test_a_signature_beyond_the_search_window_is_not_found(self):
+        """The window is bounded so this cannot become a whole file scan."""
+        from trailing_data import PREPENDED_SEARCH_BYTES
+
+        png = (FIXTURES / "clean.png").read_bytes()
+        with pytest.raises(ValueError):
+            find_trailing(b"\x00" * (PREPENDED_SEARCH_BYTES + 16) + png)
+
+    def test_a_genuinely_unknown_format_is_still_a_plain_value_error(self):
+        with pytest.raises(ValueError):
+            find_trailing(b"GIF89a" + b"\x00" * 200)

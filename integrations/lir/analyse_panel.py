@@ -34,10 +34,17 @@ import collections
 import json
 import pathlib
 import sys
+import time
 
 import numpy as np
 
-from likelihood_ratio import cllr, cllr_null, cross_validated_lrs, decompose
+from likelihood_ratio import (
+    bound_cost,
+    cllr_null,
+    cross_validated_lrs,
+    decompose,
+    observed_cllr,
+)
 
 DETECTORS = ("aletheia_spa", "aletheia_rs", "stegexpose")
 
@@ -97,6 +104,19 @@ def main(argv=None):
         default=200,
         help="size of the permutation null the result has to beat",
     )
+    ap.add_argument("--seed", type=int, default=0, help="seed for the null and the reported fit")
+    ap.add_argument(
+        "--seeds",
+        type=int,
+        default=20,
+        help="fold seeds to average the observed Cllr over",
+    )
+    ap.add_argument(
+        "--useful",
+        type=float,
+        default=0.95,
+        help="Cllr a result must beat to be called informative rather than merely detectable",
+    )
     args = ap.parse_args(argv)
 
     records = load(args.panel)
@@ -113,12 +133,13 @@ def main(argv=None):
     print(f"clean arm: {len(clean)} covers\n")
 
     header = (
-        f"{'arm':<20}{'detector':<16}{'n':>5}{'paired':>8}"
-        f"{'AUC':>8}{'Cllr':>8}{'null (5-95%)':>18}{'p':>7}  verdict"
+        f"{'arm':<20}{'detector':<14}{'paired':>7}"
+        f"{'AUC':>7}{'Cllr (sd)':>17}{'Cllr_min':>9}{'p':>7}  verdict"
     )
     print(header)
     print("-" * len(header))
 
+    started = time.monotonic()
     for arm in sorted(by_arm):
         stego = by_arm[arm]
         # Only the covers this arm was actually run on.
@@ -127,43 +148,72 @@ def main(argv=None):
         for det in DETECTORS:
             ids = [c for c in paired if det in stego[c] and det in clean[c]]
             if len(ids) < args.folds:
-                print(f"{arm:<20}{det:<16}{len(ids):>5}{'':>8}  too few scored to calibrate")
+                print(f"{arm:<20}{det:<14}{len(ids):>7}  too few scored to calibrate")
                 continue
 
             s_stego = np.array([float(stego[c][det]) for c in ids])
             s_clean = np.array([float(clean[c][det]) for c in ids])
             scores = np.concatenate([s_stego, s_clean])
             labels = np.concatenate([np.ones(len(ids), int), np.zeros(len(ids), int)])
+            # A stego picture and the cover it came from are one unit, and the
+            # null is that the label within that unit is arbitrary.
+            pairs = np.concatenate([np.arange(len(ids)), np.arange(len(ids))])
 
             auc = roc_auc(s_stego, s_clean)
-            lrs = cross_validated_lrs(scores, labels, folds=args.folds, bound=args.bound)
-            d = decompose(lrs, labels, scores)
+            # Averaged over fold seeds: a single cross validation is a draw
+            # whose spread exceeds the effect being measured.
+            mean_cllr, sd_cllr, _ = observed_cllr(
+                scores, labels, folds=args.folds, bound=args.bound, seeds=args.seeds
+            )
+            lrs = cross_validated_lrs(
+                scores, labels, folds=args.folds, bound=args.bound, seed=args.seed
+            )
+            d = decompose(lrs, labels, bound=args.bound)
 
             # The reference is what this same pipeline yields when the labels
             # are meaningless, not the textbook 1.0. See `cllr_null`.
             null = cllr_null(
-                scores, labels, permutations=args.permutations, folds=args.folds, bound=args.bound
+                scores,
+                labels,
+                permutations=args.permutations,
+                folds=args.folds,
+                bound=args.bound,
+                seed=args.seed,
+                pairs=pairs,
             )
-            p_value = float((null <= d.cllr).mean())
-            if p_value < 0.05:
+            # (1 + count) / (1 + n): a permutation p of exactly zero claims more
+            # than the number of permutations can support.
+            p_value = float((1 + (null <= mean_cllr).sum()) / (1 + len(null)))
+
+            if p_value < 0.05 and mean_cllr < args.useful:
                 verdict = "informative"
+            elif p_value < 0.05:
+                # Distinguishable from the null and still worth nothing to an
+                # examiner. Saying "informative" here would be this module
+                # committing the overstatement it exists to prevent.
+                verdict = "detectable, not useful"
             elif p_value > 0.95:
                 verdict = "worse than chance"
             else:
                 verdict = "no evidential value"
-            lo, hi = np.quantile(null, 0.05), np.quantile(null, 0.95)
+
             print(
-                f"{arm:<20}{det:<16}{len(ids) * 2:>5}{len(ids):>8}"
-                f"{auc:>8.3f}{d.cllr:>8.3f}{f'[{lo:.3f}, {hi:.3f}]':>18}"
-                f"{p_value:>7.3f}  {verdict}"
+                f"{arm:<20}{det:<14}{len(ids):>7}"
+                f"{auc:>7.3f}{f'{mean_cllr:.3f} ({sd_cllr:.3f})':>17}"
+                f"{d.cllr_min:>9.3f}{p_value:>7.3f}  {verdict}"
             )
+            if time.monotonic() - started > 30:
+                print(f"  ... {time.monotonic() - started:.0f}s elapsed", flush=True)
+                started = time.monotonic()
 
     print()
     print("Cllr = 1.000 is the textbook cost of answering 'this tells you nothing'.")
-    print("The reference used here is the measured permutation null, which sits slightly")
+    print("The reference used here is a within-pair permutation null, which sits slightly")
     print("above 1.000 because cross validated calibration of noise is not free.")
-    print("p is the fraction of that null at or below the observed Cllr.")
-    print(f"Likelihood ratios are bounded at {args.bound:g} and 1/{args.bound:g}.")
+    print(f"Cllr is the mean over {args.seeds} fold seeds; the bracket is its standard")
+    print("deviation, because one cross validation is a draw rather than a measurement.")
+    print(f"A flawless system bounded at {args.bound:g} would still score {bound_cost(args.bound):.4f}.")
+    print(f"'informative' additionally requires Cllr below {args.useful:g}.")
     return 0
 
 

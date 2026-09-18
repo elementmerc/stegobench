@@ -71,14 +71,35 @@ import numpy as np
 DEFAULT_BOUND = 100.0
 
 
+def _check_labels(labels) -> np.ndarray:
+    """Labels must be exactly {0, 1}, and saying so beats a downstream puzzle.
+
+    Passing labels of {0, 2} used to reach `cllr` and come back as "one side
+    is empty", which points at the wrong problem entirely.
+    """
+    labels = np.asarray(labels)
+    if labels.ndim != 1:
+        raise ValueError("labels must be one dimensional")
+    extra = set(np.unique(labels).tolist()) - {0, 1}
+    if extra:
+        raise ValueError(f"labels must be 0 or 1; found {sorted(extra)}")
+    return labels.astype(int)
+
+
 @dataclasses.dataclass(frozen=True)
 class CllrDecomposition:
-    """Cllr and the two things it is made of."""
+    """Cllr and the parts it is made of."""
 
     cllr: float
+    #: Discrimination. What these reported ratios could achieve if optimally
+    #: recalibrated, under the same bound.
     cllr_min: float
-    #: Calibration loss. Zero when the LRs are perfectly calibrated.
+    #: Calibration loss. Zero when the reported ratios are already the best
+    #: monotone recalibration of themselves. Cannot be negative.
     cllr_cal: float
+    #: What a flawless bounded system still pays. Part of `cllr_min`, quoted
+    #: separately so a reader can see how much of the total is the clip.
+    bound_cost: float
     n_payload: int
     n_clean: int
 
@@ -126,8 +147,13 @@ def pav(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
     :param scores: detector outputs, higher meaning more suspicious.
     :param labels: 1 for a picture carrying a payload, 0 for a clean one.
     """
+    scores = np.asarray(scores, dtype=float)
+    labels = _check_labels(labels)
+    if len(scores) != len(labels):
+        raise ValueError(f"{len(scores)} scores against {len(labels)} labels")
+
     order = np.argsort(scores, kind="mergesort")
-    sorted_scores = np.asarray(scores, dtype=float)[order]
+    sorted_scores = scores[order]
     y = labels[order].astype(float)
 
     # Collapse each run of equal scores to its mean, carrying the run length
@@ -155,29 +181,72 @@ def pav(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
     return out
 
 
-def decompose(lrs: np.ndarray, labels: np.ndarray, scores: np.ndarray) -> CllrDecomposition:
+def bound_cost(bound: float = DEFAULT_BOUND) -> float:
+    """What a flawless system still pays because its answers are bounded.
+
+    A system that reports `bound` for every payload case and `1/bound` for
+    every clean one is as right as a bounded system can be, and it does not
+    score zero. At a bound of 100 it scores 0.0144. Quoting a total Cllr
+    without this alongside invites the reader to attribute the whole of it to
+    the detector, when a third to a half of it can be the clip.
+    """
+    return cllr(np.array([bound]), np.array([1.0 / bound]))
+
+
+def decompose(
+    lrs: np.ndarray, labels: np.ndarray, bound: float = DEFAULT_BOUND
+) -> CllrDecomposition:
     """Split Cllr into discrimination and calibration loss.
+
+    THE FLOOR IS TAKEN FROM THE REPORTED RATIOS, NOT FROM THE RAW SCORES
+    ---------------------------------------------------------------------
+    An earlier version fitted the isotonic floor to the raw detector scores
+    and left it unbounded, while the reported ratios were clipped. Two
+    consequences, both found by review rather than by reasoning, and both
+    capable of putting a false number in a forensic table:
+
+    **The bound leaked into the calibration loss.** The floor was free to be
+    ten orders of magnitude more confident than the system it was the floor
+    for, so `cllr_cal` measured the clip as much as the calibrator. On the
+    spatial corpus, 68 to 71% of the reported calibration loss was the bound.
+
+    **The floor was not a floor.** Isotonic regression is monotone *non
+    decreasing* in whatever it is fitted to. A calibrator is free to fit a
+    negative slope, and on a detector that points the wrong way it does. The
+    system then beat its own floor and `cllr_cal` went to minus 0.5. That is
+    not hypothetical here: outguess inverts StegaShield to AUC 0.360 on the
+    round3-q95 corpus, measured.
+
+    Fitting the floor to the reported ratios fixes both. The identity map is
+    in the feasible set, so the floor cannot be beaten; and clipping the
+    isotonic solution to the same bound keeps the comparison on one scale,
+    which is legitimate because each per-case loss is convex in the assigned
+    ratio, so clipping to the nearest allowed value is the constrained
+    optimum and preserves monotonicity.
 
     :param lrs: the likelihood ratios actually reported.
     :param labels: 1 for payload, 0 for clean.
-    :param scores: the raw detector scores the LRs came from, used for the
-        isotonic floor.
+    :param bound: the same bound the reported ratios were held to.
     """
+    lrs = np.asarray(lrs, dtype=float)
+    labels = _check_labels(labels)
     payload = labels == 1
     total = cllr(lrs[payload], lrs[~payload])
 
-    # The PAV posteriors, converted to LRs at the prior odds of this sample,
-    # give the best any monotone calibration of these scores could do.
-    posterior = pav(scores, labels)
+    # Ordered by the REPORTED ratio, so an inverted system is measured
+    # against the best monotone recalibration of what it actually said.
+    posterior = pav(lrs, labels)
     prior_odds = payload.sum() / (~payload).sum()
     eps = 1e-12
     pav_lrs = (posterior + eps) / (1.0 - posterior + eps) / prior_odds
+    pav_lrs = np.clip(pav_lrs, 1.0 / bound, bound)
     floor = cllr(pav_lrs[payload], pav_lrs[~payload])
 
     return CllrDecomposition(
         cllr=total,
         cllr_min=floor,
         cllr_cal=total - floor,
+        bound_cost=bound_cost(bound),
         n_payload=int(payload.sum()),
         n_clean=int((~payload).sum()),
     )
@@ -190,6 +259,7 @@ def cllr_null(
     folds: int = 10,
     bound: float = DEFAULT_BOUND,
     seed: int = 0,
+    pairs: np.ndarray | None = None,
 ) -> np.ndarray:
     """Cllr values this pipeline produces when the labels mean nothing.
 
@@ -216,49 +286,85 @@ def cllr_null(
     So the reference is measured instead: permute the labels, run the whole
     pipeline again, and see what it produces when there is provably nothing to
     find. A real result has to beat that, not beat 1.0.
+
+    PERMUTE WITHIN PAIRS WHEN THE DESIGN IS PAIRED
+    ------------------------------------------------
+    `pairs` makes the permutation respect the cover pairing that the corpus
+    was built around. A stego picture and the clean cover it came from are one
+    unit; the null hypothesis is that the *label within that unit* is
+    arbitrary, not that labels are arbitrary across the whole corpus. Shuffling
+    freely destroys the pairing the analysis deliberately constructs and gives
+    the wrong null.
+
+    Measured on the structural arm, where the two sides carry byte identical
+    scores and the answer is known exactly:
+
+        observed                     1.00426
+        free permutation    mean 1.00214, 5-95% [0.99586, 1.00687], p 0.800
+        within-pair         mean 1.00425, 5-95% [1.00153, 1.00805], p 0.545
+
+    The paired null lands on the observed value to five decimals and gives the
+    textbook p. The free null is centred 0.002 low and is 1.7 times as wide.
+    It errs conservative here, which is luck rather than design.
+
+    :param pairs: an identifier per case, equal for the two members of a pair.
+        When given, labels are flipped within each pair rather than shuffled
+        across the corpus.
     """
     scores = np.asarray(scores, dtype=float)
-    labels = np.asarray(labels, dtype=int)
+    labels = _check_labels(labels)
     rng = np.random.default_rng(seed)
+
+    pair_index = None
+    if pairs is not None:
+        pairs = np.asarray(pairs)
+        if len(pairs) != len(labels):
+            raise ValueError(f"{len(pairs)} pair ids against {len(labels)} labels")
+        _, pair_index = np.unique(pairs, return_inverse=True)
+
     out = np.empty(permutations)
     for i in range(permutations):
-        shuffled = rng.permutation(labels)
-        lrs = cross_validated_lrs(scores, shuffled, folds=folds, bound=bound, seed=int(rng.integers(1 << 31)))
+        if pair_index is None:
+            shuffled = rng.permutation(labels)
+        else:
+            # One coin per pair. Where it comes up heads the two members swap
+            # labels, which is exactly the exchange the null allows.
+            flip = rng.integers(0, 2, size=pair_index.max() + 1)[pair_index].astype(bool)
+            shuffled = np.where(flip, 1 - labels, labels)
+        lrs = cross_validated_lrs(
+            scores, shuffled, folds=folds, bound=bound, seed=int(rng.integers(1 << 31))
+        )
         out[i] = cllr(lrs[shuffled == 1], lrs[shuffled == 0])
     return out
 
 
-def cllr_interval(
-    lrs: np.ndarray,
+def observed_cllr(
+    scores: np.ndarray,
     labels: np.ndarray,
-    resamples: int = 2000,
-    level: float = 0.95,
-    seed: int = 0,
-) -> tuple[float, float]:
-    """A percentile bootstrap interval for Cllr.
+    folds: int = 10,
+    bound: float = DEFAULT_BOUND,
+    seeds: int = 20,
+) -> tuple[float, float, np.ndarray]:
+    """Cllr averaged over fold seeds, with its spread.
 
-    Without this, a Cllr of 1.004 reads as "worse than saying nothing", when
-    on a few hundred cases it is indistinguishable from exactly 1. Calling
-    that a finding would be the same overstatement this module exists to stop,
-    pointed at ourselves instead of at a defendant.
+    A single cross validation is one draw from a distribution whose width is
+    set by which cases landed in which fold. On the structural arm that spread
+    runs from 1.00084 to 1.00870 across 40 seeds: wider than the bias the
+    permutation null exists to correct, and wider than the gap between any two
+    numbers in the published table.
 
-    Resampling is stratified, because the two sides enter Cllr as separate
-    means and a resample that thins one of them is not the same experiment.
+    Printing one draw to three decimal places presents a random variable as a
+    measurement, so the mean and the spread are returned together and the
+    caller is expected to show both.
+
+    :returns: (mean, standard deviation, every draw)
     """
-    rng = np.random.default_rng(seed)
-    payload = np.flatnonzero(labels == 1)
-    clean = np.flatnonzero(labels == 0)
-    if len(payload) == 0 or len(clean) == 0:
-        raise ValueError("Cllr needs cases on both sides")
-
-    draws = np.empty(resamples)
-    for i in range(resamples):
-        p = rng.choice(payload, size=len(payload), replace=True)
-        c = rng.choice(clean, size=len(clean), replace=True)
-        draws[i] = cllr(lrs[p], lrs[c])
-
-    tail = (1.0 - level) / 2.0
-    return float(np.quantile(draws, tail)), float(np.quantile(draws, 1.0 - tail))
+    draws = np.empty(seeds)
+    labels = _check_labels(labels)
+    for i in range(seeds):
+        lrs = cross_validated_lrs(scores, labels, folds=folds, bound=bound, seed=i)
+        draws[i] = cllr(lrs[labels == 1], lrs[labels == 0])
+    return float(draws.mean()), float(draws.std()), draws
 
 
 class LogisticCalibrator:
@@ -275,22 +381,70 @@ class LogisticCalibrator:
         self.bound = bound
         self.coef_: float | None = None
         self.intercept_: float | None = None
+        self._centre: float = 0.0
+        self._scale: float = 1.0
 
     def fit(self, scores: np.ndarray, labels: np.ndarray) -> "LogisticCalibrator":
+        """Fit on standardised scores, because the raw scale breaks the optimiser.
+
+        Without standardisation, a detector reporting large numbers (byte
+        counts, chi-square statistics, StegExpose's raw payload estimate)
+        saturates `logaddexp`, the gradient underflows, and BFGS stops at the
+        starting point and reports success. Measured: scores offset by 1e5
+        with a genuine one sigma separation and AUC 0.76 fitted a coefficient
+        of -7e-07 and returned Cllr exactly 1.000. A false negative made of
+        arithmetic rather than of evidence.
+        """
         from scipy.optimize import minimize
 
-        x = np.asarray(scores, dtype=float)
-        y = np.asarray(labels, dtype=float)
+        x_raw = np.asarray(scores, dtype=float)
+        y = _check_labels(labels).astype(float)
+        if not np.all(np.isfinite(x_raw)):
+            raise ValueError("scores must all be finite")
+
+        self._centre = float(np.mean(x_raw))
+        spread = float(np.std(x_raw))
+        # A constant score carries no information; keep the scale at 1 so the
+        # fit degenerates to an intercept instead of dividing by zero.
+        self._scale = spread if spread > 0 else 1.0
+        x = (x_raw - self._centre) / self._scale
 
         def negative_log_likelihood(params):
             a, b = params
             z = a * x + b
-            # log(1 + exp(z)) written stably for large |z|.
             return float(np.sum(np.logaddexp(0.0, z) - y * z))
 
-        result = minimize(negative_log_likelihood, x0=[1.0, 0.0], method="BFGS")
-        if not result.success and not np.all(np.isfinite(result.x)):
-            raise RuntimeError(f"the logistic fit did not converge: {result.message}")
+        # A constant score cannot be calibrated against. The honest fit is
+        # intercept only, which after the prior odds are divided out reports
+        # LR = 1 for everything: this evidence does not move the odds.
+        if spread == 0:
+            rate = float(np.clip(y.mean(), 1e-12, 1 - 1e-12))
+            self.coef_, self.intercept_ = 0.0, float(np.log(rate / (1 - rate)))
+            return self
+
+        def gradient(params):
+            a, b = params
+            p = 1.0 / (1.0 + np.exp(-np.clip(a * x + b, -700, 700)))
+            return np.array([np.sum((p - y) * x), np.sum(p - y)])
+
+        result = minimize(negative_log_likelihood, x0=[0.0, 0.0], method="BFGS", jac=gradient)
+
+        # `result.success` is the wrong test in both directions. It is False on
+        # well separated data, where BFGS reports precision loss because the
+        # maximum likelihood estimate genuinely diverges, and the large finite
+        # coefficient it returns is perfectly usable. It is True in the failure
+        # that matters, where the optimiser stopped at the starting point and
+        # said so cheerfully. So the check is on the answer: finite, and
+        # actually at an optimum.
+        if not np.all(np.isfinite(result.x)):
+            raise RuntimeError(f"the logistic fit returned non-finite parameters: {result.x}")
+        residual = float(np.linalg.norm(gradient(result.x))) / len(y)
+        if residual > 1e-3:
+            raise RuntimeError(
+                f"the logistic fit stopped away from an optimum (scaled gradient "
+                f"{residual:.2e}); check the scale of the scores"
+            )
+
         self.coef_, self.intercept_ = float(result.x[0]), float(result.x[1])
         return self
 
@@ -305,7 +459,8 @@ class LogisticCalibrator:
         """
         if self.coef_ is None:
             raise RuntimeError("fit before transform")
-        z = self.coef_ * np.asarray(scores, dtype=float) + self.intercept_
+        x = (np.asarray(scores, dtype=float) - self._centre) / self._scale
+        z = self.coef_ * x + self.intercept_
         posterior_odds = np.exp(np.clip(z, -700, 700))
         lrs = posterior_odds / prior_odds
         return np.clip(lrs, 1.0 / self.bound, self.bound)

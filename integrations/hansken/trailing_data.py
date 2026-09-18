@@ -35,12 +35,24 @@ checked and produced no stray occurrence at all. A naive search is safe
 against the scan.
 
 **It is not safe against an APPn segment, and that is the case that matters,
-because an EXIF thumbnail is itself a JPEG and therefore ends in FF D9.**
-Measured on an ordinary 146,989 byte photograph carrying a 2,879 byte
-thumbnail: the first FF D9 falls at offset 2,889, so a search reports 144,098
-bytes of appended data on a picture with nothing appended to it. That is a
-false positive on the overwhelming majority of camera photographs, handed to
-an investigator as a structural, threshold-free, supposedly decisive finding.
+because an EXIF thumbnail is itself a JPEG and therefore ends in FF D9.** On
+the fixture built by `make_thumbnail_fixture` in the tests, a 147,023 byte
+picture carrying a 2,913 byte thumbnail, the first FF D9 falls at offset
+2,925, so a search reports 144,098 bytes of appended data on a picture with
+nothing appended to it: 98% of the file. That fixture is generated
+deterministically and every one of those figures is pinned by a test, because
+an earlier version of this comment quoted them from a throwaway run that was
+never saved. When the fixture was rebuilt it came out 34 bytes different, so
+the old numbers were not merely uncheckable, they were wrong.
+
+**How often that bites depends on the corpus, and the honest answer is that
+it depends.** It needs a JPEG that carries a thumbnail. Straight from a
+camera, most do. On the 5,000 image ALASKA2 cover sample, the only real
+photograph corpus to hand, the naive search produces **zero** false positives,
+because those covers were processed and carry no thumbnail. So this is a
+correctness argument rather than a frequency one: the segment walk costs
+almost nothing and is right on both corpora, and the search is right on only
+one of them.
 
 Taking the *last* FF D9 instead fails the other way: appended data that
 itself ends in FF D9, which any appended JPEG does, moves the apparent end of
@@ -51,10 +63,22 @@ from __future__ import annotations
 
 import dataclasses
 
-#: Refuse to walk a chunk table longer than this. A malformed or hostile file
-#: can otherwise keep a parser busy indefinitely; the real ceiling for a
-#: picture is in the low hundreds.
+#: Refuse to walk a chunk or segment table longer than this. The real ceiling
+#: for a picture is in the low hundreds.
+#:
+#: **This bounds the number of segments, not the number of bytes**, and an
+#: earlier version of this comment claimed otherwise. A file of 9,000 maximum
+#: sized APP0 segments walks 562 MB legally and stays under the count. The
+#: byte bound is `MAX_SCAN_BYTES` below, and between them the caller's own
+#: size ceiling is what actually protects the worker.
 MAX_CHUNKS = 10_000
+
+#: Stop walking entropy coded data after this many bytes. Byte-at-a-time
+#: scanning in Python runs at roughly 16 MB/s, so a 256 MB file of FF bytes
+#: costs about 16 seconds in a worker that has no timeout on this path: the
+#: subprocess timeout only covers the statistical arm. Refusing is better than
+#: a stall, and refusing is not the same as reporting the picture clean.
+MAX_SCAN_BYTES = 64 * 1024 * 1024
 
 #: How much of the trailing run to look at when guessing what it is. The magic
 #: numbers we know are all within the first few bytes; reading more would just
@@ -81,6 +105,24 @@ _MAGIC = (
     (b"\x7fELF", "ELF executable"),
     (b"-----BEGIN", "PEM encoded block"),
 )
+
+
+#: How far in to look for a signature that is not at offset zero. Data hidden
+#: in front of a picture sits in the first few kilobytes in every case worth
+#: naming, and a bounded window keeps this from becoming a whole file search.
+PREPENDED_SEARCH_BYTES = 64 * 1024
+
+
+class PrependedData(Exception):
+    """A picture signature was found, but not at the start of the file.
+
+    Its own exception rather than a ValueError, because "there are bytes in
+    front of this picture" is a finding and "this is not a picture" is not.
+    """
+
+    def __init__(self, message: str, offset: int):
+        super().__init__(message)
+        self.offset = offset
 
 
 class MalformedImage(Exception):
@@ -174,7 +216,13 @@ def _skip_entropy_coded(data: bytes, pos: int) -> int:
     preceded by FF does.
     """
     n = len(data)
+    started = pos
     while pos < n:
+        if pos - started > MAX_SCAN_BYTES:
+            raise MalformedImage(
+                f"JPEG scan data exceeds the {MAX_SCAN_BYTES} byte walking limit "
+                f"without reaching a marker"
+            )
         if data[pos] != 0xFF:
             pos += 1
             continue
@@ -214,6 +262,17 @@ def find_trailing(data: bytes) -> Trailing:
     elif data.startswith(b"\xff\xd8"):
         end = _jpeg_end(data)
     else:
+        # A signature further in means the picture has something in front of
+        # it, which is a hiding place in its own right. Reporting that as "not
+        # a picture" loses the finding, so it is named instead. The search is
+        # bounded because it reads a fixed window, not the whole file.
+        window = data[:PREPENDED_SEARCH_BYTES]
+        for signature in (PNG_SIGNATURE, b"\xff\xd8\xff"):
+            at = window.find(signature)
+            if at > 0:
+                raise PrependedData(
+                    f"{at} bytes before the start of the picture", offset=at
+                )
         raise ValueError("not a PNG or JPEG")
 
     length = len(data) - end

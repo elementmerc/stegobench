@@ -61,10 +61,27 @@ log = Logger(__name__)
 #: test framework can run without it and a packager can move it.
 STEGCORE_BINARY = os.environ.get("STEGCORE_BINARY", "/opt/stegcore/stegcore")
 
-#: Refuse to load a picture larger than this into memory. Hansken hands over
-#: whatever is in the evidence, including files that claim to be pictures and
-#: are not, and an unbounded read is how one exhibit takes down a worker.
-MAX_PICTURE_BYTES = 256 * 1024 * 1024
+#: What the plugin declares to Hansken. This is the budget for the WHOLE
+#: plugin, not per worker, which is the mistake the first version made.
+MEMORY_BUDGET_MB = 2048
+MAX_WORKERS = 2
+
+#: Peak resident memory the analyser reaches, as a multiple of the file it is
+#: given. **Measured, not estimated**: a 48 MB PNG drove the child to 555 MB,
+#: which is 11.5x, and the worker additionally holds the bytes once and the
+#: staged copy once. 14x is that with a little headroom.
+ANALYSER_PEAK_RATIO = 14
+
+#: Refuse to load a picture larger than this. Hansken hands over whatever is in
+#: the evidence, including files that claim to be pictures and are not, and an
+#: unbounded read is how one exhibit takes down a worker.
+#:
+#: Derived from the declaration above rather than picked, because picking it
+#: was wrong by an order of magnitude: 256 MB against a 512 MB declaration and
+#: four workers, when one worker on a fifth of that ceiling already exceeded
+#: the whole budget on its own. A declaration a plugin cannot honour is worse
+#: than no declaration, because the platform schedules against it.
+MAX_PICTURE_BYTES = (MEMORY_BUDGET_MB // MAX_WORKERS // ANALYSER_PEAK_RATIO) * 1024 * 1024
 
 #: Where findings are written. `misc` is the namespace Hansken's own examples
 #: use for properties outside the core schema, which is what these are until
@@ -88,16 +105,37 @@ class SteganographyPlugin(ExtractionPlugin):
             webpage_url="https://github.com/The-Malware-Files/Stegcore",
             matcher="type=picture AND $data.type=raw",
             license="AGPL-3.0-or-later",
-            resources=PluginResources(maximum_cpu=1, maximum_memory=512, maximum_workers=4),
+            resources=PluginResources(
+                maximum_cpu=MAX_WORKERS,
+                maximum_memory=MEMORY_BUDGET_MB,
+                maximum_workers=MAX_WORKERS,
+            ),
         )
 
+    def __init__(self):
+        super().__init__()
+        # Pre-flight once, not per exhibit. The result is remembered so a
+        # missing or non-executable analyser is reported identically on every
+        # trace instead of being rediscovered, and so a long extraction does
+        # not pay for the check on each picture.
+        try:
+            stegcore_adapter.preflight(STEGCORE_BINARY)
+            self._analyser_problem: str | None = None
+        except stegcore_adapter.StegcoreUnavailable as exc:
+            log.warning(f"the analyser is unusable, statistical findings will be skipped: {exc}")
+            self._analyser_problem = str(exc)
+
     def process(self, trace, data_context):
-        name = trace.get("file.name") or trace.get("name") or "<unnamed>"
+        name = str(trace.get("file.name") or trace.get("name") or "<unnamed>")
         size = data_context.data_size
 
         if size > MAX_PICTURE_BYTES:
-            log.warn(f"{name}: {size} bytes exceeds the {MAX_PICTURE_BYTES} byte ceiling, skipping")
-            trace.update(f"{NS}.stegSkipped", f"larger than {MAX_PICTURE_BYTES} bytes")
+            # Both properties, not just a skip marker. A trace carrying neither
+            # is invisible to a query for what has not been assessed, which is
+            # the query an examiner runs to find the gaps in their own case.
+            reason = f"not assessed: {size} bytes exceeds the {MAX_PICTURE_BYTES} byte ceiling"
+            log.warning(f"{name}: {reason}")
+            trace.update({f"{NS}.stegStructural": reason, f"{NS}.stegStatistical": reason})
             return
 
         with trace.open() as reader:
@@ -114,6 +152,15 @@ class SteganographyPlugin(ExtractionPlugin):
             # is the whole point of separating this from a clean result.
             log.info(f"{name}: does not parse, so nothing is claimed about it ({exc})")
             trace.update(f"{NS}.stegStructural", f"not assessed: {exc}")
+            return
+        except trailing_data.PrependedData as exc:
+            log.info(f"{name}: {exc}")
+            trace.update(
+                {
+                    f"{NS}.stegStructural": "prepended data",
+                    f"{NS}.stegPrependedBytes": str(exc.offset),
+                }
+            )
             return
         except ValueError:
             trace.update(f"{NS}.stegStructural", "not assessed: not a PNG or JPEG")
@@ -135,24 +182,27 @@ class SteganographyPlugin(ExtractionPlugin):
         )
 
     def _statistical(self, trace, name, data):
+        if self._analyser_problem is not None:
+            trace.update(f"{NS}.stegStatistical", f"not assessed: {self._analyser_problem}")
+            return
         try:
             analysis = self._analyse(name, data)
         except stegcore_adapter.StegcoreUnavailable as exc:
             # Degrade visibly. The structural finding above still stands, and
             # an examiner must not read a missing detector as a clean picture.
-            log.warn(f"{name}: statistical analysis unavailable ({exc})")
+            log.warning(f"{name}: statistical analysis unavailable ({exc})")
             trace.update(f"{NS}.stegStatistical", f"not assessed: {exc}")
             return
 
         if not analysis.assessed:
+            # No calibration note here on purpose: quoting a false positive
+            # rate beside a measurement that was never taken invites a reader
+            # to believe one was.
             trace.update(
-                {
-                    f"{NS}.stegStatistical": (
-                        f"not assessed: the calibrated detectors are validated for "
-                        f"spatial formats and this is {analysis.format}"
-                    ),
-                    f"{NS}.stegCalibration": self._calibration_note(),
-                }
+                f"{NS}.stegStatistical",
+                f"not assessed: the calibrated detectors are validated for "
+                f"{', '.join(sorted(stegcore_adapter.SPATIAL_FORMATS))} and this is "
+                f"{analysis.format}",
             )
             return
 
@@ -196,10 +246,16 @@ class SteganographyPlugin(ExtractionPlugin):
         )
 
 
-def _suffix(name: str) -> str:
-    """The extension the analyser needs to pick a parser, never the caller's path."""
-    lowered = name.lower()
-    for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".wav", ".flac"):
+def _suffix(name: object) -> str:
+    """The extension the analyser needs to pick a parser, never the caller's path.
+
+    `name` is whatever the trace carried, which is not guaranteed to be a
+    string: a numeric filename came back as an int and `name.lower()` took the
+    whole of `process()` down with it, after the structural finding had already
+    been written. The trace then held half an answer and no error.
+    """
+    lowered = str(name).lower()
+    for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff"):
         if lowered.endswith(ext):
             return ext
     return ".png"
