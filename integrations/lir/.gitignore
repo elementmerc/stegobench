@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.tox/
+
+# The SDK downloads its Java test framework here on first run. It is a tool,
+# not source, and a tree of jars does not belong in a git history.
+.runner/
+tests.log
+
+# Per-run timing, regenerated on every invocation and different on every
+# machine. The `.trace` files next to these are the expected results and are
+# committed; these are not.
+testdata/result/*.profile.txt
