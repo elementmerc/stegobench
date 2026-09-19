@@ -90,6 +90,25 @@ def bencode(value) -> bytes:
     raise TypeError(f"cannot bencode {type(value).__name__}")
 
 
+#: Commons writes the same licence under more than one spelling. Left alone
+#: they become separate rows in the published table, so "Public Domain" appears
+#: beside "Public domain" with a count of one against a count of nearly two
+#: thousand, and anyone grouping by the field gets two groups for one licence.
+#: The raw value stays in the manifest; this is what the published table and
+#: the per-sample record use.
+CANONICAL_LICENCE = {
+    "public domain": "Public domain",
+    "cc0": "CC0",
+}
+
+
+def canonical_licence(value: str | None) -> str | None:
+    """One spelling per licence, chosen once rather than per source."""
+    if not value:
+        return value
+    return CANONICAL_LICENCE.get(value.strip().lower(), value.strip())
+
+
 def licence_summary(manifest: pathlib.Path, count: int | None = None) -> dict:
     """Everything the platforms need to know about licensing, from the files.
 
@@ -113,7 +132,7 @@ def licence_summary(manifest: pathlib.Path, count: int | None = None) -> dict:
         rows = rows[:count]
     for row in rows:
         total += 1
-        licence = row.get("licence") or "unrecorded"
+        licence = canonical_licence(row.get("licence")) or "unrecorded"
         counts[licence] += 1
         if row.get("licence_url"):
             urls[licence] = row["licence_url"]

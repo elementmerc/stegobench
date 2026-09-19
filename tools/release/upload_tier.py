@@ -17,16 +17,28 @@ was packed, resolves the credentials, works out what a resume would still have
 to send, and prints the plan with its size and its estimated duration. If the
 dry run is not clean the live run would not have been either.
 
-WHY 2 MB/s
------------
+WHY 2 MB/s, AND WHY THE BUDGET IS SHARED
+-----------------------------------------
 This is a domestic connection that other people are using. An upload that
-saturates it for a day is a decision about somebody else's video call. 45 GB at
-2 MB/s is about six and a half hours, which is an overnight job, and the rate
-is a flag if the circumstances change.
+saturates it for a day is a decision about somebody else's video call.
 
-The throttle is a token bucket around the file read rather than anything at the
-network layer, because shaping at the network layer needs NET_ADMIN, and this
-is meant to run in a container that has no capabilities at all.
+**The 2 MB/s is the whole line, not one upload's share of it.** Three
+destinations at 2 MB/s each is 6 MB/s, which is the opposite of the intent. So
+the budget lives in one small file and every uploader reserves from it under a
+lock, whichever machine-local process it belongs to:
+
+    uploader A ──┐
+    uploader B ──┼──► [ one reservation file, flock ] ──► 2 MB/s total
+    uploader C ──┘
+
+Each reads how many bytes it wants to send, takes the next free slot on the
+line, and sleeps until that slot arrives. Uploads may therefore run
+concurrently without exceeding the budget, and adding a fourth destination
+slows the others rather than stacking on top of them.
+
+The throttle is at the file read rather than at the network layer, because
+shaping there needs NET_ADMIN and this runs in a container with no capabilities
+at all.
 
 WHY A CONTAINER, AND WHAT IT IS ALLOWED TO TOUCH
 -------------------------------------------------
@@ -72,6 +84,11 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    import fcntl
+except ImportError:  # not POSIX
+    fcntl = None
+
 #: Bytes per second. A domestic line other people are using.
 DEFAULT_RATE = 2 * 1024 * 1024
 
@@ -99,18 +116,88 @@ class UploadError(RuntimeError):
     pass
 
 
-class ThrottledReader:
-    """A file-like object that will not be read faster than `rate`.
+class SharedBudget:
+    """One bandwidth budget for every uploader on this machine.
 
-    The rate is held as an average over the whole read rather than per chunk,
-    so a stall on the far end does not turn into a burst when it clears.
+    The file holds a single number: the wall-clock time at which the line is
+    next free. To send `n` bytes a process locks the file, takes the slot from
+    `max(now, next_free)`, pushes `next_free` out by `n / rate`, unlocks, and
+    sleeps until its slot arrives. Reservations are therefore handed out in
+    arrival order and the sum of all senders is the rate, not a multiple of it.
+
+    Wall clock rather than a monotonic clock, because monotonic clocks are not
+    comparable between processes. A clock step is survivable: the clamp below
+    turns any absurd reservation back into "now" rather than sleeping for a
+    week.
     """
 
-    def __init__(self, path: pathlib.Path, rate: int, on_progress=None):
-        self._handle = path.open("rb")
+    #: No single reservation can legitimately be further ahead than a few
+    #: chunks' worth of line time. Anything beyond this is a stale file from a
+    #: killed run, or a clock that moved, and is ignored rather than obeyed.
+    MAX_WAIT = 300.0
+
+    def __init__(self, path: pathlib.Path | None, rate: int):
+        if path is not None and fcntl is None:
+            # Refusing beats carrying on. A budget that cannot be shared is a
+            # budget that is silently taken once per uploader, which is the
+            # exact failure it exists to prevent, and nothing downstream would
+            # report it: every upload would look correctly throttled on its own.
+            raise UploadError(
+                "the shared bandwidth budget needs file locking, which this "
+                "platform does not provide. Run the uploader on a POSIX system, "
+                "or pass --budget '' to limit this process alone and accept "
+                "that several uploaders will then exceed the rate together.")
+        self._path = path
         self._rate = rate
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+
+    def reserve(self, size: int) -> None:
+        """Block until this many bytes may be sent."""
+        if self._rate <= 0 or size <= 0:
+            return
+        cost = size / self._rate
+        if self._path is None:
+            time.sleep(cost)
+            return
+
+        now = time.time()
+        with self._path.open("r+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                raw = handle.read().strip()
+                try:
+                    next_free = float(raw) if raw else now
+                except ValueError:
+                    next_free = now
+                start = max(now, next_free)
+                if start - now > self.MAX_WAIT:
+                    start = now
+                handle.seek(0)
+                handle.truncate()
+                handle.write(f"{start + cost:.6f}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        delay = start - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+
+class ThrottledReader:
+    """A file-like object that will not be read faster than the budget allows.
+
+    Every chunk is reserved from the shared budget before it is handed over, so
+    the limit holds across every uploader rather than per uploader.
+    """
+
+    def __init__(self, path: pathlib.Path, budget: SharedBudget, on_progress=None):
+        self._handle = path.open("rb")
+        self._budget = budget
         self._sent = 0
-        self._started = time.monotonic()
         self._on_progress = on_progress
         self.length = path.stat().st_size
 
@@ -126,11 +213,8 @@ class ThrottledReader:
         chunk = self._handle.read(want)
         if not chunk:
             return b""
+        self._budget.reserve(len(chunk))
         self._sent += len(chunk)
-        if self._rate > 0:
-            owed = self._sent / self._rate - (time.monotonic() - self._started)
-            if owed > 0:
-                time.sleep(owed)
         if self._on_progress:
             self._on_progress(self._sent, self.length)
         return chunk
@@ -228,7 +312,7 @@ def credentials_for(destination: str) -> dict[str, str]:
 
 
 def put_internetarchive(packed: pathlib.Path, name: str, item: str,
-                        creds: dict[str, str], rate: int, log) -> None:
+                        creds: dict[str, str], budget: SharedBudget, log) -> None:
     """One file into an Archive item, over its S3 compatible endpoint.
 
     Deliberately no SDK. The endpoint is a single authenticated PUT, and adding
@@ -244,7 +328,7 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
             _last[0] = now
             log(f"    {name}: {sent / 1e6:.0f} of {total / 1e6:.0f} MB")
 
-    with ThrottledReader(path, rate, on_progress=beat) as body:
+    with ThrottledReader(path, budget, on_progress=beat) as body:
         request = urllib.request.Request(url, data=body, method="PUT")
         request.add_header("authorization",
                            f"LOW {creds['IA_ACCESS_KEY']}:{creds['IA_SECRET_KEY']}")
@@ -260,20 +344,92 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
             raise UploadError(f"{name}: could not reach the archive: {e.reason}") from e
 
 
-def unsupported(destination: str):
-    def _send(*_args, **_kwargs):
+def put_huggingface(packed: pathlib.Path, name: str, repo: str,
+                    creds: dict[str, str], budget: SharedBudget, log) -> None:
+    """One file into a HuggingFace dataset repository.
+
+    Deliberately no SDK. `huggingface_hub` pulls in a large dependency tree and
+    does its own retrying and its own progress bars, neither of which can see
+    the shared budget. The upload API is a PUT of the whole file to a
+    pre-authorised URL, which the reader can stream into.
+    """
+    path = packed / name
+    size = path.stat().st_size
+
+    # Step one: ask where to put it. Large files go to a storage backend
+    # rather than straight into git, and the API decides which.
+    preupload = urllib.request.Request(
+        f"https://huggingface.co/api/datasets/{repo}/preupload/main",
+        data=json.dumps({"files": [{"path": name, "size": size,
+                                    "sample": ""}]}).encode(),
+        method="POST")
+    preupload.add_header("authorization", f"Bearer {creds['HF_TOKEN']}")
+    preupload.add_header("content-type", "application/json")
+    try:
+        with urllib.request.urlopen(preupload, timeout=120) as response:
+            plan = json.loads(response.read())
+    except urllib.error.HTTPError as e:
         raise UploadError(
-            f"{destination} needs its own client library, which is not "
-            f"installed and is not something a release script should install on "
-            f"a machine by itself. Install it deliberately, then re-run. The dry "
-            f"run covers everything up to the transfer either way.")
+            f"{name}: hugging face refused the upload plan, {e.code} {e.reason}. "
+            f"Check the repository {repo} exists and the token can write to it."
+        ) from e
+    except urllib.error.URLError as e:
+        raise UploadError(f"{name}: could not reach hugging face: {e.reason}") from e
+
+    entry = (plan.get("files") or [{}])[0]
+    if entry.get("uploadMode") == "regular" and not entry.get("shouldIgnore"):
+        raise UploadError(
+            f"{name}: hugging face wants this file committed through git rather "
+            f"than streamed, which this uploader does not do. Files this size "
+            f"belong in LFS; check the repository's .gitattributes.")
+
+    def beat(sent: int, total: int, _last=[0.0]) -> None:
+        now = time.monotonic()
+        if now - _last[0] >= BEAT_SECONDS:
+            _last[0] = now
+            log(f"    {name}: {sent / 1e6:.0f} of {total / 1e6:.0f} MB")
+
+    upload_url = entry.get("uploadUrl")
+    if not upload_url:
+        raise UploadError(
+            f"{name}: hugging face returned no upload URL, so there is nowhere "
+            f"to send it. Response keys: {sorted(entry)}")
+
+    with ThrottledReader(path, budget, on_progress=beat) as body:
+        request = urllib.request.Request(upload_url, data=body, method="PUT")
+        request.add_header("content-length", str(body.length))
+        try:
+            with urllib.request.urlopen(request, timeout=3600) as response:
+                if response.status not in (200, 201):
+                    raise UploadError(f"{name}: hugging face returned "
+                                      f"{response.status}")
+        except urllib.error.HTTPError as e:
+            raise UploadError(f"{name}: hugging face returned {e.code} "
+                              f"{e.reason}") from e
+        except urllib.error.URLError as e:
+            raise UploadError(f"{name}: could not reach hugging face: "
+                              f"{e.reason}") from e
+
+
+def unsupported(destination: str, reason: str):
+    def _send(*_args, **_kwargs):
+        raise UploadError(f"{destination}: {reason}")
     return _send
 
 
 SENDERS = {
     "internetarchive": put_internetarchive,
-    "huggingface": unsupported("huggingface"),
-    "kaggle": unsupported("kaggle"),
+    "huggingface": put_huggingface,
+    # Kaggle has no per-file upload endpoint: a dataset version is created by
+    # pushing the whole directory through its own client, which does its own
+    # chunking and cannot be made to draw from the shared budget. Doing it by
+    # hand from the release directory is the honest answer until that is worth
+    # building.
+    "kaggle": unsupported(
+        "kaggle",
+        "creates a dataset version from a whole directory rather than file by "
+        "file, so it cannot share the bandwidth budget with the other "
+        "destinations. Run it on its own, after the others have finished."),
 }
 
 
@@ -285,7 +441,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="the Internet Archive identifier, or the HuggingFace "
                          "or Kaggle dataset slug")
     ap.add_argument("--rate", type=int, default=DEFAULT_RATE,
-                    help=f"bytes per second, default {DEFAULT_RATE} (2 MB/s)")
+                    help=f"bytes per second for the WHOLE line, shared with "
+                         f"every other uploader using the same --budget. "
+                         f"Default {DEFAULT_RATE} (2 MB/s)")
+    ap.add_argument("--budget", default=None,
+                    help="the shared reservation file. Every uploader that "
+                         "names the same one shares the rate between them. "
+                         "Defaults to one beside the state file")
     ap.add_argument("--state", default=None,
                     help="where the resume record lives. Defaults to beside "
                          "the release; give it its own path when the release "
@@ -319,7 +481,8 @@ def main(argv: list[str] | None = None) -> int:
 
     total = sum((packed / n).stat().st_size for n in files if (packed / n).is_file())
     log(f"{len(files)} file(s), {total / 1e9:.1f} GB, "
-        f"about {total / args.rate / 3600:.1f} hours at {args.rate / 1e6:.1f} MB/s")
+        f"about {total / args.rate / 3600:.1f} hours at {args.rate / 1e6:.1f} MB/s "
+        f"if nothing else is sharing the line")
 
     if not args.skip_verify:
         log("checking every file against the index before anything leaves")
@@ -333,6 +496,15 @@ def main(argv: list[str] | None = None) -> int:
         log("every file matches its recorded digest")
 
     state_file = pathlib.Path(args.state) if args.state else packed / ".upload-state.json"
+    budget_file = pathlib.Path(args.budget) if args.budget else (
+        state_file.parent / ".upload-budget")
+    if args.budget == "":
+        budget_file = None
+    try:
+        budget = SharedBudget(budget_file, args.rate)
+    except UploadError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 1
     state = load_state(state_file)
     done = state["destinations"].setdefault(args.destination, {})
 
@@ -371,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
     for position, name in enumerate(pending, 1):
         log(f"[{position}/{len(pending)}] {name}")
         try:
-            send(packed, name, args.item, creds, args.rate, log)
+            send(packed, name, args.item, creds, budget, log)
         except UploadError as e:
             print(f"\n{e}", file=sys.stderr)
             print("The state file records what did land, so a re-run resumes "

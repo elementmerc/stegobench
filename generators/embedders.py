@@ -111,6 +111,18 @@ class Embedder(abc.ABC):
     def accepts(self, cover: pathlib.Path) -> bool:
         return cover.suffix.lower() in self.formats
 
+    def configured_for(self, row: dict) -> "Embedder":
+        """This embedder, set up the way the row says its arm was built.
+
+        A tool that rewrites the container has settings of its own, and a clean
+        half written with different ones is not the pair's clean half. The
+        default returns `self` because a tool that edits in place has nothing to
+        match; one that rewrites overrides this and raises rather than falling
+        back to a default, because a silently defaulted setting is how a pair
+        acquires exactly the confound this whole mechanism exists to remove.
+        """
+        return self
+
     def matched_clean(self, cover: pathlib.Path, dest: pathlib.Path) -> dict:
         """The clean half of a pair, written by the same encoder as the stego.
 

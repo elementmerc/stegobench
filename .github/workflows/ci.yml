@@ -60,6 +60,10 @@ jobs:
         # because the build box's virtual environment has no pytest and a suite
         # that only runs on the laptop is a suite that stops running.
         run: python -m unittest discover -s generators -p "test_*.py" -v
+      - name: Release tooling tests
+        # The shared bandwidth budget is timing sensitive and uses flock, so it
+        # is the one piece here whose behaviour genuinely differs per platform.
+        run: python -m unittest discover -s tools/release -p "test_*.py" -v
 
   tiers:
     name: Tiers on ${{ matrix.os }}, Nano built, all three selected

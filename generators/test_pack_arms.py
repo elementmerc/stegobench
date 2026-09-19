@@ -232,3 +232,41 @@ class TestPackArm(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMispairedRefusal(TestPackArm):
+    """An arm cannot be half writer-matched and half not.
+
+    The two kinds are not comparable: on outguess the mismatched pairing moved
+    a detector from 0.50 to 0.36 with no payload involved, so averaging them
+    into one arm produces a number that describes neither.
+    """
+
+    def test_a_row_without_the_arms_pairing_is_left_out(self) -> None:
+        good = self._stego("outguess/0500/00000.jpg", b"one")
+        good.update({"source_png": "09710.png", "pairing": "writer-matched"})
+        bad = self._stego("outguess/0500/00001.jpg", b"two")
+        bad["source_png"] = "05047.png"
+
+        index = pack_arms.pack_arm("outguess-0500", [good, bad], self.arms,
+                                   self.licences, {}, self.out, 500,
+                                   "stego", "stego_sha256")
+        self.assertEqual(index["mispaired"], ["outguess/0500/00001.jpg"])
+        self.assertEqual(index["samples"], 1)
+        self.assertEqual(index["unlicensed"], [])
+        self.assertEqual(self._members("pentimento-core-outguess-0500-00000.tar"),
+                         ["000000.jpg", "000000.json"])
+
+    def test_an_arm_with_no_matched_rows_is_left_alone(self) -> None:
+        # steghide edits coefficients in place, so none of its rows carry the
+        # field and none of them should be refused for lacking it.
+        rows = []
+        for n in range(2):
+            row = self._stego(f"steghide/0500/0000{n}.jpg", f"s{n}".encode())
+            row["source_png"] = "09710.png"
+            rows.append(row)
+        index = pack_arms.pack_arm("steghide-0500", rows, self.arms,
+                                   self.licences, {}, self.out, 500,
+                                   "stego", "stego_sha256")
+        self.assertEqual(index["mispaired"], [])
+        self.assertEqual(index["samples"], 2)

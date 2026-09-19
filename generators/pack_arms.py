@@ -83,6 +83,8 @@ import sys
 import tarfile
 import time
 
+from publish_tier import canonical_licence
+
 #: Licence-bearing fields lifted from the cover row onto every derivative. If
 #: the cover manifest gains a field that the licence depends on, it belongs
 #: here, because a reader of an arm shard may never see the cover tier.
@@ -113,7 +115,12 @@ def load_cover_licences(manifest: pathlib.Path) -> dict[str, dict]:
         if not line.strip():
             continue
         row = json.loads(line)
-        out[row["file"]] = {k: row[k] for k in INHERITED if k in row}
+        entry = {k: row[k] for k in INHERITED if k in row}
+        # One spelling per licence in what ships, so a reader grouping by the
+        # field gets one group per licence rather than one per spelling.
+        if "licence" in entry:
+            entry["licence"] = canonical_licence(entry["licence"])
+        out[row["file"]] = entry
     if not out:
         raise PackError(f"no cover rows in {manifest}")
     return out
@@ -212,7 +219,16 @@ def pack_arm(
     mismatches: list[str] = []
     missing: list[str] = []
     unlicensed: list[str] = []
+    mispaired: list[str] = []
     position = 0
+
+    # An arm where some samples are paired against the tool's own writer and
+    # some are not is internally inconsistent, and the two kinds are not
+    # comparable: measured on outguess, the mismatched pairing moved a
+    # detector's AUC from 0.50 to 0.36 with no payload involved. So if any
+    # sample in the arm is writer-matched, every sample has to be, and the
+    # rest are left out rather than quietly averaged in.
+    expects_matched = any(r.get("pairing") == "writer-matched" for r in rows)
 
     for shard_no in range((len(rows) + per_shard - 1) // per_shard):
         chunk = rows[shard_no * per_shard : (shard_no + 1) * per_shard]
@@ -221,6 +237,10 @@ def pack_arm(
         with tarfile.open(shard, "w", format=tarfile.PAX_FORMAT) as tar:
             for row in chunk:
                 rel = row[path_field]
+                if expects_matched and row.get("pairing") != "writer-matched":
+                    mispaired.append(rel)
+                    position += 1
+                    continue
                 path = arms_root / rel
                 if not path.exists():
                     missing.append(rel)
@@ -275,6 +295,7 @@ def pack_arm(
         "digest_mismatches": mismatches,
         "missing": missing,
         "unlicensed": unlicensed,
+        "mispaired": mispaired,
     }
 
 
@@ -397,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     bad = sum(len(i["digest_mismatches"]) for i in indices)
     gone = sum(len(i["missing"]) for i in indices)
     bare = sum(len(i["unlicensed"]) for i in indices)
+    odd = sum(len(i["mispaired"]) for i in indices)
 
     index_path = out / "pentimento-core-arms-index.json"
     index_path.write_text(json.dumps({
@@ -413,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{len(indices)} arm(s), {total_samples} samples, "
           f"{total_bytes / 1e9:.1f} GB, {time.monotonic() - started:.0f}s")
     print(f"index: {index_path}")
-    if bad or gone or bare:
+    if bad or gone or bare or odd:
         # Three different failures, reported as three. An earlier version
         # counted the licence gaps as missing files and said "80000 missing
         # file(s)" when every file was present, which sent the diagnosis the
@@ -430,6 +452,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"They are derivatives of licensed photographs, so they were "
                   f"left out rather than shipped without attribution.",
                   file=sys.stderr)
+        if odd:
+            print(f"{odd} sample(s) are paired against a different encoder from "
+                  f"the rest of their arm, so they measure the encoder rather "
+                  f"than the payload and were left out.", file=sys.stderr)
         print("None of those were packed. The tier is incomplete; see the "
               "index for the list.", file=sys.stderr)
         return 2

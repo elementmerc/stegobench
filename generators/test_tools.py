@@ -276,3 +276,28 @@ class WriterMatchedCleanTests(unittest.TestCase):
         # An empty payload is refused by the tool itself, so one byte is the
         # floor rather than a choice.
         self.assertEqual(len(tools.OutguessEmbedder.MINIMAL_PAYLOAD), 1)
+
+
+class ConfiguredForTests(unittest.TestCase):
+    """The clean half is written with the arm's settings, never with defaults."""
+
+    def test_outguess_takes_the_quality_from_the_row(self):
+        e = tools.OutguessEmbedder()
+        self.assertEqual(e.quality, 75)
+        self.assertEqual(e.configured_for({"jpeg_quality": 95}).quality, 95)
+        self.assertEqual(
+            e.configured_for({"detail": {"reencoded_at_quality": 90}}).quality, 90)
+
+    def test_a_row_that_does_not_say_is_refused_rather_than_defaulted(self):
+        # A silently defaulted quality writes the clean half a whole step away
+        # from its stego twin, which is the confound the pairing exists to
+        # remove, reintroduced by the thing that removes it.
+        with self.assertRaises(EmbedError) as cm:
+            tools.OutguessEmbedder().configured_for({"arm": "outguess/0500"})
+        self.assertIn("quality", str(cm.exception))
+
+    def test_a_tool_that_edits_in_place_needs_no_configuration(self):
+        for e in build():
+            if e.rewrites_container:
+                continue
+            self.assertIs(e.configured_for({}), e, e.id)

@@ -95,9 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     # cover share it, and building it four times would quadruple the work for
     # four identical files.
     wanted: dict[tuple[str, str], pathlib.Path] = {}
+    settings: dict[tuple[str, str], dict] = {}
     for row in affected:
         stem = pathlib.PurePosixPath(row["clean"]).name
-        wanted[(row["tool"], stem)] = root / row["clean"]
+        key = (row["tool"], stem)
+        wanted[key] = root / row["clean"]
+        settings[key] = row
 
     print(f"{len(affected)} row(s) over {len(wanted)} clean half/halves to build")
     if args.dry_run:
@@ -118,7 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         if target.is_file():
             return key, {"writer": tool, "resumed": True}, ""
         try:
-            detail = rewriting[tool].matched_clean(wanted[key], target)
+            # Configured from the row, not from the tool's defaults. A clean
+            # half written with different settings is not this pair's clean
+            # half, and the difference is invisible until somebody measures it.
+            configured = rewriting[tool].configured_for(settings[key])
+            detail = configured.matched_clean(wanted[key], target)
         except (EmbedError, OSError) as e:
             return key, None, f"clean_{tool}/{stem}: {e}"
         return key, detail, ""

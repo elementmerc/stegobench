@@ -224,6 +224,24 @@ class OutguessEmbedder(DockerTool, Embedder):
                             "reencoded_at_quality": self.quality,
                             "password": bool(password)})
 
+    def configured_for(self, row: dict) -> "OutguessEmbedder":
+        """At the quality the arm was built at, which the row records.
+
+        Defaulting here would write the clean half at 75 against a stego half
+        at 95 and hand the pair back the quality confound. It happened: a first
+        migration used the default and produced 8,069 clean halves a whole
+        quality step away from their twins.
+        """
+        quality = row.get("jpeg_quality") or (row.get("detail") or {}).get(
+            "reencoded_at_quality")
+        if not quality:
+            raise EmbedError(
+                f"{row.get('arm', 'this row')} does not record the JPEG quality "
+                "it was built at, and outguess re-encodes, so a clean half "
+                "written at a guessed quality would differ from its stego twin "
+                "in the compression as well as in the payload")
+        return OutguessEmbedder(quality=int(quality))
+
     def matched_clean(self, cover: pathlib.Path, dest: pathlib.Path) -> dict:
         """The cover through outguess's own writer, carrying almost nothing.
 
