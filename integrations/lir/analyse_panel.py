@@ -41,9 +41,7 @@ import numpy as np
 from likelihood_ratio import (
     bound_cost,
     cllr_null,
-    cross_validated_lrs,
-    decompose,
-    observed_cllr,
+    observed_decomposition,
 )
 
 DETECTORS = ("aletheia_spa", "aletheia_rs", "stegexpose")
@@ -134,7 +132,7 @@ def main(argv=None):
 
     header = (
         f"{'arm':<20}{'detector':<14}{'paired':>7}"
-        f"{'AUC':>7}{'Cllr (sd)':>17}{'Cllr_min':>9}{'p':>7}  verdict"
+        f"{'AUC':>7}{'Cllr (sd)':>17}{'Cllr_min':>9}{'Cllr_cal':>9}{'p':>7}  verdict"
     )
     print(header)
     print("-" * len(header))
@@ -161,14 +159,13 @@ def main(argv=None):
 
             auc = roc_auc(s_stego, s_clean)
             # Averaged over fold seeds: a single cross validation is a draw
-            # whose spread exceeds the effect being measured.
-            mean_cllr, sd_cllr, _ = observed_cllr(
+            # whose spread exceeds the effect being measured. Every column of
+            # the decomposition comes from the same draws, so the printed
+            # Cllr minus the printed Cllr_min is the printed Cllr_cal.
+            d, sd_cllr = observed_decomposition(
                 scores, labels, folds=args.folds, bound=args.bound, seeds=args.seeds
             )
-            lrs = cross_validated_lrs(
-                scores, labels, folds=args.folds, bound=args.bound, seed=args.seed
-            )
-            d = decompose(lrs, labels, bound=args.bound)
+            mean_cllr = d.cllr
 
             # The reference is what this same pipeline yields when the labels
             # are meaningless, not the textbook 1.0. See `cllr_null`.
@@ -193,20 +190,28 @@ def main(argv=None):
                 # committing the overstatement it exists to prevent.
                 verdict = "detectable, not useful"
             elif p_value > 0.95:
-                verdict = "worse than chance"
+                verdict = "worse than its null"
             else:
                 verdict = "no evidential value"
 
             print(
                 f"{arm:<20}{det:<14}{len(ids):>7}"
                 f"{auc:>7.3f}{f'{mean_cllr:.3f} ({sd_cllr:.3f})':>17}"
-                f"{d.cllr_min:>9.3f}{p_value:>7.3f}  {verdict}"
+                f"{d.cllr_min:>9.3f}{d.cllr_cal:>9.3f}{p_value:>7.3f}  {verdict}"
             )
             if time.monotonic() - started > 30:
                 print(f"  ... {time.monotonic() - started:.0f}s elapsed", flush=True)
                 started = time.monotonic()
 
     print()
+    print(
+        f"settings: {args.folds} folds, bound {args.bound:g}, {args.seeds} fold seeds, "
+        f"{args.permutations} within-pair permutations"
+    )
+    print(
+        f"the smallest p this many permutations can report is "
+        f"{1 / (1 + args.permutations):.4f}"
+    )
     print("Cllr = 1.000 is the textbook cost of answering 'this tells you nothing'.")
     print("The reference used here is a within-pair permutation null, which sits slightly")
     print("above 1.000 because cross validated calibration of noise is not free.")

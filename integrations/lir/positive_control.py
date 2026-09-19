@@ -36,7 +36,7 @@ import time
 import numpy as np
 
 from analyse_panel import roc_auc
-from likelihood_ratio import cllr_null, cross_validated_lrs, decompose, observed_cllr
+from likelihood_ratio import cllr_null, observed_decomposition
 
 DEFAULT_SCORES = pathlib.Path(
     "/home/mercury/the-factory/Stegcore/private/calibration/scores-2026-05-22.jsonl"
@@ -94,11 +94,11 @@ def main(argv=None):
 
             scores = np.concatenate([s, c])
             labels = np.concatenate([np.ones(n, int), np.zeros(n, int)])
-            mean_cllr, sd_cllr, _ = observed_cllr(
+            # One estimator for every column: see `observed_decomposition`.
+            d, sd_cllr = observed_decomposition(
                 scores, labels, folds=args.folds, seeds=args.seeds
             )
-            lrs = cross_validated_lrs(scores, labels, folds=args.folds, seed=args.seed)
-            d = decompose(lrs, labels)
+            mean_cllr = d.cllr
             # This corpus is not cover paired: the clean and stego sets are
             # different pictures, so a free permutation is the right null here
             # and a within-pair one would be a fiction.
@@ -111,7 +111,7 @@ def main(argv=None):
             elif p < 0.05:
                 verdict = "detectable, not useful"
             elif p > 0.95:
-                verdict = "worse than chance"
+                verdict = "worse than its null"
             else:
                 verdict = "no evidential value"
             print(
@@ -123,6 +123,18 @@ def main(argv=None):
         if time.monotonic() - started > 30:
             print(f"  ... {time.monotonic() - started:.0f}s elapsed", flush=True)
             started = time.monotonic()
+
+    print()
+    print(
+        f"settings: {args.folds} folds, {args.seeds} fold seeds, "
+        f"{args.permutations} free permutations"
+    )
+    print(
+        f"the smallest p this many permutations can report is "
+        f"{1 / (1 + args.permutations):.4f}, so every row at that value is "
+        f"resolution limited rather than exact"
+    )
+    print(f"'informative' additionally requires Cllr below {args.useful:g}.")
     return 0
 
 
