@@ -260,6 +260,7 @@ def cllr_null(
     bound: float = DEFAULT_BOUND,
     seed: int = 0,
     pairs: np.ndarray | None = None,
+    seeds: int = 20,
 ) -> np.ndarray:
     """Cllr values this pipeline produces when the labels mean nothing.
 
@@ -310,6 +311,8 @@ def cllr_null(
     :param pairs: an identifier per case, equal for the two members of a pair.
         When given, labels are flipped within each pair rather than shuffled
         across the corpus.
+    :param seeds: fold seeds averaged into each draw. Must match the value
+        used for the observed statistic, or the two are not comparable.
     """
     scores = np.asarray(scores, dtype=float)
     labels = _check_labels(labels)
@@ -331,10 +334,18 @@ def cllr_null(
             # labels, which is exactly the exchange the null allows.
             flip = rng.integers(0, 2, size=pair_index.max() + 1)[pair_index].astype(bool)
             shuffled = np.where(flip, 1 - labels, labels)
-        lrs = cross_validated_lrs(
-            scores, shuffled, folds=folds, bound=bound, seed=int(rng.integers(1 << 31))
-        )
-        out[i] = cllr(lrs[shuffled == 1], lrs[shuffled == 0])
+
+        # Each draw is averaged over the SAME number of fold seeds as the
+        # observed statistic. This is not an optimisation; a mean over 20
+        # seeds and a single draw are different estimators with different
+        # variance, and comparing one against the other inflated this null
+        # by a factor of 5.5 in the direction that made results look
+        # indistinguishable from it. See `observed_cllr`.
+        draws = np.empty(seeds)
+        for s in range(seeds):
+            lrs = cross_validated_lrs(scores, shuffled, folds=folds, bound=bound, seed=s)
+            draws[s] = cllr(lrs[shuffled == 1], lrs[shuffled == 0])
+        out[i] = draws.mean()
     return out
 
 
