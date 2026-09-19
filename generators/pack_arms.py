@@ -15,9 +15,19 @@ Arms are not covers and the difference is load bearing:
 
 **A sample is a pair, not a picture.** Every stego image is a modified copy of
 one specific clean image, and the pairing is the whole point of the corpus. So
-the clean half travels in its own arm (`clean_grey`, `clean_jpeg`) and every
-stego row records `source_png`, the cover it descends from, which is the join
-key back to the cover tier.
+the clean half travels in its own arm (`clean-grey`, `clean-jpeg`,
+`clean-jpeg-tools`), synthesised here from the `clean` column every stego row
+carries, and every stego row records the cover it descends from, which is the
+join key back to the cover tier.
+
+**The JPEG arms name their cover indirectly, and the indirection is recorded.**
+A spatial row carries `source_png` and joins to the cover manifest in one hop. A
+JPEG DCT row carries `source_jpeg`, which is a positional name like `00000.jpg`
+in the clean JPEG pool that `build_jpeg_arms.py` wrote. That builder recorded
+`source_png` for every one of those, so the second hop is a lookup in its
+manifest rather than a guess about ordering: `--jpeg-covers-manifest` supplies
+it, `licence_join` in each sample says which route was taken, and a sample whose
+cover cannot be named is refused rather than shipped.
 
 **The licence is inherited and must travel.** A stego image is a derivative of
 a Commons photograph. 54% of the covers require attribution, so 54% of the
@@ -40,6 +50,10 @@ WebDataset layout, the same as the cover tier, so the same readers work::
       000000.json    the arm row, with licence and attribution joined in
       000001.png
       000001.json
+
+The member extension is the real one, so a JPEG arm ships `000000.jpg`. Readers
+that pick a decoder by extension, which is every WebDataset reader, would
+otherwise hand JPEG bytes to a PNG decoder.
 
 The key is the position within the arm, and `source_png` inside the JSON is
 what joins a sample back to its cover and to its clean counterpart.
@@ -105,6 +119,44 @@ def load_cover_licences(manifest: pathlib.Path) -> dict[str, dict]:
     return out
 
 
+def load_jpeg_cover_map(manifest: pathlib.Path) -> dict[str, str]:
+    """`00000.jpg` to the cover PNG it was made from, as the builder recorded it.
+
+    `build_jpeg_arms.py` writes the clean JPEG pool and puts `source_png` on
+    every row, so this is a record rather than an inference about ordering. It
+    is checked for collisions because a name pointing at two different covers
+    would silently attribute half the arm to the wrong photographer.
+    """
+    out: dict[str, str] = {}
+    for line in manifest.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        clean = row.get("clean")
+        cover = row.get("source_png")
+        if not clean or not cover:
+            continue
+        name = pathlib.PurePosixPath(clean).name
+        if out.setdefault(name, cover) != cover:
+            raise PackError(
+                f"{manifest}: {name} is recorded against both {out[name]} and "
+                f"{cover}, so the JPEG licence join is not trustworthy")
+    return out
+
+
+def cover_of(row: dict, jpeg_map: dict[str, str]) -> tuple[str | None, str]:
+    """The cover a row descends from, and how that was established."""
+    direct = row.get("source_png")
+    if direct:
+        return direct, "direct"
+    indirect = row.get("source_jpeg")
+    if indirect:
+        mapped = jpeg_map.get(pathlib.PurePosixPath(indirect).name)
+        if mapped:
+            return mapped, "via clean JPEG"
+    return None, "unresolved"
+
+
 def arm_key(row: dict) -> str:
     """`wow-0200` from a row. Rates become integers so names sort and never
     carry a decimal point into a filename."""
@@ -149,6 +201,7 @@ def pack_arm(
     rows: list[dict],
     arms_root: pathlib.Path,
     licences: dict[str, dict],
+    jpeg_map: dict[str, str],
     out: pathlib.Path,
     per_shard: int,
     path_field: str,
@@ -158,6 +211,7 @@ def pack_arm(
     shards: list[dict] = []
     mismatches: list[str] = []
     missing: list[str] = []
+    unlicensed: list[str] = []
     position = 0
 
     for shard_no in range((len(rows) + per_shard - 1) // per_shard):
@@ -180,20 +234,25 @@ def pack_arm(
                     position += 1
                     continue
 
-                sample = dict(row)
-                sample["sha256"] = actual
                 # The derivative inherits its cover's licence. Without this a
                 # reader holding only this shard cannot discharge the
-                # attribution that 54% of these images carry.
-                cover = licences.get(row.get("source_png", ""))
-                if cover:
-                    sample["cover_licence"] = cover
-                else:
-                    sample["cover_licence"] = None
-                    missing.append(f"licence for {rel}")
+                # attribution that 54% of these images carry, so a sample whose
+                # cover cannot be named is left out rather than shipped bare.
+                cover_name, how = cover_of(row, jpeg_map)
+                cover = licences.get(cover_name or "")
+                if not cover:
+                    unlicensed.append(rel)
+                    position += 1
+                    continue
+
+                sample = dict(row)
+                sample["sha256"] = actual
+                sample["source_png"] = cover_name
+                sample["licence_join"] = how
+                sample["cover_licence"] = cover
 
                 key = f"{position:06d}"
-                add(tar, f"{key}.png", payload)
+                add(tar, f"{key}{pathlib.PurePosixPath(rel).suffix}", payload)
                 add(tar, f"{key}.json", json.dumps(sample, sort_keys=True).encode())
                 packed += 1
                 position += 1
@@ -215,7 +274,42 @@ def pack_arm(
         "shards": shards,
         "digest_mismatches": mismatches,
         "missing": missing,
+        "unlicensed": unlicensed,
     }
+
+
+#: The clean halves, synthesised from the `clean` column rather than from a
+#: manifest of their own. Without them the corpus ships only the modified half
+#: of every pair, and a paired corpus whose pairs are missing a side is not one.
+def clean_arms(rows: list[dict], group: str) -> dict[str, list[dict]]:
+    """Every distinct clean image in a group, as arms of its own.
+
+    Keyed on the directory the builder put it in, because those directories are
+    different images: `clean_jpeg` is written by the same encoder as its stego
+    twin, while `clean` under `jpeg-tools` is the Pillow original the tools were
+    handed. Collapsing them would break the pairing they exist to preserve.
+    """
+    arms: dict[str, list[dict]] = collections.defaultdict(list)
+    seen: set[str] = set()
+    for row in rows:
+        rel = row.get("clean")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        folder = pathlib.PurePosixPath(rel).parent.name
+        name = f"clean-{group}" if folder == "clean" else folder.replace("_", "-")
+        arms[name].append({
+            "arm": name,
+            "tool": "clean",
+            "rate": None,
+            "role": "clean",
+            "domain": row.get("domain"),
+            "file": rel,
+            "sha256": row.get("clean_sha256"),
+            "source_png": row.get("source_png"),
+            "source_jpeg": row.get("source_jpeg"),
+        })
+    return dict(arms)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -224,6 +318,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--covers-manifest", required=True,
                     help="the cover manifest, for the licence join")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--jpeg-covers-manifest", default=None,
+                    help="the manifest that recorded which cover each clean "
+                         "JPEG was made from, for the DCT arms' licence join. "
+                         "Defaults to <arms>/jpeg-tools/manifest.jsonl")
+    ap.add_argument("--no-clean", action="store_true",
+                    help="pack only the stego halves. The clean halves are "
+                         "what make the pairs usable, so this is not the default")
     ap.add_argument("--per-shard", type=int, default=DEFAULT_PER_SHARD)
     ap.add_argument("--group", action="append", default=None,
                     help="arm group directory under --arms; repeatable. "
@@ -244,6 +345,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"licence rows: {len(licences)}")
 
+    jpeg_manifest = pathlib.Path(
+        args.jpeg_covers_manifest or arms_root / "jpeg-tools" / "manifest.jsonl")
+    jpeg_map: dict[str, str] = {}
+    if jpeg_manifest.exists():
+        try:
+            jpeg_map = load_jpeg_cover_map(jpeg_manifest)
+        except (PackError, OSError) as e:
+            print(f"cannot read the JPEG cover manifest: {e}", file=sys.stderr)
+            return 1
+        print(f"JPEG cover map: {len(jpeg_map)} clean JPEGs joined to covers")
+    else:
+        print(f"no JPEG cover manifest at {jpeg_manifest}: any DCT arm will "
+              f"fail its licence join", file=sys.stderr)
+
     groups = args.group or [
         p.parent.name for p in sorted(arms_root.glob("*/manifest.jsonl"))
     ]
@@ -259,17 +374,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skipping {group}: no manifest", file=sys.stderr)
             continue
         print(f"\n=== {group} ===")
-        for name, rows in sorted(group_rows(manifest).items()):
+        by_arm = group_rows(manifest)
+        if not args.no_clean:
+            every_row = [r for rows in by_arm.values() for r in rows]
+            by_arm.update(clean_arms(every_row, group))
+        for name, rows in sorted(by_arm.items()):
             if args.only and name not in args.only:
                 continue
-            # The clean arms are keyed by their own path; a stego row carries
-            # both halves and only the stego half is packed here, because the
-            # clean half already ships as its own arm.
+            # A stego row carries both halves; only the stego half is packed
+            # under the arm's own name, because the clean half is packed once
+            # as a clean arm rather than repeated under all four rates.
             path_field = "stego" if "stego" in rows[0] else "file"
             digest_field = "stego_sha256" if path_field == "stego" else "sha256"
             print(f"{name}: {len(rows)} rows")
             indices.append(pack_arm(
-                name, rows, arms_root / group, licences, out,
+                name, rows, arms_root / group, licences, jpeg_map, out,
                 args.per_shard, path_field, digest_field,
             ))
 
@@ -277,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
     total_bytes = sum(s["bytes"] for i in indices for s in i["shards"])
     bad = sum(len(i["digest_mismatches"]) for i in indices)
     gone = sum(len(i["missing"]) for i in indices)
+    bare = sum(len(i["unlicensed"]) for i in indices)
 
     index_path = out / "pentimento-core-arms-index.json"
     index_path.write_text(json.dumps({
@@ -293,10 +413,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{len(indices)} arm(s), {total_samples} samples, "
           f"{total_bytes / 1e9:.1f} GB, {time.monotonic() - started:.0f}s")
     print(f"index: {index_path}")
-    if bad or gone:
-        print(f"\n{bad} digest mismatch(es) and {gone} missing file(s) were NOT "
-              f"packed. The tier is incomplete; see the index for the list.",
-              file=sys.stderr)
+    if bad or gone or bare:
+        # Three different failures, reported as three. An earlier version
+        # counted the licence gaps as missing files and said "80000 missing
+        # file(s)" when every file was present, which sent the diagnosis the
+        # wrong way for an afternoon.
+        print("", file=sys.stderr)
+        if gone:
+            print(f"{gone} file(s) named in the manifest are not on disk.",
+                  file=sys.stderr)
+        if bad:
+            print(f"{bad} file(s) do not match the digest the build recorded.",
+                  file=sys.stderr)
+        if bare:
+            print(f"{bare} sample(s) could not be joined to a cover licence. "
+                  f"They are derivatives of licensed photographs, so they were "
+                  f"left out rather than shipped without attribution.",
+                  file=sys.stderr)
+        print("None of those were packed. The tier is incomplete; see the "
+              "index for the list.", file=sys.stderr)
         return 2
     return 0
 
