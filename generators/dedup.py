@@ -350,7 +350,17 @@ class DedupStore:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute(f"PRAGMA busy_timeout={int(lock_timeout * 1000)}")
-        self._migrate()
+        try:
+            self._migrate()
+        except BaseException:
+            # A constructor that opens a handle and then raises hands the
+            # caller nothing to close it with, so the connection leaks on every
+            # rejected store. `_migrate` is where an incompatible database is
+            # refused, which is exactly the path a caller retries. On Linux a
+            # leaked handle is invisible; on Windows the file stays locked and
+            # cannot be deleted or replaced, which is how this was found.
+            self.close()
+            raise
 
     def _migrate(self) -> None:
         self.db.executescript("""

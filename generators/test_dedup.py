@@ -508,3 +508,32 @@ class CommandLineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ConstructorFailureTests(unittest.TestCase):
+    """A store that refuses to open must not leave the database open.
+
+    Windows will not delete a file that is still open, so a leaked connection
+    there stops the caller replacing or removing the store. On Linux the leak
+    is invisible, which is why this needs a test rather than a runner.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = pathlib.Path(self.tmp.name) / "store.sqlite3"
+
+    def test_an_incompatible_layout_closes_what_it_opened(self):
+        DedupStore(self.db).close()
+        db = sqlite3.connect(self.db)
+        db.execute("UPDATE meta SET value = '4' WHERE key = 'band_count'")
+        db.commit()
+        db.close()
+
+        with self.assertRaises(DedupError):
+            DedupStore(self.db)
+
+        # The proof is that the file can now be removed, which is the operation
+        # Windows refuses while a handle is open.
+        self.db.unlink()
+        self.assertFalse(self.db.exists())
