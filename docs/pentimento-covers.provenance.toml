@@ -1,0 +1,103 @@
+# Provenance for the Pentimento cover corpus.
+#
+# The fleet rule (operator, 2026-07-25): bulk data skipped from a backup must
+# carry a record of how to get it again, because an exclusion with no recovery
+# note is a bet nobody wrote down.
+#
+# This one carries more than the rule asks for, because the corpus is intended
+# for publication and the licence position is the thing that decides whether
+# that is lawful. ALASKA2 and BOSSbase are both use-only for exactly this
+# reason (DEFERRED.md D14 and D15), and the whole point of building our own was
+# to have one that is not.
+#
+# The canonical copy lives beside the data at
+# `~/pentimento/covers/commons.provenance.toml` on the build machine. This copy
+# is in the repository so the record survives the disk.
+
+[source]
+url = "https://commons.wikimedia.org/w/api.php"
+what = "10,000 photographic cover images from Wikimedia Commons, centre-cropped to 512x512 greyscale PNG. The clean half of the Pentimento steganalysis corpus."
+reobtain = "python generators/fetch_commons.py --out <dir> --count 10000 --size 512 --licences permissive --split-salt pentimento-v1"
+verified = "2026-09-19"
+size = "3.2G"
+note = """
+The API endpoint is public and needs no key. Re-running the fetcher does NOT
+reproduce this corpus byte for byte: it samples Commons, and Commons changes.
+The manifest is what makes a specific corpus recoverable, because every record
+carries the Commons pageid, the original source URL and Commons' own sha1 of
+the original file. Re-fetch from the manifest, not from the sampler, if the
+identical corpus is wanted.
+"""
+
+[selection]
+requested = 10000
+kept = 10000
+rejected = 14339
+note = """
+14,339 candidates were fetched and discarded against the quality and diversity
+rules in `generators/cover_quality.py`, so the acceptance rate is about 41%.
+Rejections are recorded in `rejected.jsonl` beside the manifest rather than
+dropped, because a corpus that cannot say what it excluded cannot be argued
+with.
+
+Diversity caps applied at fetch time: at most 40 files per uploader, at most 40
+per camera model, and no more than half the corpus at any one ISO. EXIF was
+required, which excludes scans and most synthetic images.
+"""
+
+[licence]
+verified = "2026-09-19"
+share_alike_files = 0
+note = """
+**No file in this corpus carries a share-alike term**, verified by reading
+every record in the manifest rather than by assuming it. That is the fact the
+publication decision rests on: a CC BY-SA cover would oblige every derived
+stego image to be CC BY-SA too, which would bind the whole published corpus.
+None is present, so the derived work carries no inherited copyleft.
+
+Commons cannot host a file at all unless republication, derivative works and
+commercial use are permitted, so the two terms that close almost every academic
+steganalysis corpus to republication, non-commercial and no-derivatives, cannot
+appear here by construction.
+
+Attribution is still owed on the CC BY files (5,429 of 10,000; the other
+4,571 are CC0 or public domain and owe none). The manifest
+carries `artist`, `credit`, `licence`, `usage_terms` and `descriptionurl` per
+file, which is what an attribution page has to be generated from before
+anything is published.
+"""
+
+[licence.breakdown]
+"CC0" = 2597
+"CC BY 2.0" = 2596
+"Public domain" = 1974
+"CC BY 4.0" = 1808
+"CC BY 3.0" = 838
+"CC BY 2.5" = 185
+"CC BY 1.0" = 2
+
+[limitations]
+note = """
+**These covers are decompressed JPEGs, not never-compressed sensor output.**
+Commons stores photographs as JPEG, so every cover has been through a lossy
+codec before we ever saw it. BOSSbase was built from raw camera files and never
+compressed, which is why its covers behave differently under detectors that
+model compression artefacts.
+
+So this corpus is NOT a drop-in BOSSbase substitute and must not be presented
+as one. There is no lawful source for a never-compressed arm at this scale:
+raw photograph collections of the required size are either licensed
+non-commercially or not licensed at all.
+
+Stated here rather than in a footnote because a reader comparing a number from
+this corpus against a published BOSSbase number will otherwise draw a
+conclusion the data does not support.
+"""
+
+[integrity]
+note = """
+Every manifest record carries `commons_sha1`, Commons' own hash of the original
+file, and a sha256 of the crop this project produced. The first lets a third
+party confirm we started from the file we say we did; the second lets them
+confirm they hold the same crop. Neither is a substitute for the other.
+"""
