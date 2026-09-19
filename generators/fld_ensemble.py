@@ -5,16 +5,16 @@
 
 WHY THIS EXISTS RATHER THAN A CALL INTO ALETHEIA
 ------------------------------------------------
-Aletheia can do this, through its `e4s` command, and we are not using it. Its
+Aletheia can do this, through its `e4s` command, and this does not use it. Its
 implementation shells out to Octave, downloads the Octave code from a remote
 host at first run, and prints a licence it expects a human to accept at a
-prompt. Our detector containers run with no network and no terminal, and a
-benchmark that needs an interactive download is not reproducible by the people
-we are handing it to.
+prompt. The detector containers here run with no network and no terminal, and
+a benchmark that needs an interactive download is not reproducible by the
+person receiving it.
 
 So the features come from Aletheia, which is the part that matters and the part
 that is hard, and the classifier is here. That split is honest: SRM is a
-published feature set with a reference implementation we are using unmodified,
+published feature set with a reference implementation used here unmodified,
 and the FLD ensemble is a published algorithm short enough to write down.
 
 WHAT IT IS, IN PLAIN TERMS
@@ -55,7 +55,7 @@ size be tuned without spending the test data to do it.
 A fixed subspace size would be a guess, and the right value moves with the
 payload and the feature set. Guessing it and then reporting the test number is
 how a baseline ends up weaker than it should be, which in this evaluation would
-understate the thing we are trying to measure.
+understate the very thing being measured.
 """
 from __future__ import annotations
 
