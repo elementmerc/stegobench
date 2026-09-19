@@ -37,6 +37,33 @@ reference implementations, compare their own estimate to a threshold and print a
 sentence. The estimate is what a comparison needs, so where a tool computes one
 and discards it, the harness calls the same function and keeps the number.
 
+## Installing
+
+Python 3.14 and, for the Rust crates, the toolchain pinned in
+`rust-toolchain.toml`. Everything below runs from a clean checkout.
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+That is enough to build a corpus, embed every arm and score it.
+`requirements-optional.txt` holds four things that are each needed for exactly
+one purpose and are each large or awkward to install: Aletheia for the
+reference detector and the SRM features, matplotlib for charts, `lir` for the
+cross check against an independent likelihood ratio implementation, and the
+Hansken SDK for the extraction plugin. Nothing in the core needs them, and the
+tests that do will skip rather than fail when they are absent.
+
+Versions are pinned to the ones that produced the published numbers. A
+benchmark whose dependency set floats is a benchmark whose numbers move without
+anybody touching it.
+
+```sh
+.venv/bin/python -m pytest                 # python
+cargo test --workspace                     # rust
+```
+
 ## Reproducing a result
 
 ```sh
@@ -67,8 +94,16 @@ corpus cannot be redistributed, which is the reason this one exists.
 
 ## Status
 
-Working, and not yet released. The corpus and the harness are built and
-measured; the first public release is pending.
+The harness is working and in use. The first corpus tier is complete: 29 arms,
+344,348 pairs, built in a single 22 hour run with every arm resumable and every
+file checksummed.
+
+What that does and does not mean is worth being exact about. The generators,
+the pairing discipline and the scoring are exercised on real corpora and the
+numbers in the results directory came out of them. The packaging and
+publication path for the corpus itself is built but has not yet carried a
+public release, so treat `pack_tier.py` and `publish_tier.py` as the least
+travelled code here.
 
 ## Licence
 

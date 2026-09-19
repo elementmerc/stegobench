@@ -1,0 +1,25 @@
+# Pinned to the versions that produced the published results, not to the
+# newest that happens to resolve. A benchmark whose dependency set floats is
+# a benchmark whose numbers move without anybody touching it.
+#
+# Python 3.14.4 is what these were built and run against.
+#
+# Install:  python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# Corpus construction and scoring.
+numpy==2.5.3
+scipy==1.18.1
+pillow==12.3.0
+
+# Adaptive embedding. `conseal` supplies HUGO, WOW, S-UNIWARD, HILL, MiPOD,
+# J-UNIWARD and UERD; `jpeglib` gives it access to quantised DCT coefficients
+# without going through a decode and re-encode, which would destroy the thing
+# being measured.
+conseal==2025.11
+jpeglib==1.0.2
+
+# Cover ingestion.
+opencv-python==5.0.0.93
+
+# Tests.
+pytest==9.1.1

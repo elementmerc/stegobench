@@ -1,0 +1,27 @@
+# Optional, and deliberately not in `requirements.txt`. Each one is needed for
+# exactly one thing, each is large or awkward, and the core of this repository
+# runs without any of them.
+#
+# Install:  .venv/bin/pip install -r requirements-optional.txt
+
+# Reference detector and the SRM feature extractor, used by the comparison
+# panel and by `generators/rich_model_baseline.py`. Not on PyPI under this
+# name; install from source:
+#   git clone https://github.com/daniellerch/aletheia
+# See docs/ for the version this was run against.
+
+# Charts. Only `generators/*_figure*.py` and the plotting in
+# `integrations/lir/make_figure.py` need it.
+matplotlib==3.11.0
+
+# The forensic likelihood ratio library, used ONLY by
+# `integrations/lir/test_against_lir.py` to check our metric against an
+# independent implementation. It pulls pymc, pytensor, numba, llvmlite, optuna
+# and scikit-learn, roughly 2 GB, to compute a handful of scalars. That is why
+# nothing in `integrations/lir/` imports it outside the tests, and why those
+# tests skip when it is absent.
+lir==1.8.0
+
+# The Hansken extraction plugin SDK, used only by `integrations/hansken/`.
+hansken-extraction-plugin==0.10.0
+logbook==1.8.2
