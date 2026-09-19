@@ -55,17 +55,31 @@ def load(path: pathlib.Path) -> dict:
     return json.loads(path.read_text())
 
 
+def split_arms(arms: dict | None) -> tuple[int, int, int, int]:
+    """Stego arms and clean arms counted separately.
+
+    The clean arms are the other half of the pairs, not more pairs. Counting
+    them as stego samples overstated the corpus by the size of its own control
+    group, in three files that each did the arithmetic for themselves.
+    """
+    stego_total = stego_count = clean_total = clean_count = 0
+    for a in (arms or {}).get("arms", []):
+        if a["arm"].startswith("clean"):
+            clean_count += 1
+            clean_total += a["samples"]
+        else:
+            stego_count += 1
+            stego_total += a["samples"]
+    return stego_total, stego_count, clean_total, clean_count
+
+
 def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -> str:
     total_covers = cover_index.get("samples", licences.get("total", 0))
     cover_shards = len(cover_index.get("shards", []))
-    arm_lines, arm_total, arm_count = "", 0, 0
-    if arms:
-        arm_count = len(arms.get("arms", []))
-        arm_total = arms.get("total_samples", 0)
-        rows = []
-        for a in sorted(arms.get("arms", []), key=lambda x: x["arm"]):
-            rows.append(f"| `{a['arm']}` | {a['samples']:,} | {len(a['shards'])} |")
-        arm_lines = "\n".join(rows)
+    stego_total, stego_count, clean_total, clean_count = split_arms(arms)
+    arm_lines = "\n".join(
+        f"| `{a['arm']}` | {a['samples']:,} | {len(a['shards'])} |"
+        for a in sorted((arms or {}).get("arms", []), key=lambda x: x["arm"]))
 
     attribution = licences.get("attribution_required", 0)
     pct = licences.get("attribution_required_pct", 0)
@@ -80,9 +94,10 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
 **{NOT_COMPARABLE}**
 
 A steganalysis corpus of {total_covers:,} permissively licensed cover
-photographs and {arm_total:,} matched stego pairs across {arm_count} arms,
+photographs and {stego_total:,} matched stego pairs across {stego_count} arms,
 where every image carries its own licence and every file carries its own
-checksum.
+checksum. A further {clean_count} arms hold the {clean_total:,} clean halves
+those pairs are measured against.
 
 ## What makes it different
 
@@ -204,8 +219,10 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
             "@type": "cr:FileSet",
             "@id": "arms",
             "name": "arms",
-            "description": (f"{arms.get('total_samples', 0)} stego images across "
-                            f"{len(arms.get('arms', []))} labelled arms."),
+            "description": (f"{split_arms(arms)[0]} stego images across "
+                            f"{split_arms(arms)[1]} labelled arms, plus "
+                            f"{split_arms(arms)[2]} clean halves in "
+                            f"{split_arms(arms)[3]} more."),
             "encodingFormat": "application/x-tar",
             "includes": "pentimento-core-*-*.tar",
         })
@@ -255,8 +272,9 @@ released because the corpus outlives the evaluation.
 photographs carrying a hidden payload. A pair is one photograph twice, differing
 only in the embedded bits.
 
-**How many?** {n:,} covers and {arms.get('total_samples', 0) if arms else 0:,}
-stego images across {len(arms.get('arms', [])) if arms else 0} arms.
+**How many?** {n:,} covers and {split_arms(arms)[0]:,}
+stego images across {split_arms(arms)[1]} arms, plus {split_arms(arms)[2]:,}
+clean halves in {split_arms(arms)[3]} more.
 
 **Is any information missing?** Some covers carry no recorded author. Those
 cases say so in the `attribution` field rather than omitting it.
