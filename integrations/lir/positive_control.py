@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import pathlib
 import sys
 import time
@@ -38,8 +39,11 @@ import numpy as np
 from analyse_panel import roc_auc
 from likelihood_ratio import cllr_null, observed_decomposition
 
+#: The scored spatial corpus. Licence restricted and not shipped, so this is a
+#: pointer rather than a path that will exist in a fresh checkout. Override it
+#: with STEGOBENCH_CONTROL_SCORES or pass the path as an argument.
 DEFAULT_SCORES = pathlib.Path(
-    "/home/mercury/the-factory/Stegcore/private/calibration/scores-2026-05-22.jsonl"
+    os.environ.get("STEGOBENCH_CONTROL_SCORES", "calibration/scores-2026-05-22.jsonl")
 )
 DETECTORS = ("spa", "rs", "ws")
 

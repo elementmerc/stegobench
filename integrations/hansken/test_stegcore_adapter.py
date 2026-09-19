@@ -10,6 +10,7 @@ hopes it prints, and it means these tests run with no binary present.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 import pytest
@@ -143,10 +144,12 @@ class TestMalformedOutputIsNeverReadAsClean:
             parse(json.dumps(doc).encode())
 
 
-#: The record these constants are transcribed from. Outside the repo, so a
-#: checkout without it skips rather than fails.
+#: The record these constants are transcribed from. It lives outside this
+#: repository, so a checkout without it skips rather than fails. Point
+#: STEGCORE_CALIBRATION at your own copy to run this check; hard coding one
+#: person's home directory made it unrunnable for everybody else.
 CALIBRATION_SOURCE = pathlib.Path(
-    "/home/mercury/the-factory/Stegcore/private/calibration/recal-final.json"
+    os.environ.get("STEGCORE_CALIBRATION", "calibration/recal-final.json")
 )
 
 
