@@ -1,50 +1,51 @@
 {
-  "arm": {
-    "domain": "jpeg",
-    "embedder": "outguess",
-    "format": "jpeg",
-    "rate": {
-      "unit": "capacity_fraction",
-      "value": 0.5
-    }
-  },
-  "corpus": {
-    "digest": "sha256:481a17f2592dd6042b9298f436150ae08d0d0c70d0ccffebe647f075166d77b6",
-    "name": "round3-q95",
-    "pairs": 160
-  },
-  "declarations": {
-    "pairing": "single-variable",
-    "self_reported": false,
-    "split_discipline": "not-applicable"
-  },
-  "metrics": {
-    "auc": 0.4932,
-    "n_clean": 160,
-    "n_error": 0,
-    "n_stego": 160,
-    "tpr_at_fpr": {
-      "0.01": 0.0,
-      "0.1": 0.075
-    }
-  },
-  "provenance": {
-    "elapsed_seconds": 0.0,
-    "harness_version": "0.1.0",
-    "network_reachable": false,
-    "plugins": [
-      {
-        "determinism": "exact",
-        "image": "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5",
-        "name": "stegexpose"
-      }
-    ],
-    "started_utc": "2026-09-18T20:13:57Z"
-  },
-  "schema": "stegobench/result-v1",
-  "subject": {
-    "kind": "detector",
-    "name": "stegexpose",
-    "version": "sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5"
+ "arm": {
+  "domain": "jpeg",
+  "embedder": "outguess",
+  "format": "jpeg",
+  "rate": {
+   "unit": "capacity_fraction",
+   "value": 0.5
   }
+ },
+ "corpus": {
+  "digest": "sha256:481a17f2592dd6042b9298f436150ae08d0d0c70d0ccffebe647f075166d77b6",
+  "name": "round3-q95",
+  "pairs": 160
+ },
+ "declarations": {
+  "confound": "outguess rewrites the whole JPEG with its own encoder, so the stego half differs from the clean half in the writer as well as in the payload. Building at -p 95 matched the quality but not the encoder. A control arm carrying 0.03% of capacity through the same writer reproduces the effect at full size, and a re-encode by the original encoder carrying nothing reproduces none of it, so any separation measured on these arms is the writer rather than the hiding. Rebuild the control with generators/recompression_control.py.",
+  "pairing": "confounded",
+  "self_reported": false,
+  "split_discipline": "not-applicable"
+ },
+ "metrics": {
+  "auc": 0.4932,
+  "n_clean": 160,
+  "n_error": 0,
+  "n_stego": 160,
+  "tpr_at_fpr": {
+   "0.01": 0.0,
+   "0.1": 0.075
+  }
+ },
+ "provenance": {
+  "elapsed_seconds": 0.0,
+  "harness_version": "0.1.0",
+  "network_reachable": false,
+  "plugins": [
+   {
+    "determinism": "exact",
+    "image": "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5",
+    "name": "stegexpose"
+   }
+  ],
+  "started_utc": "2026-09-18T20:13:57Z"
+ },
+ "schema": "stegobench/result-v1",
+ "subject": {
+  "kind": "detector",
+  "name": "stegexpose",
+  "version": "sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5"
+ }
 }

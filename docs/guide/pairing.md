@@ -26,6 +26,31 @@ looked like a strong result and was measuring the quantisation table.
 
 The arms that had the defect are kept rather than deleted, as the demonstration.
 
+## Matching the quality is not enough
+
+The round 3 arms were rebuilt with outguess writing at quality 95 to match the
+cover, which fixed the quality difference. It did not fix the pairing, because
+outguess rewrites the whole JPEG with its own encoder and the clean half was
+written by Pillow. Two libraries, two sets of rounding decisions, one
+difference the detector can see.
+
+The tell was in the numbers before any control was run. Three arms spanning a
+tenfold payload range produced the same separation to three decimal places. A
+payload effect grows with payload; a flat line across ten times the payload is
+something present in equal measure in all three.
+
+`generators/recompression_control.py` settles it with two arms that carry no
+meaningful payload at all:
+
+| Arm | What it is | What a result on it would mean |
+|---|---|---|
+| `nullog` | The cover through outguess's own writer carrying **one byte**, which is 0.03% of capacity and the smallest outguess accepts. An empty payload is refused outright | The effect is the writer, not the hiding |
+| `nullpillow` | The cover decoded and re-encoded by the encoder that first wrote it, carrying nothing | The detector responds to a second compression generation in general |
+
+Run it before trusting any number measured on an arm whose tool re-encodes.
+Which of the two arms moves tells you which confound you have, and an arm that
+moves at 0.03% payload as much as it moves at 50% is not measuring a payload.
+
 ## What the harness does about it
 
 **Both halves come off the same writer.** For the JPEG adaptive arms the clean
