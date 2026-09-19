@@ -187,6 +187,48 @@ class SharedBudget:
             time.sleep(delay)
 
 
+class PartReader:
+    """A window of a file, throttled, for a multipart upload.
+
+    One part is a byte range rather than a whole file, and it has to report its
+    own length, so this is a reader over `[offset, offset + size)` rather than
+    a second use of the whole-file one.
+    """
+
+    def __init__(self, path: pathlib.Path, offset: int, size: int,
+                 budget: SharedBudget):
+        self._handle = path.open("rb")
+        self._handle.seek(offset)
+        self._budget = budget
+        self._left = size
+        self.length = size
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._handle.close()
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        if self._left <= 0:
+            return b""
+        want = CHUNK if size is None or size < 0 else min(size, CHUNK)
+        chunk = self._handle.read(min(want, self._left))
+        if not chunk:
+            return b""
+        self._budget.reserve(len(chunk))
+        self._left -= len(chunk)
+        return chunk
+
+    def __iter__(self):
+        while True:
+            chunk = self.read(CHUNK)
+            if not chunk:
+                return
+            yield chunk
+
+
 class ThrottledReader:
     """A file-like object that will not be read faster than the budget allows.
 
@@ -311,6 +353,34 @@ def credentials_for(destination: str) -> dict[str, str]:
     return {k: os.environ[k] for k in needed}
 
 
+def _ia_headers(packed: pathlib.Path) -> dict[str, str]:
+    """Item metadata as the Archive's S3 endpoint wants it.
+
+    The endpoint creates the item on the first PUT and only then, so the
+    metadata has to ride along with it. Sending nothing gives a 404: there is
+    no bucket, and nothing asked for one to be made.
+    """
+    source = packed / "ia-metadata.json"
+    if not source.is_file():
+        raise UploadError(
+            f"no ia-metadata.json in {packed}. It is derived from the manifest "
+            f"by publish_tier.py prepare, and without it the item would be "
+            f"created with no title, no licence and no description.")
+    meta = json.loads(source.read_text(encoding="utf-8"))
+    headers = {"x-amz-auto-make-bucket": "1"}
+    for key, value in meta.items():
+        if key == "identifier":
+            continue
+        if isinstance(value, (list, tuple)):
+            # Repeated fields are numbered from 00, which is how the Archive
+            # takes more than one subject.
+            for index, item in enumerate(value):
+                headers[f"x-archive-meta{index:02d}-{key}"] = str(item)
+        else:
+            headers[f"x-archive-meta-{key}"] = str(value)
+    return headers
+
+
 def put_internetarchive(packed: pathlib.Path, name: str, item: str,
                         creds: dict[str, str], budget: SharedBudget, log) -> None:
     """One file into an Archive item, over its S3 compatible endpoint.
@@ -333,82 +403,192 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
         request.add_header("authorization",
                            f"LOW {creds['IA_ACCESS_KEY']}:{creds['IA_SECRET_KEY']}")
         request.add_header("content-length", str(body.length))
+        # Derivation turns one upload into a queue of server-side jobs. For a
+        # corpus of tar shards there is nothing useful to derive and the queue
+        # would run for days.
         request.add_header("x-archive-queue-derive", "0")
+        for key, value in _ia_headers(packed).items():
+            request.add_header(key, value)
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with urllib.request.urlopen(request, timeout=7200) as response:
                 if response.status not in (200, 201):
                     raise UploadError(f"{name}: archive returned {response.status}")
         except urllib.error.HTTPError as e:
-            raise UploadError(f"{name}: archive returned {e.code} {e.reason}") from e
+            detail = e.read()[:300].decode("utf-8", "replace").strip()
+            raise UploadError(f"{name}: archive returned {e.code} {e.reason}. "
+                              f"{detail}") from e
         except urllib.error.URLError as e:
-            raise UploadError(f"{name}: could not reach the archive: {e.reason}") from e
+            raise UploadError(f"{name}: could not reach the archive, {e.reason}") from e
+
+
+def _hf_api(url: str, token: str, body: bytes | None = None,
+            method: str = "GET", content_type: str | None = None,
+            accept: str | None = None, what: str = "hugging face") -> dict:
+    request = urllib.request.Request(url, data=body, method=method)
+    request.add_header("authorization", f"Bearer {token}")
+    if content_type:
+        request.add_header("content-type", content_type)
+    if accept:
+        request.add_header("accept", accept)
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            raw = response.read()
+        return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:300].decode("utf-8", "replace").strip()
+        raise UploadError(f"{what}: {e.code} {e.reason}. {detail}") from e
+    except urllib.error.URLError as e:
+        raise UploadError(f"{what}: could not reach it, {e.reason}") from e
+
+
+def _hf_commit(repo: str, token: str, lines: list[dict], summary: str) -> None:
+    """One commit on main. The API takes newline-delimited JSON, not a list."""
+    payload = [{"key": "header", "value": {"summary": summary, "description": ""}}]
+    payload += lines
+    body = ("\n".join(json.dumps(line) for line in payload) + "\n").encode()
+    _hf_api(f"https://huggingface.co/api/datasets/{repo}/commit/main", token,
+            body=body, method="POST", content_type="application/x-ndjson",
+            what="hugging face commit")
+
+
+def _hf_put_part(url: str, path: pathlib.Path, offset: int, size: int,
+                 budget: SharedBudget) -> str:
+    """One multipart part, throttled. Returns the ETag the completion needs."""
+    with PartReader(path, offset, size, budget) as body:
+        request = urllib.request.Request(url, data=body, method="PUT")
+        request.add_header("content-length", str(size))
+        try:
+            with urllib.request.urlopen(request, timeout=3600) as response:
+                etag = response.headers.get("ETag") or response.headers.get("etag")
+        except urllib.error.HTTPError as e:
+            raise UploadError(f"part upload refused: {e.code} {e.reason}") from e
+        except urllib.error.URLError as e:
+            raise UploadError(f"part upload could not be sent: {e.reason}") from e
+    if not etag:
+        raise UploadError("a part uploaded without returning an ETag, which the "
+                          "completion call needs to assemble the file")
+    return etag
 
 
 def put_huggingface(packed: pathlib.Path, name: str, repo: str,
                     creds: dict[str, str], budget: SharedBudget, log) -> None:
     """One file into a HuggingFace dataset repository.
 
-    Deliberately no SDK. `huggingface_hub` pulls in a large dependency tree and
-    does its own retrying and its own progress bars, neither of which can see
-    the shared budget. The upload API is a PUT of the whole file to a
-    pre-authorised URL, which the reader can stream into.
+    Deliberately no SDK: `huggingface_hub` does its own chunking and its own
+    retrying, neither of which can see the shared bandwidth budget, and a
+    release path with fewer moving parts is one that still works in a year.
+
+    HuggingFace decides per file how it wants the bytes. Small ones are
+    committed inline; anything large goes through git LFS, and for a file of
+    any size worth calling large that means a multipart upload whose parts are
+    signed separately. Both paths end in a commit, and the commit is what makes
+    the file exist.
     """
+    token = creds["HF_TOKEN"]
     path = packed / name
     size = path.stat().st_size
 
-    # Step one: ask where to put it. Large files go to a storage backend
-    # rather than straight into git, and the API decides which.
-    preupload = urllib.request.Request(
-        f"https://huggingface.co/api/datasets/{repo}/preupload/main",
-        data=json.dumps({"files": [{"path": name, "size": size,
-                                    "sample": ""}]}).encode(),
-        method="POST")
-    preupload.add_header("authorization", f"Bearer {creds['HF_TOKEN']}")
-    preupload.add_header("content-type", "application/json")
-    try:
-        with urllib.request.urlopen(preupload, timeout=120) as response:
-            plan = json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        raise UploadError(
-            f"{name}: hugging face refused the upload plan, {e.code} {e.reason}. "
-            f"Check the repository {repo} exists and the token can write to it."
-        ) from e
-    except urllib.error.URLError as e:
-        raise UploadError(f"{name}: could not reach hugging face: {e.reason}") from e
-
+    plan = _hf_api(
+        f"https://huggingface.co/api/datasets/{repo}/preupload/main", token,
+        body=json.dumps({"files": [{"path": name, "size": size, "sample": ""}]}).encode(),
+        method="POST", content_type="application/json",
+        what=f"{name}: hugging face preupload")
     entry = (plan.get("files") or [{}])[0]
-    if entry.get("uploadMode") == "regular" and not entry.get("shouldIgnore"):
-        raise UploadError(
-            f"{name}: hugging face wants this file committed through git rather "
-            f"than streamed, which this uploader does not do. Files this size "
-            f"belong in LFS; check the repository's .gitattributes.")
+    mode = entry.get("uploadMode")
 
-    def beat(sent: int, total: int, _last=[0.0]) -> None:
-        now = time.monotonic()
-        if now - _last[0] >= BEAT_SECONDS:
-            _last[0] = now
-            log(f"    {name}: {sent / 1e6:.0f} of {total / 1e6:.0f} MB")
+    if entry.get("shouldIgnore"):
+        raise UploadError(f"{name}: the repository's .gitattributes ignores this path")
 
-    upload_url = entry.get("uploadUrl")
-    if not upload_url:
-        raise UploadError(
-            f"{name}: hugging face returned no upload URL, so there is nowhere "
-            f"to send it. Response keys: {sorted(entry)}")
+    if mode == "regular":
+        # Small enough to travel inside the commit. Still reserved from the
+        # budget, so a few hundred small files cannot jump the queue.
+        budget.reserve(size)
+        import base64
+        _hf_commit(repo, token, [{"key": "file", "value": {
+            "path": name,
+            "content": base64.b64encode(path.read_bytes()).decode(),
+            "encoding": "base64"}}], f"Add {name}")
+        return
 
-    with ThrottledReader(path, budget, on_progress=beat) as body:
-        request = urllib.request.Request(upload_url, data=body, method="PUT")
-        request.add_header("content-length", str(body.length))
-        try:
-            with urllib.request.urlopen(request, timeout=3600) as response:
-                if response.status not in (200, 201):
-                    raise UploadError(f"{name}: hugging face returned "
-                                      f"{response.status}")
-        except urllib.error.HTTPError as e:
-            raise UploadError(f"{name}: hugging face returned {e.code} "
-                              f"{e.reason}") from e
-        except urllib.error.URLError as e:
-            raise UploadError(f"{name}: could not reach hugging face: "
-                              f"{e.reason}") from e
+    if mode != "lfs":
+        raise UploadError(f"{name}: hugging face asked for an upload mode this "
+                          f"uploader does not know, {mode!r}")
+
+    oid = digest_of(path)
+    batch = _hf_api(
+        f"https://huggingface.co/datasets/{repo}.git/info/lfs/objects/batch", token,
+        body=json.dumps({"operation": "upload",
+                         "transfers": ["basic", "multipart"],
+                         "hashAlgo": "sha_256",
+                         "objects": [{"oid": oid, "size": size}]}).encode(),
+        method="POST", content_type="application/vnd.git-lfs+json",
+        accept="application/vnd.git-lfs+json",
+        what=f"{name}: hugging face LFS batch")
+
+    obj = (batch.get("objects") or [{}])[0]
+    if obj.get("error"):
+        raise UploadError(f"{name}: hugging face refused the object, {obj['error']}")
+    actions = obj.get("actions") or {}
+    upload = actions.get("upload")
+
+    if upload is None:
+        # No upload action means the server already holds these bytes. Only the
+        # pointer is missing, so commit it and stop.
+        log(f"    {name}: already stored, committing the pointer")
+    else:
+        header = dict(upload.get("header") or {})
+        chunk_size = header.pop("chunk_size", None)
+        parts = sorted((k for k in header if k.isdigit()), key=int)
+
+        if parts and chunk_size:
+            chunk_size = int(chunk_size)
+            log(f"    {name}: {len(parts)} part(s) of {chunk_size / 1e6:.0f} MB")
+            etags = []
+            for index, key in enumerate(parts):
+                offset = index * chunk_size
+                this = min(chunk_size, size - offset)
+                etags.append({"partNumber": int(key),
+                              "etag": _hf_put_part(header[key], path, offset,
+                                                   this, budget)})
+                log(f"    {name}: part {index + 1} of {len(parts)} done")
+            _hf_api(upload["href"], token,
+                    body=json.dumps({"oid": oid, "parts": etags}).encode(),
+                    method="POST", content_type="application/json",
+                    what=f"{name}: hugging face multipart completion")
+        else:
+            def beat(sent: int, total: int, _last=[0.0]) -> None:
+                now = time.monotonic()
+                if now - _last[0] >= BEAT_SECONDS:
+                    _last[0] = now
+                    log(f"    {name}: {sent / 1e6:.0f} of {total / 1e6:.0f} MB")
+
+            with ThrottledReader(path, budget, on_progress=beat) as body:
+                request = urllib.request.Request(upload["href"], data=body, method="PUT")
+                request.add_header("content-length", str(body.length))
+                for key, value in header.items():
+                    request.add_header(key, value)
+                try:
+                    with urllib.request.urlopen(request, timeout=7200) as response:
+                        if response.status not in (200, 201, 204):
+                            raise UploadError(f"{name}: hugging face returned "
+                                              f"{response.status}")
+                except urllib.error.HTTPError as e:
+                    raise UploadError(f"{name}: hugging face returned {e.code} "
+                                      f"{e.reason}") from e
+                except urllib.error.URLError as e:
+                    raise UploadError(f"{name}: could not reach hugging face, "
+                                      f"{e.reason}") from e
+
+        verify = actions.get("verify")
+        if verify:
+            _hf_api(verify["href"], token,
+                    body=json.dumps({"oid": oid, "size": size}).encode(),
+                    method="POST", content_type="application/vnd.git-lfs+json",
+                    what=f"{name}: hugging face verify")
+
+    _hf_commit(repo, token, [{"key": "lfsFile", "value": {
+        "path": name, "algo": "sha256", "oid": oid, "size": size}}],
+        f"Add {name}")
 
 
 def unsupported(destination: str, reason: str):

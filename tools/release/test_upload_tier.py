@@ -13,6 +13,7 @@ themselves to 2 MB/s while the line carries six.
 """
 from __future__ import annotations
 
+import json
 import multiprocessing
 import pathlib
 import sys
@@ -31,13 +32,19 @@ from upload_tier import SharedBudget, UploadError  # noqa: E402
 POSIX = upload_tier.fcntl is not None
 
 
-def drain(budget_path: str, rate: int, chunks: int, size: int) -> float:
-    """Reserve `chunks` of `size` bytes and report how long it took."""
+def drain(budget_path: str, rate: int, chunks: int, size: int) -> tuple[float, float]:
+    """Reserve `chunks` of `size` bytes and report when it started and finished.
+
+    Wall clock, and both ends of it, so the caller can measure the window the
+    reservations actually occupied rather than that window plus however long
+    the process took to start. On a busy machine the second number is the
+    larger one and has nothing to do with the budget.
+    """
     budget = SharedBudget(pathlib.Path(budget_path), rate)
-    started = time.monotonic()
+    started = time.time()
     for _ in range(chunks):
         budget.reserve(size)
-    return time.monotonic() - started
+    return started, time.time()
 
 
 @unittest.skipUnless(POSIX, "the shared budget needs POSIX file locking")
@@ -67,16 +74,19 @@ class SharedBudgetTests(unittest.TestCase):
         """
         rate = 40_000
         with multiprocessing.Pool(4) as pool:
-            started = time.monotonic()
-            pool.starmap(drain, [(str(self.path), rate, 10, 1000)] * 4)
-            elapsed = time.monotonic() - started
+            spans = pool.starmap(drain, [(str(self.path), rate, 10, 1000)] * 4)
+        elapsed = max(end for _, end in spans) - min(start for start, _ in spans)
 
-        # 40 chunks of 1000 bytes in total, at 40,000 B/s, is one second.
+        # 40 chunks of 1000 bytes in total, at 40,000 B/s, is one second of
+        # line time however many processes send it.
         self.assertGreater(
             elapsed, 0.8,
             "four senders finished faster than the shared rate allows, so the "
             "budget is being taken four times over")
-        self.assertLess(elapsed, 3.0)
+        # Generous, because the four processes do not start together and a
+        # sender that arrives late still has to wait its turn. The load
+        # bearing assertion is the one above.
+        self.assertLess(elapsed, 8.0)
 
     def test_a_stale_reservation_does_not_stall_the_next_run(self):
         # A killed run can leave a reservation far in the future. Obeying it
@@ -121,6 +131,40 @@ class NoFileLockingTests(unittest.TestCase):
         started = time.monotonic()
         budget.reserve(20_000)
         self.assertGreater(time.monotonic() - started, 0.3)
+
+
+
+
+class ArchiveMetadataTests(unittest.TestCase):
+    """The Archive creates the item on the first PUT, or not at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.packed = pathlib.Path(self.tmp.name)
+
+    def test_metadata_becomes_headers_the_endpoint_understands(self):
+        (self.packed / "ia-metadata.json").write_text(json.dumps({
+            "identifier": "pentimento-core-v1",
+            "title": "Pentimento Core",
+            "licenseurl": "https://creativecommons.org/licenses/by/4.0/",
+            "subject": ["steganalysis", "dataset"],
+        }))
+        headers = upload_tier._ia_headers(self.packed)
+        # Without this the endpoint has no bucket to write into and answers 404.
+        self.assertEqual(headers["x-amz-auto-make-bucket"], "1")
+        self.assertEqual(headers["x-archive-meta-title"], "Pentimento Core")
+        # Repeated fields are numbered, which is how more than one subject gets
+        # through.
+        self.assertEqual(headers["x-archive-meta00-subject"], "steganalysis")
+        self.assertEqual(headers["x-archive-meta01-subject"], "dataset")
+        # The identifier is the item name, not a field on it.
+        self.assertNotIn("x-archive-meta-identifier", headers)
+
+    def test_a_missing_metadata_file_is_refused(self):
+        with self.assertRaises(UploadError) as cm:
+            upload_tier._ia_headers(self.packed)
+        self.assertIn("ia-metadata.json", str(cm.exception))
 
 
 if __name__ == "__main__":
