@@ -9,9 +9,9 @@
     },
     "picture" : {
       "misc" : {
-        "stegAppendedBytes" : "4096",
+        "stegAppendedBytes" : "3392",
         "stegAppendedLooksLike" : "text",
-        "stegAppendedOffset" : "34874",
+        "stegAppendedOffset" : "1033",
         "stegAssessed" : "yes",
         "stegStructural" : "appended data"
       },
