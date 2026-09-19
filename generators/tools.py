@@ -230,6 +230,7 @@ class OpenStegoEmbedder(DockerTool, Embedder):
 
     image = "stegobench/openstego:pinned"
     formats = (".png",)
+    capacity_is_computed = True
 
     @property
     def id(self) -> str:
@@ -277,6 +278,7 @@ class StegcoreEmbedder(Embedder):
     """
 
     formats = (".png", ".bmp", ".jpg", ".jpeg", ".webp")
+    capacity_is_computed = True
 
     #: Where a release build lands when Stegcore is checked out beside us. The
     #: binary is not installed system-wide on any machine in this fleet, so
@@ -422,6 +424,7 @@ class StegoLsbEmbedder(Embedder):
     """
 
     formats = (".png", ".bmp")
+    capacity_is_computed = True
 
     def __init__(self, python: str | None = None) -> None:
         self.python = python or "python3"
@@ -487,6 +490,7 @@ class SteganoEmbedder(Embedder):
     """
 
     formats = (".png",)
+    capacity_is_computed = True
 
     def __init__(self, python: str | None = None) -> None:
         self.python = python or "python3"

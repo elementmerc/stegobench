@@ -76,6 +76,12 @@ class Embedder(abc.ABC):
     #: Which cover formats this tool will accept, lowercase with the dot.
     formats: tuple[str, ...] = (".png",)
 
+    #: True when `capacity()` is arithmetic over the image alone, False when it
+    #: shells out and asks the tool. Only the first kind can be checked on a
+    #: machine that does not have the tool installed, which is every CI runner,
+    #: and the distinction was previously one hardcoded class name in one test.
+    capacity_is_computed: bool = False
+
     @property
     @abc.abstractmethod
     def id(self) -> str:

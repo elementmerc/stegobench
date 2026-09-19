@@ -19,14 +19,26 @@
 # The site is also built and link-checked by the `docs` job in ci.yml on every
 # push, so a broken link fails before it reaches this workflow.
 #
-# `workflow_dispatch` is here so a documentation correction can be published
-# without waiting for another push. GitHub only runs manual workflows from the
-# default branch.
+# WHY THIS DOES NOT RUN ON A PUSH YET
+#
+# GitHub Pages is not available for a private repository on a free plan.
+# Enabling it returns, verbatim: "Your current plan does not support GitHub
+# Pages for this repository." So while stegobench is private this workflow can
+# only fail, and a red check that everybody learns to ignore costs more than it
+# reports.
+#
+# It is therefore manual for now. Nothing else about it is provisional: the
+# site is built and link-checked by the `docs` job in ci.yml on every push, so
+# a broken link still fails immediately.
+#
+# WHEN THE REPOSITORY GOES PUBLIC, two lines:
+#   1. enable Pages with Actions as the source
+#   2. put `push: {branches: [dev]}` back under `on:` here
+# and change `dev` to `main` at the same time if a release branch exists by
+# then, for the reason above.
 name: Documentation site
 
 on:
-  push:
-    branches: [dev]
   workflow_dispatch:
 
 permissions:

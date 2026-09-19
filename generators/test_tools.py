@@ -108,12 +108,23 @@ class ContractTests(unittest.TestCase):
     def test_capacity_is_positive_and_below_the_cover(self):
         """A capacity above the file size would mean the arithmetic is wrong."""
         limit = self.png.stat().st_size * 4
+        checked = 0
         for e in build():
-            if ".png" not in e.formats or isinstance(e, tools.SteghideEmbedder):
-                continue  # steghide asks the tool rather than computing
+            # Only the embedders that derive capacity from the image can be
+            # checked here. The rest shell out and ask the tool, which on a
+            # machine without it raises rather than returning a number, and
+            # that was this test failing on all three CI runners.
+            if ".png" not in e.formats or not e.capacity_is_computed:
+                continue
             room = e.capacity(self.png)
             self.assertGreater(room, 0, e.id)
             self.assertLess(room, limit, f"{e.id} claims implausible capacity")
+            checked += 1
+        # A test that passes having checked nothing is not a test, and the
+        # filter above is exactly the kind that can quietly empty out.
+        self.assertGreaterEqual(checked, 4,
+                                "fewer embedders compute their own capacity "
+                                "than this test was written for")
 
     def test_an_empty_payload_is_refused(self):
         for e in build():
