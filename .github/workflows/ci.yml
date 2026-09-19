@@ -113,20 +113,30 @@ jobs:
         run: cargo test --workspace
 
   docs:
-    name: Documentation builds and its links resolve
+    name: ${{ matrix.name }} documentation builds
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Two sites, because there are two things with two sets of readers:
+          # a harness people run, and a corpus people download.
+          - name: Stegobench
+            path: docs
+          - name: Pentimento
+            path: pentimento/docs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v5.0.0
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: docs/package-lock.json
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
       - name: Install, from the lockfile only
-        working-directory: docs
+        working-directory: ${{ matrix.path }}
         run: npm ci
       - name: Build, which fails on a dead link
-        # `ignoreDeadLinks` is unset in the config, so a link from one page of
-        # the site to another cannot break without failing here.
-        working-directory: docs
+        # `ignoreDeadLinks` is unset in either config, so a link from one page
+        # of a site to another cannot break without failing here.
+        working-directory: ${{ matrix.path }}
         run: npm run build

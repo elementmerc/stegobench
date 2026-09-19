@@ -47,7 +47,8 @@ scores against whatever answers on it.
 
 ## Or skip the building
 
-The Core tier is already built: see [the corpus](/guide/corpus).
+A corpus built with this harness is already published, with its own
+documentation: see [Pentimento](/pentimento/).
 
 ## Before you quote a number
 

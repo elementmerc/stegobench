@@ -11,8 +11,9 @@ number a stranger can reproduce.
 
 | Problem | What Stegobench does |
 |---|---|
-| The standard research corpora cannot be redistributed, so a reader cannot obtain the data a result was measured on | Ships a corpus built from permissively licensed photographs, with each file's licence attached |
 | Pairing discipline is described in papers rather than enforced in code, so detectors learn resaves and quantisation tables instead of payloads | Enforces it in the builder, and ships the controls that prove it |
+| Detectors that print a verdict cannot be compared with detectors that print a score | Calls the function that computed the score and keeps the number |
+| The standard research corpora cannot be redistributed, so a reader cannot obtain the data a result was measured on | Builds corpora from permissively licensed photographs, with each file's licence attached |
 
 ## What is in the box
 
@@ -32,3 +33,6 @@ to be measured against.
 
 It is not a leaderboard. There is no submission process and no ranking; the
 output is a table you can rebuild.
+
+It is not the corpus. A corpus built with it is published separately, with its
+own documentation: [Pentimento](/pentimento/).

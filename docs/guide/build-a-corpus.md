@@ -58,13 +58,18 @@ than the corpus is refused rather than truncated.
 
 ## The licence travels with the pixels
 
-Every sample carries its cover's licence, artist, credit line and source URL.
-The packer refuses to ship a sample whose cover it cannot name: the sample is
-left out and the run exits non-zero.
+Every sample carries its cover's licence, artist, credit line and source URL,
+because a stego image is a derivative work and inherits its cover's terms. The
+packer refuses to ship a sample whose cover it cannot name: the sample is left
+out and the run exits non-zero.
 
 Spatial arms name their cover directly; DCT arms name it through the clean JPEG
 pool, and the packer resolves that from the manifest that recorded it. Each
 sample says which route it took in `licence_join`.
+
+A tool that rewrites the whole file gets a clean half written by that same
+tool, so the pair differs in the payload and nothing else. Each sample records
+which pairing it got.
 
 ## Determinism
 

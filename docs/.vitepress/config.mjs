@@ -1,11 +1,18 @@
 // Stegobench documentation site.
 //
+// This site is the HARNESS only. The corpus it produces, Pentimento, has readers of its own
+// (people downloading a dataset rather than running a benchmark) and its own site under
+// `pentimento/docs/`. One site serving both meant a person after the licence terms had to read
+// past an explanation of pairing discipline to reach them.
+//
 // Built under the same standing rule as the rest of the house: a project with readers who are
 // not its author ships built documentation. npm lives in this directory and nowhere else;
 // nothing here reaches the Python generators or the Rust crates.
 //
-// `ignoreDeadLinks` is deliberately NOT set, so the build fails on a broken internal link. A
-// build that warns instead of failing is a build whose output nobody reads.
+// `ignoreDeadLinks` is deliberately narrow rather than off. The one exception is `/pentimento/`,
+// which is a sibling site this build cannot see; every other link is still checked, and a build
+// that warns instead of failing is a build whose output nobody reads. The deploy workflow fetches
+// the published `/pentimento/` entry points, so the one link this cannot check is checked there.
 
 const BASE = process.env.DOCS_BASE || '/stegobench/'
 // og:image has to be absolute: a social card served from a relative path is fetched by a crawler
@@ -22,6 +29,9 @@ export default {
   base: BASE,
   cleanUrls: true,
   lastUpdated: true,
+
+  // The sibling corpus site, which this build does not produce. See above.
+  ignoreDeadLinks: [/^\/pentimento\//],
 
   // Markdown under docs/ that is not part of the site. `private/` is excluded from the
   // repository already; the pattern stays as a second guard, because this site is public and a
@@ -49,7 +59,7 @@ export default {
 
     nav: [
       { text: 'Guide', link: '/guide/what-it-is', activeMatch: '/guide/' },
-      { text: 'Corpus', link: '/guide/corpus' },
+      { text: 'Pentimento, the corpus', link: '/pentimento/' },
       {
         // NOT a version number. Baseline section 16 keeps unreleased versions out of public
         // artefacts, and naming one in the nav of a published site is a promise about something
@@ -69,7 +79,7 @@ export default {
           items: [
             { text: 'What it is', link: '/guide/what-it-is' },
             { text: 'Quickstart', link: '/guide/quickstart' },
-            { text: 'The corpus', link: '/guide/corpus' },
+            { text: 'Build a corpus', link: '/guide/build-a-corpus' },
           ],
         },
         {
@@ -82,7 +92,6 @@ export default {
         {
           text: 'Going further',
           items: [
-            { text: 'Build a corpus', link: '/guide/build-a-corpus' },
             { text: 'Limitations', link: '/guide/limits' },
           ],
         },

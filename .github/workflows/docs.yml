@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Daniel Iwugo
 #
-# Publish the documentation site to GitHub Pages.
+# Publish both documentation sites to GitHub Pages.
 #
-# WHICH BRANCH THIS PUBLISHES, AND WHY IT IS NOT SETTLED
+# TWO SITES, ONE PAGES DEPLOYMENT
 #
-# The house convention is to publish `main`, so that the links a stranger
-# follows lead to documentation for the version they can actually obtain, and
-# so that pages for unreleased work never reach a public URL (baseline section
-# 16). This repository has no `main`: `dev` is the only branch and is the
-# default.
+# Stegobench is a harness people run. Pentimento is a corpus people download.
+# They have different readers and they are documented separately, which is the
+# point of the split.
 #
-# So this publishes `dev` for now, which is the only thing it can do, and the
-# trade is real: everything documented here is documented as it stands on the
-# working branch. When a release branch exists, change the trigger to `main`
-# and nothing else about this file needs to move.
+# GitHub Pages serves one site per repository, so until Pentimento has a
+# repository of its own the two are published into one deployment: Stegobench
+# at the root and Pentimento under `/pentimento/`. That is the honest
+# arrangement rather than the ideal one, and the cost is that Pentimento's URL
+# currently sits inside Stegobench's.
 #
-# The site is also built and link-checked by the `docs` job in ci.yml on every
-# push, so a broken link fails before it reaches this workflow.
+# WHEN PENTIMENTO GETS ITS OWN REPOSITORY
+#
+# The whole `pentimento/` directory moves across unchanged, its `base` goes
+# back to `/pentimento/` for the new host, and the second half of the build
+# job below is deleted. Nothing else needs to move, which is why its docs and
+# its config live in one self-contained folder.
 #
 # WHY THIS DOES NOT RUN ON A PUSH YET
 #
@@ -27,16 +30,14 @@
 # only fail, and a red check that everybody learns to ignore costs more than it
 # reports.
 #
-# It is therefore manual for now. Nothing else about it is provisional: the
-# site is built and link-checked by the `docs` job in ci.yml on every push, so
-# a broken link still fails immediately.
+# It is therefore manual for now. Both sites are still built and link-checked
+# by the `docs` job in ci.yml on every push, so a broken link fails
+# immediately.
 #
 # WHEN THE REPOSITORY GOES PUBLIC, two lines:
 #   1. enable Pages with Actions as the source
 #   2. put `push: {branches: [dev]}` back under `on:` here
-# and change `dev` to `main` at the same time if a release branch exists by
-# then, for the reason above.
-name: Documentation site
+name: Documentation sites
 
 on:
   workflow_dispatch:
@@ -53,15 +54,14 @@ concurrency:
 
 jobs:
   build:
-    name: Build the site
+    name: Build both sites
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # `lastUpdated` in the VitePress config reads each page's git
-          # history. A shallow clone gives every file the tip commit's date, so
-          # the whole site would claim to have been updated on the day it was
-          # built.
+          # `lastUpdated` reads each page's git history. A shallow clone gives
+          # every file the tip commit's date, so the whole site would claim to
+          # have been updated on the day it was built.
           fetch-depth: 0
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v5.0.0
         with:
@@ -69,12 +69,31 @@ jobs:
           cache: npm
           cache-dependency-path: docs/package-lock.json
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
-      - name: Install, from the lockfile only
+
+      - name: Install Stegobench's site, from the lockfile only
         working-directory: docs
         run: npm ci
-      - name: Build, which fails on a dead link
+      - name: Build Stegobench's site
         working-directory: docs
         run: npm run build
+
+      - name: Install Pentimento's site, from the lockfile only
+        working-directory: pentimento/docs
+        run: npm ci
+      - name: Build Pentimento's site
+        working-directory: pentimento/docs
+        # Nested under Stegobench's base for as long as they share a
+        # repository. The site is otherwise unchanged by living here.
+        env:
+          DOCS_BASE: /stegobench/pentimento/
+        run: npm run build
+
+      - name: Put the corpus site inside the harness site
+        run: |
+          set -euo pipefail
+          mkdir -p docs/.vitepress/dist/pentimento
+          cp -r pentimento/docs/.vitepress/dist/. docs/.vitepress/dist/pentimento/
+
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
           path: docs/.vitepress/dist
@@ -83,8 +102,8 @@ jobs:
     name: Publish to Pages
     needs: build
     runs-on: ubuntu-latest
-    # Scoped to this job alone. The build job, which runs `npm ci` over the
-    # whole dependency tree, gets neither of these.
+    # Scoped to this job alone. The build job, which runs `npm ci` over two
+    # dependency trees, gets neither of these.
     permissions:
       pages: write
       id-token: write
@@ -98,15 +117,16 @@ jobs:
       # A build whose output reaches no consequence is a failure shape this
       # house has hit before: senbonzakura's docs were built and link-checked
       # on every push for the life of the project while eleven README links
-      # returned 404, because nothing ever fetched the published site. This
-      # fetches the pages a reader would actually click.
-      - name: The site's entry points resolve once published
+      # returned 404, because nothing ever fetched the published site.
+      - name: Both sites' entry points resolve once published
         run: |
           set -uo pipefail
           base="${{ steps.deployment.outputs.page_url }}"
           base="${base%/}"
           rc=0
-          for path in "" "/guide/what-it-is" "/guide/quickstart" "/pentimento"; do
+          for path in "" "/guide/what-it-is" "/guide/quickstart" \
+                      "/pentimento/" "/pentimento/guide/get-it" \
+                      "/pentimento/guide/licence"; do
             url="$base$path"
             code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 5 "$url" || echo 000)"
             if [ "$code" = "200" ]; then
