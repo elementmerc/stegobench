@@ -47,7 +47,9 @@ def write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
 
 class TestJpegCoverMap(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.tmp = pathlib.Path(self._dir.name)
 
     def test_maps_positional_name_to_the_recorded_cover(self) -> None:
         manifest = self.tmp / "manifest.jsonl"
@@ -123,7 +125,9 @@ class TestCleanArms(unittest.TestCase):
 
 class TestPackArm(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.tmp = pathlib.Path(self._dir.name)
         self.arms = self.tmp / "arms"
         self.out = self.tmp / "out"
         self.out.mkdir(parents=True)

@@ -144,10 +144,13 @@ class FingerprintTests(unittest.TestCase):
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # Registered here rather than in tearDown, because unittest runs
+        # tearDown BEFORE the cleanups, so a tearDown that removed the
+        # directory would do it while the store still held the database open.
+        # Windows refuses to delete an open file and this failed there while
+        # passing on Linux and macOS, which is what the three runners are for.
+        self.addCleanup(self.tmp.cleanup)
         self.db = pathlib.Path(self.tmp.name) / "store.sqlite3"
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def store(self, **kw) -> DedupStore:
         s = DedupStore(self.db, **kw)
