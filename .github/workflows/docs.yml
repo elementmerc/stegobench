@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# Publish the documentation site to GitHub Pages.
+#
+# WHICH BRANCH THIS PUBLISHES, AND WHY IT IS NOT SETTLED
+#
+# The house convention is to publish `main`, so that the links a stranger
+# follows lead to documentation for the version they can actually obtain, and
+# so that pages for unreleased work never reach a public URL (baseline section
+# 16). This repository has no `main`: `dev` is the only branch and is the
+# default.
+#
+# So this publishes `dev` for now, which is the only thing it can do, and the
+# trade is real: everything documented here is documented as it stands on the
+# working branch. When a release branch exists, change the trigger to `main`
+# and nothing else about this file needs to move.
+#
+# The site is also built and link-checked by the `docs` job in ci.yml on every
+# push, so a broken link fails before it reaches this workflow.
+#
+# `workflow_dispatch` is here so a documentation correction can be published
+# without waiting for another push. GitHub only runs manual workflows from the
+# default branch.
+name: Documentation site
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time, and never cancel one in flight: a cancelled deploy
+# can leave the published site mid-swap, and the queued run that follows would
+# publish the same content anyway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # `lastUpdated` in the VitePress config reads each page's git
+          # history. A shallow clone gives every file the tip commit's date, so
+          # the whole site would claim to have been updated on the day it was
+          # built.
+          fetch-depth: 0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v5.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
+      - name: Install, from the lockfile only
+        working-directory: docs
+        run: npm ci
+      - name: Build, which fails on a dead link
+        working-directory: docs
+        run: npm run build
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    name: Publish to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    # Scoped to this job alone. The build job, which runs `npm ci` over the
+    # whole dependency tree, gets neither of these.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
+
+      # A build whose output reaches no consequence is a failure shape this
+      # house has hit before: senbonzakura's docs were built and link-checked
+      # on every push for the life of the project while eleven README links
+      # returned 404, because nothing ever fetched the published site. This
+      # fetches the pages a reader would actually click.
+      - name: The site's entry points resolve once published
+        run: |
+          set -uo pipefail
+          base="${{ steps.deployment.outputs.page_url }}"
+          base="${base%/}"
+          rc=0
+          for path in "" "/guide/what-it-is" "/guide/quickstart" "/pentimento"; do
+            url="$base$path"
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 5 "$url" || echo 000)"
+            if [ "$code" = "200" ]; then
+              echo "  ok   $code  $url"
+            else
+              echo "::error::$url returned $code, so a documented entry point is dead for every reader"
+              rc=1
+            fi
+          done
+          exit "$rc"

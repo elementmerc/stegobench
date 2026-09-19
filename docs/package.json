@@ -1,0 +1,14 @@
+{
+  "name": "stegobench-docs",
+  "private": true,
+  "type": "module",
+  "description": "Documentation site for stegobench. Nothing here ships in the harness or the corpus.",
+  "scripts": {
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview ."
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

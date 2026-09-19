@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# THE REPOSITORY HAD NO CI AT ALL UNTIL THIS FILE
+#
+# Everything here was verified by running it on the build box, which is one
+# Linux machine with one Python and one set of wheels. The corpus documentation
+# says anybody can rebuild the corpus; nothing had ever checked that claim
+# anywhere but here.
+#
+# The generators are the part that has to be portable, because they are what a
+# reader runs. So they get the three operating systems, and the Rust workspace
+# gets one: the crates are a harness we run, not an artefact anybody rebuilds,
+# and a compiler that is green on Linux is not usefully rechecked twice more.
+#
+# WHY NOT A CONTAINER
+#
+# A Linux host cannot run Windows or macOS containers, so a container proves
+# only the platform we already had. Runners are the honest way and they are the
+# reason this file exists rather than a Dockerfile.
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default. No job here needs to write anything back.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generators:
+    name: Generators, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing is information about that platform, so let the
+      # others finish and report rather than losing the comparison.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install, from the pinned set only
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Unit tests
+        # The generators' tests run on the standard library's own runner,
+        # because the build box's virtual environment has no pytest and a suite
+        # that only runs on the laptop is a suite that stops running.
+        run: python -m unittest discover -s generators -p "test_*.py" -v
+
+  tiers:
+    name: Tiers on ${{ matrix.os }}, Nano built, all three selected
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install, from the pinned set only
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Select Nano, Lite and Core, then build, pack and check Nano
+        # The job name says which tier is built and which are only selected,
+        # because building Core is roughly six days of CPU and claiming it ran
+        # in CI would be exactly the sort of unbacked claim this repository
+        # exists to argue against. What the selection check proves is the
+        # prefix guarantee, which is the property that silently inflates
+        # somebody else's published accuracy when it breaks.
+        run: python tools/ci/tier_smoke.py
+
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # rustup ships on the runner and `rust-toolchain.toml` pins the version,
+      # so the toolchain is pinned without a third-party action in the way.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      # No cargo cache yet: every action here is pinned by commit hash per
+      # baseline section 5, and adding one means finding and recording the
+      # hash rather than taking a tag. The workspace is small enough that a
+      # cold build is not worth an unpinned dependency.
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Lints, warnings are errors
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+
+  docs:
+    name: Documentation builds and its links resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v5.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: Install, from the lockfile only
+        working-directory: docs
+        run: npm ci
+      - name: Build, which fails on a dead link
+        # `ignoreDeadLinks` is unset in the config, so a link from one page of
+        # the site to another cannot break without failing here.
+        working-directory: docs
+        run: npm run build
