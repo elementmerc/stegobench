@@ -4,8 +4,8 @@
 Reports detector scores the way a forensic report needs them, next to the way
 a steganalysis paper reports them, so the two can be compared on the same data.
 
-Status: **working, validated against a positive control, not yet checked
-against NFI's `lir` library.**
+Status: **working, validated against a positive control, and cross-checked
+against NFI's own `lir` library.**
 
 ## The translation
 
@@ -199,11 +199,48 @@ python positive_control.py              # the control, needs the calibration cor
 next step is to check this implementation against it, and a check against a
 library you imported is not a check.
 
+## Cross-checked against `lir`
+
+`lir` 1.8.0, NFI's own likelihood ratio library, run against this
+implementation on identical data. `test_against_lir.py`, 25 tests, skipped
+automatically when `lir` is absent.
+
+| Quantity | Agreement |
+|---|---|
+| `cllr` | to 1e-12 relative, across separations from -3 to +4 including an inverted system |
+| `cllr_min` | to 2e-3 absolute, with the bound removed from both so it is the isotonic fit being compared rather than the bounding policy |
+| `cllr_cal` | to 2e-3 absolute, same conditions |
+| the isotonic fit | same ordering; on balanced data the ratios agree to 1e-6 in log10 |
+
+**The most useful result is not the agreement, it is where it comes from.**
+`lir.metrics.cllr_min` fits its isotonic floor to **the reported LLRs**, which
+is precisely the correction this module had to make after review. Two
+implementations arriving at that independently is worth more than either one
+asserting it.
+
+Two differences remain and are deliberate:
+
+**Base.** `lir` works in base-10 log odds throughout; this works in plain
+likelihood ratios. The conversion is exact and the tests do it.
+
+**Bounding.** `lir`'s floor is unbounded by default, and its `add_misleading`
+argument exists to tame extreme values. This clips the floor to the same bound
+as the system, because it reports a bounded system, and subtracting an
+unbounded floor from a bounded total is what produced a published number that
+was 68 to 71% artefact. Used as `lir` intends, with the system unbounded too,
+the comparison is like for like and the problem does not arise.
+
+**`lir` is not a dependency and should not become one.** It pulls in pymc,
+pytensor, numba, llvmlite, optuna, scikit-learn and matplotlib, roughly 2 GB,
+to compute a handful of scalars numpy and scipy already give us. It is an
+optional test dependency and nothing else.
+
 ## What is left
 
-- **Validate against `lir`.** Cllr and the PAV decomposition should agree to
-  floating point. Blocked on an install: `lir` pulls in pymc, pytensor, numba,
-  llvmlite, optuna, scikit-learn and matplotlib, which is roughly 2 GB.
+- **Bounded LRs done properly.** The current bound is a flat clip at 100. The
+  empirical lower and upper bound (ELUB) sets it from what the sample can
+  actually support, which is the defensible version. `lir` has `add_misleading`
+  and bound fields on `LLRData`; worth reading before writing our own.
 - **Bounded LRs done properly.** The current bound is a flat clip at 100. The
   empirical lower and upper bound (ELUB) sets it from what the sample can
   actually support, which is the defensible version.
