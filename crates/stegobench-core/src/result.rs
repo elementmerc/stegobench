@@ -246,7 +246,9 @@ impl Result1 {
         for (fpr, tpr) in &self.metrics.tpr_at_fpr {
             match fpr.parse::<f64>() {
                 Ok(f) if (0.0..=1.0).contains(&f) => {}
-                _ => bad.push(format!("tpr_at_fpr key {fpr:?} is not a rate between 0 and 1")),
+                _ => bad.push(format!(
+                    "tpr_at_fpr key {fpr:?} is not a rate between 0 and 1"
+                )),
             }
             if !(0.0..=1.0).contains(tpr) {
                 bad.push(format!("tpr_at_fpr[{fpr}] = {tpr} is outside 0 to 1"));
@@ -308,7 +310,10 @@ mod tests {
             },
             arm: Arm {
                 embedder: "suniward".into(),
-                rate: Some(Rate { value: 0.4, unit: RateUnit::Bpp }),
+                rate: Some(Rate {
+                    value: 0.4,
+                    unit: RateUnit::Bpp,
+                }),
                 domain: Domain::Spatial,
                 format: "png".into(),
             },
@@ -394,16 +399,25 @@ mod tests {
         // 5% of capacity and 0.4 bits per pixel are different quantities, and
         // the unit is what stops a reader comparing them.
         let mut r = sample();
-        r.arm.rate = Some(Rate { value: 1.6, unit: RateUnit::CapacityFraction });
+        r.arm.rate = Some(Rate {
+            value: 1.6,
+            unit: RateUnit::CapacityFraction,
+        });
         assert!(r.validate().unwrap_err()[0].contains("not a sensible"));
     }
 
     #[test]
     fn the_same_number_can_be_valid_in_one_unit_and_not_the_other() {
         let mut r = sample();
-        r.arm.rate = Some(Rate { value: 4.0, unit: RateUnit::Bpp });
+        r.arm.rate = Some(Rate {
+            value: 4.0,
+            unit: RateUnit::Bpp,
+        });
         assert_eq!(r.validate(), Ok(()));
-        r.arm.rate = Some(Rate { value: 4.0, unit: RateUnit::CapacityFraction });
+        r.arm.rate = Some(Rate {
+            value: 4.0,
+            unit: RateUnit::CapacityFraction,
+        });
         assert!(r.validate().is_err());
     }
 

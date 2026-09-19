@@ -20,12 +20,12 @@
 //! forever.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use stegobench_core::registry::{Kind, Registry};
-use stegobench_plugin::{availability, selftest, Verified};
 use stegobench_core::{exit, Result1};
+use stegobench_plugin::{availability, selftest, Verified};
 
 #[derive(Parser)]
 #[command(
@@ -149,7 +149,11 @@ struct Output {
 
 impl Output {
     fn ok(json: serde_json::Value, human: impl Into<String>) -> Self {
-        Output { json, human: human.into(), code: exit::OK }
+        Output {
+            json,
+            human: human.into(),
+            code: exit::OK,
+        }
     }
 
     /// A refusal or a failure. `code` says which, and the distinction is the
@@ -180,7 +184,7 @@ fn cmd_schema(name: &str) -> Output {
     }
 }
 
-fn load_registry(dir: &PathBuf) -> Result<Registry, Output> {
+fn load_registry(dir: &Path) -> Result<Registry, Output> {
     Registry::load(dir).map_err(|e| {
         Output::err(
             exit::FAILURE,
@@ -193,7 +197,7 @@ fn load_registry(dir: &PathBuf) -> Result<Registry, Output> {
     })
 }
 
-fn cmd_list(dir: &PathBuf, kind: &str) -> Output {
+fn cmd_list(dir: &Path, kind: &str) -> Output {
     let reg = match load_registry(dir) {
         Ok(r) => r,
         Err(o) => return o,
@@ -234,7 +238,7 @@ fn cmd_list(dir: &PathBuf, kind: &str) -> Output {
     )
 }
 
-fn cmd_describe(dir: &PathBuf, name: &str) -> Output {
+fn cmd_describe(dir: &Path, name: &str) -> Output {
     let reg = match load_registry(dir) {
         Ok(r) => r,
         Err(o) => return o,
@@ -254,7 +258,7 @@ fn cmd_describe(dir: &PathBuf, name: &str) -> Output {
     }
 }
 
-fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
+fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
     let reg = match load_registry(dir) {
         Ok(r) => r,
         Err(o) => return o,
@@ -290,7 +294,10 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
         let detail = match &verdict {
             Verified::Failed(why) => format!("{}  ({why})", check.summary()),
             Verified::Answered(why) => {
-                format!("{}  ({why})", check.summary().replace("not verified", "answering "))
+                format!(
+                    "{}  ({why})",
+                    check.summary().replace("not verified", "answering ")
+                )
             }
             Verified::Skipped(why) if !no_selftest && check.presence.is_present() => {
                 format!("{}  ({why})", check.summary())
@@ -353,11 +360,14 @@ fn cmd_doctor(dir: &PathBuf, fixtures: &PathBuf, no_selftest: bool) -> Output {
     out
 }
 
-fn cmd_validate(file: &PathBuf) -> Output {
+fn cmd_validate(file: &Path) -> Output {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            return Output::err(exit::FAILURE, format!("cannot read {}: {e}", file.display()))
+            return Output::err(
+                exit::FAILURE,
+                format!("cannot read {}: {e}", file.display()),
+            )
         }
     };
     let parsed: Result1 = match serde_json::from_str(&text) {
@@ -412,9 +422,10 @@ fn run(cli: &Cli) -> Output {
         Command::List { kind } => cmd_list(&cli.registry, kind),
         Command::Describe { name } => cmd_describe(&cli.registry, name),
         Command::Plan { .. } => not_yet("plan", "V10, needs the governor"),
-        Command::Doctor { fixtures, no_selftest } => {
-            cmd_doctor(&cli.registry, fixtures, *no_selftest)
-        }
+        Command::Doctor {
+            fixtures,
+            no_selftest,
+        } => cmd_doctor(&cli.registry, fixtures, *no_selftest),
         Command::Score { .. } => not_yet("score", "needs the plugin host"),
     }
 }
@@ -476,8 +487,14 @@ mod tests {
         let out = cmd_schema("result-v1");
         assert_eq!(out.code, exit::OK);
         let text = serde_json::to_string(&out.json).unwrap();
-        assert!(text.contains("Result1"), "schema should describe the result type");
-        assert!(text.contains("n_error"), "the required honesty field must be in the schema");
+        assert!(
+            text.contains("Result1"),
+            "schema should describe the result type"
+        );
+        assert!(
+            text.contains("n_error"),
+            "the required honesty field must be in the schema"
+        );
     }
 
     #[test]

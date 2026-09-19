@@ -45,9 +45,7 @@ pub fn zsteg(stdout: &str, stderr: &str) -> Reading {
         // Grouped deliberately. Written as `a || b && c` this reads as
         // `a || (b && c)` and quietly stops testing what it looks like it
         // tests, which is the third bug this comment exists to prevent.
-        if (line.contains("text:") || line.contains("file:"))
-            && !line.contains("nothing :(")
-        {
+        if (line.contains("text:") || line.contains("file:")) && !line.contains("nothing :(") {
             return Reading::Verdict(true);
         }
     }
@@ -99,13 +97,19 @@ pub fn stegcore(stdout: &str, stderr: &str) -> Reading {
         return Reading::Failed(format!("stegcore printed no JSON: {why}"));
     };
     if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
-        let why = v.get("error").and_then(|e| e.as_str()).unwrap_or("unspecified");
+        let why = v
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("unspecified");
         return Reading::Failed(format!("stegcore reported failure: {why}"));
     }
     let first = v
         .get("data")
         .and_then(|d| d.as_array().and_then(|a| a.first()).or(Some(d)));
-    match first.and_then(|r| r.get("overall_score")).and_then(|s| s.as_f64()) {
+    match first
+        .and_then(|r| r.get("overall_score"))
+        .and_then(|s| s.as_f64())
+    {
         Some(s) => Reading::Score(s),
         None => Reading::Failed("no overall_score in stegcore output".into()),
     }
@@ -127,9 +131,27 @@ impl Reading {
     pub fn into_record(self, id: impl Into<String>) -> Record {
         let id = id.into();
         match self {
-            Reading::Score(s) => Record { id, score: Some(s), verdict: None, error: None, elapsed_ms: None },
-            Reading::Verdict(v) => Record { id, score: None, verdict: Some(v), error: None, elapsed_ms: None },
-            Reading::Failed(e) => Record { id, score: None, verdict: None, error: Some(e), elapsed_ms: None },
+            Reading::Score(s) => Record {
+                id,
+                score: Some(s),
+                verdict: None,
+                error: None,
+                elapsed_ms: None,
+            },
+            Reading::Verdict(v) => Record {
+                id,
+                score: None,
+                verdict: Some(v),
+                error: None,
+                elapsed_ms: None,
+            },
+            Reading::Failed(e) => Record {
+                id,
+                score: None,
+                verdict: None,
+                error: Some(e),
+                elapsed_ms: None,
+            },
         }
     }
 
@@ -138,7 +160,11 @@ impl Reading {
     pub fn says_stego(&self, higher_means_stego: bool, threshold: f64) -> Option<bool> {
         match self {
             Reading::Verdict(v) => Some(*v),
-            Reading::Score(s) => Some(if higher_means_stego { *s > threshold } else { *s < threshold }),
+            Reading::Score(s) => Some(if higher_means_stego {
+                *s > threshold
+            } else {
+                *s < threshold
+            }),
             Reading::Failed(_) => None,
         }
     }
@@ -150,7 +176,10 @@ mod tests {
 
     #[test]
     fn zsteg_finds_the_question_mark_marker() {
-        assert_eq!(zsteg("[?] 4096 bytes of extra data\n", ""), Reading::Verdict(true));
+        assert_eq!(
+            zsteg("[?] 4096 bytes of extra data\n", ""),
+            Reading::Verdict(true)
+        );
     }
 
     #[test]
@@ -158,21 +187,30 @@ mod tests {
         // Bug two, pinned. Reading only stdout made zsteg a detector that
         // answered "clean" to every JPEG, which looked like a real result.
         assert_eq!(
-            zsteg("", "[?] 4096 bytes of extra data after IEND\nerror: not a PNG"),
+            zsteg(
+                "",
+                "[?] 4096 bytes of extra data after IEND\nerror: not a PNG"
+            ),
             Reading::Verdict(true)
         );
     }
 
     #[test]
     fn zsteg_treats_a_text_finding_as_a_finding() {
-        assert_eq!(zsteg("b1,rgb,lsb,xy .. text: \"hello\"\n", ""), Reading::Verdict(true));
+        assert_eq!(
+            zsteg("b1,rgb,lsb,xy .. text: \"hello\"\n", ""),
+            Reading::Verdict(true)
+        );
     }
 
     #[test]
     fn zsteg_does_not_fire_on_its_own_nothing_found_line() {
         // Bug three's shape: with the condition grouped wrongly, a line
         // saying it found nothing still matched.
-        assert_eq!(zsteg("b1,rgb,lsb,xy .. text: nothing :(\n", ""), Reading::Verdict(false));
+        assert_eq!(
+            zsteg("b1,rgb,lsb,xy .. text: nothing :(\n", ""),
+            Reading::Verdict(false)
+        );
     }
 
     #[test]
@@ -186,7 +224,10 @@ mod tests {
     fn zsteg_ignores_a_plus_marker_which_is_not_what_it_prints() {
         // Bug one: the original parser looked for [+] and so matched nothing,
         // ever, and reported a 0% detection rate that read as a finding.
-        assert_eq!(zsteg("[+] something unrelated\n", ""), Reading::Verdict(false));
+        assert_eq!(
+            zsteg("[+] something unrelated\n", ""),
+            Reading::Verdict(false)
+        );
     }
 
     #[test]
@@ -200,7 +241,10 @@ mod tests {
     fn stegexpose_without_a_number_fails_rather_than_guessing_zero() {
         // A zero here would be indistinguishable from a confident "clean",
         // which is how a broken tool starts looking like a working one.
-        assert!(matches!(stegexpose("File name,Fusion (mean)\n", ""), Reading::Failed(_)));
+        assert!(matches!(
+            stegexpose("File name,Fusion (mean)\n", ""),
+            Reading::Failed(_)
+        ));
     }
 
     #[test]
@@ -218,7 +262,10 @@ mod tests {
 
     #[test]
     fn no_number_reports_why_rather_than_returning_zero() {
-        let r = number("", "aletheia is not importable in this container: no module");
+        let r = number(
+            "",
+            "aletheia is not importable in this container: no module",
+        );
         match r {
             Reading::Failed(why) => assert!(why.contains("not importable"), "got {why}"),
             other => panic!("expected Failed, got {other:?}"),

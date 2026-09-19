@@ -88,7 +88,11 @@ pub enum PluginError {
     #[error("{name} is not installed: {reason}")]
     NotInstalled { name: String, reason: String },
     #[error("{name} could not be run: {source}")]
-    Spawn { name: String, #[source] source: std::io::Error },
+    Spawn {
+        name: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{name} produced output this version cannot read: {reason}")]
     BadOutput { name: String, reason: String },
 }
@@ -234,7 +238,10 @@ mod tests {
             elapsed_ms: Some(10),
         };
         let text = serde_json::to_string(&r).unwrap();
-        assert!(!text.contains("verdict"), "absent fields should not be written");
+        assert!(
+            !text.contains("verdict"),
+            "absent fields should not be written"
+        );
         assert_eq!(serde_json::from_str::<Record>(&text).unwrap(), r);
     }
 }

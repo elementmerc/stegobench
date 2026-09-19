@@ -154,7 +154,11 @@ pub enum PullRefusal {
     /// The image is not present and nothing can fetch it.
     NoNetwork { name: String },
     /// There is not enough room, with the numbers so the user can act.
-    NotEnoughDisk { name: String, needs_mb: u64, free_mb: u64 },
+    NotEnoughDisk {
+        name: String,
+        needs_mb: u64,
+        free_mb: u64,
+    },
     /// Size is unknown, so the disk check cannot be made honestly.
     UnknownSize { name: String },
 }
@@ -167,7 +171,11 @@ impl std::fmt::Display for PullRefusal {
                 "{name} is not installed and there is no network to fetch it. \
                  Pull it on a connected machine, or run without it."
             ),
-            PullRefusal::NotEnoughDisk { name, needs_mb, free_mb } => write!(
+            PullRefusal::NotEnoughDisk {
+                name,
+                needs_mb,
+                free_mb,
+            } => write!(
                 f,
                 "{name} needs {needs_mb} MB and {free_mb} MB is free. Free up \
                  {} MB, or choose a tool that is already installed.",
@@ -199,10 +207,14 @@ impl Image {
             return Ok(());
         }
         if !network {
-            return Err(PullRefusal::NoNetwork { name: name.to_string() });
+            return Err(PullRefusal::NoNetwork {
+                name: name.to_string(),
+            });
         }
         let Some(size) = self.size_mb else {
-            return Err(PullRefusal::UnknownSize { name: name.to_string() });
+            return Err(PullRefusal::UnknownSize {
+                name: name.to_string(),
+            });
         };
         let needs = size + size / 5;
         if free_mb < needs {
@@ -251,7 +263,10 @@ fn default_true() -> bool {
 
 impl Default for Emits {
     fn default() -> Self {
-        Emits { output: Output::Score, higher_means_stego: true }
+        Emits {
+            output: Output::Score,
+            higher_means_stego: true,
+        }
     }
 }
 
@@ -410,9 +425,17 @@ fn default_threshold() -> f64 {
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("cannot read {path}: {source}")]
-    Read { path: String, #[source] source: std::io::Error },
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{path} is not a valid registry entry: {source}")]
-    Parse { path: String, #[source] source: toml::de::Error },
+    Parse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
     #[error("{name} is not usable:\n  {}", .problems.join("\n  "))]
     Invalid { name: String, problems: Vec<String> },
 }
@@ -423,9 +446,9 @@ impl Entry {
         let mut bad = Vec::new();
 
         match (&self.image, &self.binary) {
-            (Some(_), Some(_)) => bad.push(
-                "declares both an image and a binary; it must be one or the other".into(),
-            ),
+            (Some(_), Some(_)) => {
+                bad.push("declares both an image and a binary; it must be one or the other".into())
+            }
             (None, None) => bad.push("declares neither an image nor a binary".into()),
             _ => {}
         }
@@ -495,7 +518,11 @@ impl Entry {
             for kv in &inv.env {
                 let looks_secret = ["TOKEN", "SECRET", "KEY", "PASSWORD", "LICENCE", "LICENSE"]
                     .iter()
-                    .any(|k| kv.split('=').next().is_some_and(|n| n.to_uppercase().contains(k)));
+                    .any(|k| {
+                        kv.split('=')
+                            .next()
+                            .is_some_and(|n| n.to_uppercase().contains(k))
+                    });
                 if looks_secret {
                     bad.push(format!(
                         "invoke.env entry {:?} names a credential. Declare it in \
@@ -533,7 +560,11 @@ impl Entry {
     pub fn summary(&self) -> String {
         let how = match (&self.image, &self.binary) {
             (Some(i), _) => i.reference.split('@').next().unwrap_or("image").to_string(),
-            (_, Some(b)) => b.command.first().cloned().unwrap_or_else(|| "binary".into()),
+            (_, Some(b)) => b
+                .command
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "binary".into()),
             _ => "unconfigured".into(),
         };
         let secrets = if self.secrets.is_empty() {
@@ -574,15 +605,16 @@ impl Registry {
                         path: p.display().to_string(),
                         source: e,
                     })?;
-                    let entry: Entry =
-                        toml::from_str(&text).map_err(|e| RegistryError::Parse {
-                            path: p.display().to_string(),
-                            source: e,
-                        })?;
-                    entry.validate().map_err(|problems| RegistryError::Invalid {
-                        name: p.display().to_string(),
-                        problems,
+                    let entry: Entry = toml::from_str(&text).map_err(|e| RegistryError::Parse {
+                        path: p.display().to_string(),
+                        source: e,
                     })?;
+                    entry
+                        .validate()
+                        .map_err(|problems| RegistryError::Invalid {
+                            name: p.display().to_string(),
+                            problems,
+                        })?;
                     reg.entries.insert(entry.name.clone(), entry);
                 }
             }
@@ -781,7 +813,9 @@ mod preflight_tests {
 
     #[test]
     fn a_missing_image_offline_is_refused_with_advice() {
-        let e = img(Some(100)).pull_preflight("aletheia", false, false, 999_999).unwrap_err();
+        let e = img(Some(100))
+            .pull_preflight("aletheia", false, false, 999_999)
+            .unwrap_err();
         assert!(e.to_string().contains("no network"));
     }
 
@@ -791,20 +825,29 @@ mod preflight_tests {
         // unpacked as well as downloaded, and filling the disk halfway through
         // leaves a partial layer cache rather than a clean failure.
         let rich = img(Some(9090));
-        assert!(rich.pull_preflight("aletheia-rich", false, true, 9100).is_err());
-        assert_eq!(rich.pull_preflight("aletheia-rich", false, true, 11000), Ok(()));
+        assert!(rich
+            .pull_preflight("aletheia-rich", false, true, 9100)
+            .is_err());
+        assert_eq!(
+            rich.pull_preflight("aletheia-rich", false, true, 11000),
+            Ok(())
+        );
     }
 
     #[test]
     fn the_refusal_says_how_much_to_free_rather_than_just_no() {
-        let e = img(Some(1000)).pull_preflight("hstego", false, true, 500).unwrap_err();
+        let e = img(Some(1000))
+            .pull_preflight("hstego", false, true, 500)
+            .unwrap_err();
         // 1000 + 20% margin = 1200 needed, 500 free, so 700 to free.
         assert!(e.to_string().contains("700"), "got: {e}");
     }
 
     #[test]
     fn an_image_with_no_declared_size_is_refused_rather_than_pulled_blind() {
-        let e = img(None).pull_preflight("mystery", false, true, 999_999).unwrap_err();
+        let e = img(None)
+            .pull_preflight("mystery", false, true, 999_999)
+            .unwrap_err();
         assert!(e.to_string().contains("declares no size"));
     }
 }
@@ -850,13 +893,20 @@ must_clear = "b.png"
     #[test]
     fn the_boundary_is_inclusive_and_stated() {
         assert_eq!(entry_with(BUNDLE_THRESHOLD_MB, true).validate(), Ok(()));
-        assert_eq!(entry_with(BUNDLE_THRESHOLD_MB + 1, false).validate(), Ok(()));
+        assert_eq!(
+            entry_with(BUNDLE_THRESHOLD_MB + 1, false).validate(),
+            Ok(())
+        );
     }
 
     #[test]
     fn the_refusal_names_both_numbers_so_it_can_be_acted_on() {
         let e = entry_with(836, true).validate().unwrap_err();
-        assert!(e[0].contains("836") && e[0].contains("750"), "got: {:?}", e[0]);
+        assert!(
+            e[0].contains("836") && e[0].contains("750"),
+            "got: {:?}",
+            e[0]
+        );
     }
 }
 

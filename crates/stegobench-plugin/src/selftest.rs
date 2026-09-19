@@ -79,13 +79,16 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
     let inner = format!("/work/{name}");
 
     let mut args: Vec<String> = vec![
-        "run".into(), "--rm".into(),
+        "run".into(),
+        "--rm".into(),
         "--network=none".into(),
         "--cap-drop=ALL".into(),
-        "--security-opt".into(), "no-new-privileges".into(),
+        "--security-opt".into(),
+        "no-new-privileges".into(),
         "--read-only".into(),
         "--memory=2g".into(),
-        "-v".into(), mount,
+        "-v".into(),
+        mount,
     ];
 
     // An adapter is mounted read-only beside the image it reads.
@@ -116,7 +119,8 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
 
     args.push(image.into());
     args.extend(invoke.argv.iter().map(|a| {
-        a.replace("{file}", &inner).replace("{adapter}", &adapter_inner)
+        a.replace("{file}", &inner)
+            .replace("{adapter}", &adapter_inner)
     }));
 
     // Run as this user, so a tool writing into the scratch directory does not
@@ -231,7 +235,10 @@ fn run_host_adapter(entry: &Entry, fixture: &Path) -> Reading {
         Err(e) => return Reading::Failed(format!("adapter {rel} not found: {e}")),
     };
     let file = fixture.display().to_string();
-    let program = invoke.entrypoint.clone().unwrap_or_else(|| "python3".into());
+    let program = invoke
+        .entrypoint
+        .clone()
+        .unwrap_or_else(|| "python3".into());
     let argv: Vec<String> = invoke
         .argv
         .iter()
@@ -273,7 +280,6 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         );
     }
 
-
     let detect_path = fixtures_dir.join(strip_prefix(&test.must_detect));
     let clear_path = fixtures_dir.join(strip_prefix(&test.must_clear));
 
@@ -306,9 +312,7 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         (Some(false), Some(false)) => Verified::Failed(
             "says clean on the stego fixture too, so it answers no to everything".into(),
         ),
-        (Some(false), Some(true)) => Verified::Failed(
-            "has both answers exactly backwards".into(),
-        ),
+        (Some(false), Some(true)) => Verified::Failed("has both answers exactly backwards".into()),
         // A failure to answer at all IS an installation problem, for a
         // subject as much as anything else.
         (None, _) => Verified::Failed(format!("could not read the stego fixture: {on_stego:?}")),
@@ -402,7 +406,8 @@ pub mod roundtrip {
 
     /// The payload. Short, recognisable, and not compressible into nothing,
     /// so a tool that silently wrote an empty file cannot pass by accident.
-    pub const PAYLOAD: &[u8] = b"stegobench roundtrip fixture 2026: if you can read this, it survived.";
+    pub const PAYLOAD: &[u8] =
+        b"stegobench roundtrip fixture 2026: if you can read this, it survived.";
 
     /// Hides the payload, recovers it, and compares the bytes.
     ///
@@ -425,7 +430,10 @@ pub mod roundtrip {
             return Verified::Failed("no scratch directory".into());
         };
         let work = dir.path();
-        let cover_name = cover_src.file_name().and_then(|n| n.to_str()).unwrap_or("cover");
+        let cover_name = cover_src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("cover");
         if std::fs::copy(&cover_src, work.join(cover_name)).is_err() {
             return Verified::Failed("could not stage the cover".into());
         }
@@ -467,12 +475,14 @@ pub mod roundtrip {
             })
             .unwrap_or_default();
 
-        let mut phase = |argv: &Vec<String>| -> Result<(), String> {
+        let phase = |argv: &Vec<String>| -> Result<(), String> {
             let mut args: Vec<String> = vec![
-                "run".into(), "--rm".into(),
+                "run".into(),
+                "--rm".into(),
                 "--network=none".into(),
                 "--cap-drop=ALL".into(),
-                "--security-opt".into(), "no-new-privileges".into(),
+                "--security-opt".into(),
+                "no-new-privileges".into(),
                 "--memory=2g".into(),
             ];
             if !uid_gid.is_empty() {
@@ -492,7 +502,11 @@ pub mod roundtrip {
                 Ok(o) => Err(format!(
                     "exit {}: {}",
                     o.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&o.stderr).trim().chars().take(160).collect::<String>()
+                    String::from_utf8_lossy(&o.stderr)
+                        .trim()
+                        .chars()
+                        .take(160)
+                        .collect::<String>()
                 )),
                 Err(e) => Err(format!("could not run the container: {e}")),
             }
