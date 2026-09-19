@@ -141,3 +141,18 @@ toolchain choice is this image's own and nothing upstream confirms it.
 ## Licence
 
 AGPL-3.0-or-later, matching Stegcore, whose analysis this wraps.
+
+**Two files are dual licensed**: `trailing_data.py` and its tests are
+`AGPL-3.0-or-later OR Apache-2.0`. They are original work containing no
+Stegcore code and depending on nothing but the standard library, so their
+licence is separable from the rest of this tree. The second licence exists so
+the structural detector can be contributed to collections that cannot accept
+copyleft, NFI's own plugin examples among them. `LICENSE-APACHE-2.0` holds
+that text, byte identical to the copy in their repository.
+
+Everything else here, and everything it touches in Stegcore, stays AGPL. The
+statistical half is where the calibration and the thresholds live and it is
+not offered under a permissive licence.
+
+`nfi-example/` holds a standalone Apache-2.0 copy shaped for their examples
+repository. Nothing there has been sent.

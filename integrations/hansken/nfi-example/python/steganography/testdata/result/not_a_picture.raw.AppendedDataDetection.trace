@@ -1,0 +1,18 @@
+{
+  "trace" : {
+    "id" : "0",
+    "name" : "holiday.gif",
+    "path" : "/test-input-trace",
+    "file" : {
+      "extension" : "gif",
+      "name" : "holiday.gif"
+    },
+    "picture" : {
+      "misc" : {
+        "stegAssessed" : "no: not a PNG or JPEG"
+      },
+      "height" : 1,
+      "width" : 1
+    }
+  }
+}

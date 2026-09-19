@@ -16,3 +16,8 @@ testdata/result/*.profile.txt
 .coverage
 coverage.xml
 htmlcov/
+
+# The SDK downloads its test framework into the example package too.
+nfi-example/**/.runner/
+nfi-example/**/tests.log
+nfi-example/**/testdata/result/*.profile.txt

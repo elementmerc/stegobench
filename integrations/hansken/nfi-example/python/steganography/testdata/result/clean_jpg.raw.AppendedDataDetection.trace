@@ -1,0 +1,19 @@
+{
+  "trace" : {
+    "id" : "0",
+    "name" : "clean.jpg",
+    "path" : "/test-input-trace",
+    "file" : {
+      "extension" : "jpg",
+      "name" : "clean.jpg"
+    },
+    "picture" : {
+      "misc" : {
+        "stegAssessed" : "yes",
+        "stegStructural" : "none"
+      },
+      "height" : 256,
+      "width" : 256
+    }
+  }
+}

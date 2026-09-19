@@ -1,0 +1,13 @@
+{
+  "trace": {
+    "name": "appended.png",
+    "file": {
+      "name": "appended.png",
+      "extension": "png"
+    },
+    "picture": {
+      "width": 256,
+      "height": 256
+    }
+  }
+}

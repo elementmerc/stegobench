@@ -1,5 +1,13 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later OR Apache-2.0
 # Copyright (C) 2026 Daniel Iwugo
+#
+# Dual licensed, deliberately and only for this file and its tests. It is
+# original work that contains no Stegcore code and depends on nothing but the
+# standard library, so its licence is separable from the rest of this tree.
+# Offered under Apache-2.0 as well so it can be contributed to collections
+# that cannot accept copyleft, which includes NFI's own plugin examples. The
+# rest of this directory, and everything it touches in Stegcore, stays
+# AGPL-3.0-or-later.
 """Tests for the structural detector.
 
 The cases that matter are the ones where a cheaper implementation gets the

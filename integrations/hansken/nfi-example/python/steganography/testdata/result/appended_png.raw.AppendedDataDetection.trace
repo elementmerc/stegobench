@@ -1,0 +1,22 @@
+{
+  "trace" : {
+    "id" : "0",
+    "name" : "appended.png",
+    "path" : "/test-input-trace",
+    "file" : {
+      "extension" : "png",
+      "name" : "appended.png"
+    },
+    "picture" : {
+      "misc" : {
+        "stegAppendedBytes" : "4096",
+        "stegAppendedLooksLike" : "text",
+        "stegAppendedOffset" : "34874",
+        "stegAssessed" : "yes",
+        "stegStructural" : "appended data"
+      },
+      "height" : 256,
+      "width" : 256
+    }
+  }
+}
