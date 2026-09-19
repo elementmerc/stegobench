@@ -207,15 +207,21 @@ def decompose(
 
     **The bound leaked into the calibration loss.** The floor was free to be
     ten orders of magnitude more confident than the system it was the floor
-    for, so `cllr_cal` measured the clip as much as the calibrator. On the
-    spatial corpus, 68 to 71% of the reported calibration loss was the bound.
+    for, so `cllr_cal` measured the clip as much as the calibrator. Measured
+    across all 45 cells of the spatial corpus by `bound_attribution.py`: a
+    median 23% of the reported calibration loss was the bound, and on the 18
+    cells where the detector actually discriminates (AUC above 0.99) it was
+    38% to 82%, median 70%. The single figure quoted before, "68 to 71%",
+    was that subset's middle presented as though it described the corpus.
 
     **The floor was not a floor.** Isotonic regression is monotone *non
     decreasing* in whatever it is fitted to. A calibrator is free to fit a
     negative slope, and on a detector that points the wrong way it does. The
-    system then beat its own floor and `cllr_cal` went to minus 0.5. That is
-    not hypothetical here: outguess inverts StegaShield to AUC 0.360 on the
-    round3-q95 corpus, measured.
+    system then beats its own floor and `cllr_cal` goes negative, which is a
+    quantity that cannot exist. How far depends on how hard the inversion is:
+    -0.05 at AUC 0.325, -0.51 at AUC 0.071, -0.89 at AUC 0.003 on Gaussian
+    data. A weakly inverted detector, which is what the JPEG arms are at AUC
+    0.476 to 0.493, does not show it at all.
 
     Fitting the floor to the reported ratios fixes both. The identity map is
     in the feasible set, so the floor cannot be beaten; and clipping the
@@ -300,13 +306,16 @@ def cllr_null(
     Measured on the structural arm, where the two sides carry byte identical
     scores and the answer is known exactly:
 
-        observed                     1.00426
-        free permutation    mean 1.00214, 5-95% [0.99586, 1.00687], p 0.800
-        within-pair         mean 1.00425, 5-95% [1.00153, 1.00805], p 0.545
+        observed                     1.00445
+        within pair, matched   1.00415, 5-95% [1.00344, 1.00473], p 0.762
+        within pair, 1 seed    1.00418, 5-95% [1.00149, 1.00750], p 0.564
+        free, matched          1.00153, 5-95% [0.99437, 1.00456], p 0.931
 
-    The paired null lands on the observed value to five decimals and gives the
-    textbook p. The free null is centred 0.002 low and is 1.7 times as wide.
-    It errs conservative here, which is luck rather than design.
+    The paired null lands on the observed value to four decimals. The free
+    null is centred 0.003 low and is 7.9 times as wide, erring conservative by
+    accident rather than design. Regenerate with `null_comparison.py`; the
+    figures above are from the matched estimator and an earlier version of
+    this docstring quoted the single-seed ones.
 
     :param pairs: an identifier per case, equal for the two members of a pair.
         When given, labels are flipped within each pair rather than shuffled
@@ -339,7 +348,8 @@ def cllr_null(
         # observed statistic. This is not an optimisation; a mean over 20
         # seeds and a single draw are different estimators with different
         # variance, and comparing one against the other inflated this null
-        # by a factor of 5.5 in the direction that made results look
+        # by a factor of 4.6, which is sqrt(20), in the direction that
+        # made results look
         # indistinguishable from it. See `observed_cllr`.
         draws = np.empty(seeds)
         for s in range(seeds):
@@ -347,6 +357,50 @@ def cllr_null(
             draws[s] = cllr(lrs[shuffled == 1], lrs[shuffled == 0])
         out[i] = draws.mean()
     return out
+
+
+def observed_decomposition(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    folds: int = 10,
+    bound: float = DEFAULT_BOUND,
+    seeds: int = 20,
+) -> tuple[CllrDecomposition, float]:
+    """The whole decomposition averaged over fold seeds, not just the total.
+
+    WHY THIS EXISTS RATHER THAN A CALL TO `decompose` ON ONE SEED
+    --------------------------------------------------------------
+    An earlier version of the reporting scripts printed a Cllr averaged over
+    20 fold seeds next to a Cllr_min taken from a single seed. Both numbers
+    were individually correct and their difference was not a quantity anything
+    had computed: the reader subtracts one column from the other and gets a
+    calibration loss that mixes two estimators.
+
+    Averaging the decomposition term by term keeps the arithmetic true, because
+    the mean of the differences is the difference of the means. Every column in
+    a printed row then comes from the same 20 draws.
+
+    :returns: (the averaged decomposition, the standard deviation of the total)
+    """
+    labels = _check_labels(labels)
+    totals = np.empty(seeds)
+    floors = np.empty(seeds)
+    for i in range(seeds):
+        lrs = cross_validated_lrs(scores, labels, folds=folds, bound=bound, seed=i)
+        d = decompose(lrs, labels, bound=bound)
+        totals[i] = d.cllr
+        floors[i] = d.cllr_min
+    return (
+        CllrDecomposition(
+            cllr=float(totals.mean()),
+            cllr_min=float(floors.mean()),
+            cllr_cal=float((totals - floors).mean()),
+            bound_cost=bound_cost(bound),
+            n_payload=int((labels == 1).sum()),
+            n_clean=int((labels == 0).sum()),
+        ),
+        float(totals.std()),
+    )
 
 
 def observed_cllr(
@@ -360,7 +414,7 @@ def observed_cllr(
 
     A single cross validation is one draw from a distribution whose width is
     set by which cases landed in which fold. On the structural arm that spread
-    runs from 1.00084 to 1.00870 across 40 seeds: wider than the bias the
+    runs from 1.00084 to 1.00786 across 20 seeds: wider than the bias the
     permutation null exists to correct, and wider than the gap between any two
     numbers in the published table.
 

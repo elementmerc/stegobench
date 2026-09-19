@@ -21,6 +21,7 @@ from likelihood_ratio import (
     cross_validated_lrs,
     decompose,
     observed_cllr,
+    observed_decomposition,
     pav,
 )
 
@@ -150,8 +151,10 @@ class TestDecomposition:
         """C1: the clip must not leak into the calibration loss.
 
         An unbounded floor is allowed to be ten orders of magnitude more
-        confident than the bounded system it is the floor for, which inflated
-        reported calibration loss by 68 to 71% on the spatial corpus.
+        confident than the bounded system it is the floor for. Measured across
+        all 45 cells of the spatial corpus, that inflated the reported
+        calibration loss by a median 70% on the 18 cells where the detector
+        discriminates. See `bound_attribution.py`.
         """
         rng = np.random.default_rng(3)
         labels = np.array([0] * 400 + [1] * 400)
@@ -442,6 +445,60 @@ class TestObservedCllrReportsItsSpread:
         a, _, _ = observed_cllr(scores, labels, folds=5, seeds=5)
         b, _, _ = observed_cllr(scores, labels, folds=5, seeds=5)
         assert a == b
+
+
+class TestTheDecompositionIsOneEstimator:
+    """M6: the three printed columns must be arithmetically consistent.
+
+    Averaging Cllr over 20 fold seeds and taking Cllr_min from one seed gives
+    two individually correct numbers whose difference is a quantity nothing
+    computed. A reader subtracts the columns and gets a calibration loss that
+    mixes estimators.
+    """
+
+    def test_the_columns_subtract(self):
+        rng = np.random.default_rng(0)
+        labels = np.array([0] * 150 + [1] * 150)
+        scores = rng.normal(loc=1.2 * labels)
+        d, _ = observed_decomposition(scores, labels, folds=10, seeds=8)
+        assert d.cllr - d.cllr_min == pytest.approx(d.cllr_cal, abs=1e-12)
+
+    def test_it_agrees_with_one_seed_when_there_is_only_one(self):
+        rng = np.random.default_rng(1)
+        labels = np.array([0] * 120 + [1] * 120)
+        scores = rng.normal(loc=0.8 * labels)
+        d, sd = observed_decomposition(scores, labels, folds=10, seeds=1)
+        single = decompose(cross_validated_lrs(scores, labels, folds=10, seed=0), labels)
+        assert d.cllr == pytest.approx(single.cllr)
+        assert d.cllr_min == pytest.approx(single.cllr_min)
+        assert sd == pytest.approx(0.0)
+
+    def test_the_total_matches_observed_cllr_over_the_same_seeds(self):
+        """The two entry points must not disagree about the same quantity."""
+        rng = np.random.default_rng(4)
+        labels = np.array([0] * 100 + [1] * 100)
+        scores = rng.normal(loc=1.0 * labels)
+        d, sd = observed_decomposition(scores, labels, folds=10, seeds=6)
+        mean, spread, _ = observed_cllr(scores, labels, folds=10, seeds=6)
+        assert d.cllr == pytest.approx(mean)
+        assert sd == pytest.approx(spread)
+
+    def test_the_loss_stays_non_negative_on_an_inverted_detector(self):
+        """The floor must not be beaten, averaged or not."""
+        rng = np.random.default_rng(7)
+        labels = np.array([0] * 200 + [1] * 200)
+        scores = rng.normal(loc=-2.0 * labels)
+        d, _ = observed_decomposition(scores, labels, folds=10, seeds=5)
+        assert d.cllr_cal >= -1e-9
+        assert d.cllr_min < 1.0
+
+    def test_the_counts_are_carried_through(self):
+        labels = np.array([0] * 60 + [1] * 40)
+        rng = np.random.default_rng(9)
+        scores = rng.normal(loc=labels)
+        d, _ = observed_decomposition(scores, labels, folds=5, seeds=3)
+        assert (d.n_payload, d.n_clean) == (40, 60)
+        assert d.bound_cost == pytest.approx(bound_cost(100.0))
 
 
 class TestInputValidation:

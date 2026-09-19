@@ -34,8 +34,9 @@ plain likelihood ratios. The conversion is exact and the tests do it.
 **Bounding.** `lir`'s floor is unbounded by default; its `add_misleading`
 argument exists to tame extreme values and is off. This module clips the floor
 to the same bound as the system, because it reports a bounded system and
-subtracting an unbounded floor from a bounded total is what produced a
-published number that was 68 to 71% artefact. Where `lir` is used as intended,
+subtracting an unbounded floor from a bounded total inflates the calibration
+loss by a median 70% on the cells where a detector discriminates. Where `lir`
+is used as intended,
 with an unbounded system as well, the comparison is like for like and the
 issue does not arise.
 """
