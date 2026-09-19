@@ -128,6 +128,12 @@ class OutguessEmbedder(DockerTool, Embedder):
 
     image = "stegobench/outguess:pinned"
     formats = (".jpg", ".jpeg")
+    rewrites_container = True
+
+    #: The least outguess will carry. An empty payload is refused outright:
+    #: `mmap: Invalid argument`, and a zero byte output file. One byte comes out
+    #: at 0.02% to 0.06% of usable bits, against 5% for the smallest real arm.
+    MINIMAL_PAYLOAD = b"\x00"
 
     def __init__(self, quality: int = 75) -> None:
         # Outguess RE-ENCODES the JPEG it writes, at quality 75 by default,
@@ -217,6 +223,18 @@ class OutguessEmbedder(DockerTool, Embedder):
                            {"statistics_corrected": True,
                             "reencoded_at_quality": self.quality,
                             "password": bool(password)})
+
+    def matched_clean(self, cover: pathlib.Path, dest: pathlib.Path) -> dict:
+        """The cover through outguess's own writer, carrying almost nothing.
+
+        Outguess re-encodes every file it touches, so a Pillow-written clean
+        half and an outguess-written stego half differ in the encoder as well
+        as in the payload. That difference is larger than anything the payload
+        does: see `matched_clean` on the base class for the measurement.
+        """
+        result = self.embed(cover, self.MINIMAL_PAYLOAD, dest)
+        return {"writer": "outguess", "payload_bytes": result.payload_bytes,
+                "reencoded_at_quality": self.quality}
 
 
 class OpenStegoEmbedder(DockerTool, Embedder):

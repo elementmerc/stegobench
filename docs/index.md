@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: stegobench
+  name: Stegobench
   text: Steganalysis numbers somebody else can check
   tagline: Build a labelled corpus, run detectors over identical bytes, and publish results with the corpus attached.
   actions:
@@ -11,7 +11,7 @@ hero:
       link: /guide/what-it-is
     - theme: alt
       text: The corpus
-      link: /pentimento
+      link: /guide/corpus
     - theme: alt
       text: Source
       link: https://github.com/elementmerc/stegobench
@@ -34,5 +34,5 @@ features:
 | Know what this is before installing anything | [What it is](/guide/what-it-is) |
 | Run it | [Quickstart](/guide/quickstart) |
 | Build your own corpus | [Build a corpus](/guide/build-a-corpus) |
-| Use the published one | [Pentimento](/pentimento) |
+| Use the published one | [Pentimento](/guide/corpus) |
 | Quote a number from it | [Read this first](/guide/limits) |

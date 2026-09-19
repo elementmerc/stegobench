@@ -76,6 +76,14 @@ class Embedder(abc.ABC):
     #: Which cover formats this tool will accept, lowercase with the dot.
     formats: tuple[str, ...] = (".png",)
 
+    #: True when the tool rewrites the whole container instead of editing the
+    #: coefficients already in it. Such a tool leaves its own encoder's
+    #: signature on every file it writes, so a clean half written by anything
+    #: else differs from the stego half in the writer as well as in the
+    #: payload, and a detector can read the writer. `matched_clean` is how the
+    #: pair is closed.
+    rewrites_container: bool = False
+
     #: True when `capacity()` is arithmetic over the image alone, False when it
     #: shells out and asks the tool. Only the first kind can be checked on a
     #: machine that does not have the tool installed, which is every CI runner,
@@ -102,6 +110,24 @@ class Embedder(abc.ABC):
 
     def accepts(self, cover: pathlib.Path) -> bool:
         return cover.suffix.lower() in self.formats
+
+    def matched_clean(self, cover: pathlib.Path, dest: pathlib.Path) -> dict:
+        """The clean half of a pair, written by the same encoder as the stego.
+
+        For a tool that edits coefficients in place the cover already is that
+        file, so this copies it. A tool that rewrites the container overrides
+        this and produces the cover through its own writer, carrying as little
+        as it will accept.
+
+        Measured on outguess: against a clean half written by Pillow, a
+        detector reached AUC 0.36, below chance, at every payload from 5% to
+        50% of capacity, and reached the same 0.36 on a file carrying 0.03%.
+        Against a writer-matched clean half the same arms came out at 0.50.
+        The whole of that result was the encoder.
+        """
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cover, dest)
+        return {"writer": "cover as given", "payload_bytes": 0}
 
     def _check(self, cover: pathlib.Path, payload: bytes) -> None:
         """The three refusals every tool shares, so each one need not repeat them."""

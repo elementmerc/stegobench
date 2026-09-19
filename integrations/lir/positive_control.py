@@ -17,7 +17,7 @@ control.
 The data is the spatial LSB corpus from Stegcore's threshold calibration:
 8,000 clean pictures and 36,000 stego across five payload types and three
 encodings, scored by Stegcore's own SPA, RS and WS. It is not redistributable
-(see `docs/cover-source-licensing.md`), so this script reads it from disk
+(see `docs/design/cover-source-licensing.md`), so this script reads it from disk
 rather than shipping it.
 
 Usage::

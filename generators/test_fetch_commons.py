@@ -6,7 +6,7 @@
     python3 -m unittest discover -s generators -p 'test_*.py'
 
 Nothing here touches the network. The fetch loop itself is exercised by running
-it against the live API, which is what the measurements in `docs/pentimento.md`
+it against the live API, which is what the measurements in `docs/design/pentimento.md`
 came from; what is tested here is the logic that decides what to keep, because
 that is what changes the corpus.
 """

@@ -245,3 +245,34 @@ if __name__ == "__main__":
             print(f"  {'ok  ' if ok else 'MISS'} {name}")
         print()
     unittest.main(verbosity=2)
+
+
+class WriterMatchedCleanTests(unittest.TestCase):
+    """A pair must differ only in the payload, including in who wrote it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.jpg = self.root / "cover.jpg"
+        Image.new("RGB", (64, 64), (120, 90, 60)).save(self.jpg, quality=95)
+
+    def test_only_the_tools_that_rewrite_declare_it(self):
+        rewriting = {e.id for e in build() if e.rewrites_container}
+        # Outguess re-encodes whatever it is given. Steghide edits the
+        # coefficients that are already there and leaves the rest alone.
+        self.assertEqual(rewriting, {"outguess"})
+
+    def test_the_default_clean_half_is_the_cover_itself(self):
+        for e in build():
+            if e.rewrites_container:
+                continue
+            dest = self.root / f"clean-{e.id}.jpg"
+            detail = e.matched_clean(self.jpg, dest)
+            self.assertEqual(dest.read_bytes(), self.jpg.read_bytes(), e.id)
+            self.assertEqual(detail["payload_bytes"], 0, e.id)
+
+    def test_outguess_carries_the_least_it_will_take(self):
+        # An empty payload is refused by the tool itself, so one byte is the
+        # floor rather than a choice.
+        self.assertEqual(len(tools.OutguessEmbedder.MINIMAL_PAYLOAD), 1)

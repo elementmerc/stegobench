@@ -1,88 +1,68 @@
 # Pairing, and what breaks it
 
 A steganalysis measurement is a comparison. You show a detector a clean image
-and a stego image, and you ask whether it can tell which is which.
+and a stego image and ask whether it can tell which is which.
 
-That only measures hiding if the two images are identical in every other
-respect. If they differ in anything else, the detector will find the easier
-difference, and you will publish a number that describes your pipeline rather
-than the hiding.
+That only measures hiding if the two are identical in every other respect. If
+they differ in anything else, the detector finds the easier difference.
 
 ```
-    cover.png ──► [ resave at q95 ] ──► clean half
-                                                     both halves must come
-    cover.png ──► [ embed ] ──► [ resave at q75 ] ──► stego half
-                                                     off the SAME writer
-
-    The detector is now excellent at telling q95 from q75.
-    It has learned nothing at all about the payload.
+    cover.jpg ──► [ written at q95 ] ──────────► clean half
+                                                            both halves must
+    cover.jpg ──► [ embed ] ──► [ written at q75 ] ──► stego half   come off the
+                                                            SAME writer
+    The detector is now excellent at telling q95 from q75,
+    and knows nothing at all about the payload.
 ```
-
-## This is not hypothetical
-
-It happened here, in round 3. outguess re-encodes whatever it is handed at
-quality 75. The clean half had been written by Pillow at quality 95. The arm
-looked like a strong result and was measuring the quantisation table.
-
-The arms that had the defect are kept rather than deleted, as the demonstration.
 
 ## Matching the quality is not enough
 
-The round 3 arms were rebuilt with outguess writing at quality 95 to match the
-cover, which fixed the quality difference. It did not fix the pairing, because
-outguess rewrites the whole JPEG with its own encoder and the clean half was
-written by Pillow. Two libraries, two sets of rounding decisions, one
-difference the detector can see.
+A tool that rewrites the whole file leaves its own encoder's signature on
+everything it writes. Matching the quality setting does not close that: two
+JPEG libraries at quality 95 still round differently.
 
-The tell was in the numbers before any control was run. Three arms spanning a
-tenfold payload range produced the same separation to three decimal places. A
-payload effect grows with payload; a flat line across ten times the payload is
-something present in equal measure in all three.
+Measured on outguess, against a clean half written by a different library:
 
-`generators/recompression_control.py` settles it with two arms that carry no
-meaningful payload at all:
-
-| Arm | What it is | What a result on it would mean |
+| Payload | AUC, mismatched clean half | AUC, writer-matched clean half |
 |---|---|---|
-| `nullog` | The cover through outguess's own writer carrying **one byte**, which is 0.03% of capacity and the smallest outguess accepts. An empty payload is refused outright | The effect is the writer, not the hiding |
-| `nullpillow` | The cover decoded and re-encoded by the encoder that first wrote it, carrying nothing | The detector responds to a second compression generation in general |
+| 0.03% of capacity | 0.360 | — |
+| 5% | 0.361 | 0.500 |
+| 20% | 0.362 | 0.502 |
+| 50% | 0.360 | 0.497 |
 
-Run it before trusting any number measured on an arm whose tool re-encodes.
-Which of the two arms moves tells you which confound you have, and an arm that
-moves at 0.03% payload as much as it moves at 50% is not measuring a payload.
+A payload effect grows with payload. This one is flat across a 1,600-fold
+range, and vanishes entirely once both halves come off the same writer.
 
-## What the harness does about it
+## What the builder does about it
 
-**Both halves come off the same writer.** For the JPEG adaptive arms the clean
-half is read and written straight back through the same library that writes the
-stego half, changing nothing. Using the original encoder's file instead would
-put a different encoder on each side of the pair, which is the confound above.
+**A tool that rewrites the container is paired against its own writer.** Its
+clean half is the cover passed through that same tool carrying the least
+payload it will accept, so both halves start from the same cover and pass
+through the same encoder once.
 
-**The clean halves ship.** Three of them, and they are deliberately not
-collapsed into one:
+**Tools that edit coefficients in place are paired against the cover itself**,
+because that file already matches.
 
-| Arm | What it is | Pairs with |
+Each sample says which it got, in its `pairing` field.
+
+**Every sample records how much changed**, as `samples_changed` or
+`coefficients_changed`. An arm reporting zero changes at a nominal payload is a
+bug you can see without opening an image.
+
+## Checking it yourself
+
+`generators/recompression_control.py` builds two arms that carry no meaningful
+payload:
+
+| Arm | What it is | What a result on it means |
 |---|---|---|
-| `clean-grey` | The cover converted to greyscale | The spatial arms: HUGO, WOW, S-UNIWARD, HILL, MiPOD |
-| `clean-jpeg` | Written back through the DCT library, coefficients untouched | The DCT arms: J-UNIWARD, UERD |
-| `clean-jpeg-tools` | The cover as a JPEG, as the end-user tools were handed it | steghide, outguess, the appended-data control |
+| `nullog` | Through the tool's own writer, carrying the least it accepts | The effect is the writer, not the hiding |
+| `nullpillow` | Re-encoded by the encoder that first wrote it, carrying nothing | The detector responds to re-compression in general |
 
-`clean-jpeg` and `clean-jpeg-tools` hold the same coefficients for the same
-photograph and differ in their bytes, because different encoders wrote them.
-Collapsing them would break the pairing they exist to preserve.
+Run it before trusting any number from an arm whose tool re-encodes.
 
-**Every sample records how much actually changed.** Spatial rows carry
-`samples_changed` and `change_rate`; DCT rows carry `coefficients_changed`. An
-arm that reports zero changes at a nominal payload is not a hard case, it is a
-bug, and you can see it without opening a single image.
+## Splits are the same problem
 
-## The other half of the same problem: splits
-
-A cover and its stego versions are far more alike than any two unrelated
-photographs. Split a corpus at random and a cover lands in training while its
-own stego copy lands in test, so the classifier recognises the photograph and
-scores beautifully.
-
-Split by cover, never by image. The published corpus ships a `SPLITS.md` with a
-deterministic rule, and the sample JSON carries `source_png` precisely so you
-can group by it.
+A cover and its stego versions are near-identical, so a random split puts a
+cover in training and its own stego copy in test. Group by `source_png`. See
+[Limitations](/guide/limits).

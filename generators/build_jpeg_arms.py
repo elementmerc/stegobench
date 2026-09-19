@@ -183,6 +183,27 @@ def main(argv: list[str] | None = None) -> int:
                 except EmbedError as e:
                     print(f"  {embedder.id}/{stem}: {e}", file=sys.stderr)
 
+            # A tool that rewrites the container gets a clean half written by
+            # its own encoder. Both halves then start from the same cover and
+            # pass through the same writer once, so the only thing left between
+            # them is the payload. Without this the pair differs in the encoder
+            # too, and that difference is the larger of the two.
+            matched: dict[str, pathlib.Path] = {}
+            matched_detail: dict[str, dict] = {}
+            for embedder in embedders:
+                if not embedder.rewrites_container:
+                    continue
+                target = out / f"clean_{embedder.id}" / f"{stem}.jpg"
+                if not target.is_file():
+                    try:
+                        matched_detail[embedder.id] = embedder.matched_clean(
+                            clean, target)
+                    except EmbedError as e:
+                        print(f"  clean_{embedder.id}/{stem}: {e}",
+                              file=sys.stderr)
+                        continue
+                matched[embedder.id] = target
+
             jobs: list[tuple[str, object, float]] = [
                 (e.id, e, rate) for e in embedders for rate in rates
             ]
@@ -221,15 +242,26 @@ def main(argv: list[str] | None = None) -> int:
                     counts["failed"] += 1
                     print(f"  {arm}/{stem}: {e}", file=sys.stderr)
                     continue
+                # The clean half of the PAIR, which is not always the file the
+                # payload was embedded into: a tool that rewrites the container
+                # is paired against its own writer's output.
+                pair_clean = matched.get(tool_id, clean)
+                detail = dict(result.detail)
+                if tool_id in matched:
+                    detail["clean_half"] = matched_detail.get(
+                        tool_id, {"writer": tool_id})
                 mf.write(json.dumps({
                     "arm": arm, "tool": tool_id, "rate": rate,
-                    "clean": str(clean.relative_to(out)), "stego": key,
+                    "clean": str(pair_clean.relative_to(out)), "stego": key,
                     "source_png": png.name,
+                    "pairing": ("writer-matched" if tool_id in matched
+                                else "cover-as-written"),
                     "capacity_bytes": room, "payload_bytes": result.payload_bytes,
                     "jpeg_quality": args.quality,
-                    "clean_sha256": hashlib.sha256(clean.read_bytes()).hexdigest(),
+                    "clean_sha256": hashlib.sha256(
+                        pair_clean.read_bytes()).hexdigest(),
                     "stego_sha256": hashlib.sha256(stego.read_bytes()).hexdigest(),
-                    "detail": result.detail,
+                    "detail": detail,
                 }) + "\n")
                 mf.flush()
                 counts["pairs"] += 1

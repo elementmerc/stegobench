@@ -1,68 +1,52 @@
-# Read this before quoting a number
+# Limitations
 
-Everything here is a real limit that changes what a result means. None of it is
-hedging.
+Each of these changes what a result means.
 
 ## The corpus is JPEG-decompressed
 
-**Pentimento's covers were JPEG compressed at some point before they reached
-us, because they are photographs from Wikimedia Commons.** BOSSbase's covers
-were captured raw and never compressed.
+Pentimento's covers are photographs, so they were JPEG compressed before they
+reached the corpus. BOSSbase's covers were captured raw and never compressed.
 
-That difference is not cosmetic. JPEG compression leaves structure in the
-pixels that spatial steganalysis features can see, and a detector measured on
-JPEG-decompressed covers is working on an easier or a harder problem depending
-on the feature set, not on the same problem.
+JPEG compression leaves structure in the pixels that spatial steganalysis
+features can see, so a detector measured on one is not working on the same
+problem as a detector measured on the other.
 
-**So Pentimento numbers and BOSSbase numbers cannot go in the same table.** Not
-as a caveat in a footnote: as two different experiments.
+**Pentimento numbers and BOSSbase numbers do not belong in the same table.**
+Not as a footnote: as two different experiments.
 
-There is no lawful route to a never-compressed arm here, because the corpora
-that have one cannot be redistributed. See [where the covers come
-from](/cover-source-licensing).
-
-## Split by cover, never by image
+## Split by cover, never at random
 
 A cover and its stego versions are near-identical. A random split puts a cover
 in training and its own stego copy in test, and the classifier learns the
 photograph.
 
-The published corpus ships a deterministic split rule and every sample carries
-`source_png` so you can group by it. A nine point accuracy swing has been
-measured in the literature from the split alone.
+Group by `source_png`. The published corpus ships a deterministic split rule.
 
-## The coding is simulated, not real
+## The embedding is simulated
 
 The adaptive arms embed at the theoretically optimal rate rather than through a
-real syndrome-trellis code. Every sample record says so, in a `coding` field.
+real syndrome-trellis code. Every sample says so in its `coding` field.
 
-Simulated embedding is the standard way these schemes are benchmarked and it is
-what the reference implementations do. It is still not what a real tool would
-produce, and the difference is in the direction of making detection slightly
-harder than reality.
+This is how these schemes are normally benchmarked and it is what the reference
+implementations do. It still is not what a real tool produces, and the
+difference makes detection slightly harder than reality.
 
 ## outguess does not fill every cover
 
-The `outguess` arms hold 8,116 samples rather than 10,000. outguess refuses
-covers it cannot fit the payload into, so those covers have no stego twin at
-that rate.
+| | |
+|---|---|
+| Samples per outguess arm | 8,116, not 10,000 |
+| Why | outguess refuses covers it cannot fit the payload into |
+| Why it matters | The refused covers are the small and the busy ones, so an outguess arm is a different cover distribution from a full arm |
 
-This matters more than the missing 19% suggests: the covers it refused are not
-a random sample, they are the small and the busy ones. Comparing an outguess
-arm to a full arm compares two different cover distributions.
+## Scheme rankings invert with the cover source
 
-## Cover-source mismatch is real and it inverts rankings
+Which embedding scheme is hardest to detect changes with the cover source, so a
+result measured on one corpus is a result about that corpus. This is why the
+arms stay separate and labelled rather than blended.
 
-Which embedding scheme is hardest to detect changes with the cover source. A
-detector tuned on one corpus can rank schemes in a different order on another.
-This is why the arms stay separate and labelled rather than blended, and why a
-single-corpus result should be read as a result about that corpus.
+## Attribution travels with the pixels
 
-## What has and has not been travelled
-
-The generators, the pairing discipline and the scoring are exercised on real
-corpora, and the numbers in `results/` came out of them.
-
-The packaging and publication path has been built and run over the full corpus
-but has not yet carried a public release, so treat `pack_tier.py` and
-`publish_tier.py` as the least travelled code here.
+5,429 of the 10,000 covers require attribution and their stego derivatives
+inherit it. The credit line is in every sample's record, so discharging it is
+mechanical, but it is not optional.

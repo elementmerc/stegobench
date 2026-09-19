@@ -1,4 +1,4 @@
-# stegobench
+# Stegobench
 
 A reproducible benchmark for image steganalysis: build a labelled corpus, run
 detectors over identical bytes, and report numbers somebody else can check.
@@ -84,12 +84,12 @@ a default scores against whatever answers on it.
 
 ## Pentimento
 
-The cover corpus this was built to produce. See `docs/pentimento.md` for what it
-is and `docs/distribution.md` for how it is packaged and published, including
+The cover corpus this was built to produce. See `docs/design/pentimento.md` for what it
+is and `docs/design/distribution.md` for how it is packaged and published, including
 the thing it is important to say first: **it is a JPEG-decompressed spatial
 corpus and is not comparable to BOSSbase.**
 
-`docs/cover-source-licensing.md` records why almost every existing steganalysis
+`docs/design/cover-source-licensing.md` records why almost every existing steganalysis
 corpus cannot be redistributed, which is the reason this one exists.
 
 ## Status

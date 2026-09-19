@@ -1,4 +1,4 @@
-// stegobench documentation site.
+// Stegobench documentation site.
 //
 // Built under the same standing rule as the rest of the house: a project with readers who are
 // not its author ships built documentation. npm lives in this directory and nowhere else;
@@ -14,7 +14,7 @@ const BASE = process.env.DOCS_BASE || '/stegobench/'
 const SITE = process.env.DOCS_SITE || 'https://elementmerc.github.io'
 
 export default {
-  title: 'stegobench',
+  title: 'Stegobench',
   description:
     'A reproducible benchmark for image steganalysis: build a labelled corpus, run '
     + 'detectors over identical bytes, and report numbers somebody else can check.',
@@ -26,7 +26,7 @@ export default {
   // Markdown under docs/ that is not part of the site. `private/` is excluded from the
   // repository already; the pattern stays as a second guard, because this site is public and a
   // build that renders whatever it finds is one careless `mv` away from publishing a note.
-  srcExclude: ['private/**', 'brand/**', 'node_modules/**'],
+  srcExclude: ['design/**', 'private/**', 'brand/**', 'node_modules/**'],
 
   head: [
     ['link', { rel: 'icon', href: `${BASE}favicon.svg`, type: 'image/svg+xml' }],
@@ -34,7 +34,7 @@ export default {
     // match the page reads as a rendering fault rather than a choice.
     ['meta', { name: 'theme-color', content: '#F5F5F7' }],
     ['meta', { property: 'og:type', content: 'website' }],
-    ['meta', { property: 'og:title', content: 'stegobench' }],
+    ['meta', { property: 'og:title', content: 'Stegobench' }],
     ['meta', {
       property: 'og:description',
       content: 'A reproducible benchmark for image steganalysis, and Pentimento, '
@@ -45,11 +45,11 @@ export default {
   ],
 
   themeConfig: {
-    siteTitle: 'stegobench',
+    siteTitle: 'Stegobench',
 
     nav: [
       { text: 'Guide', link: '/guide/what-it-is', activeMatch: '/guide/' },
-      { text: 'Corpus', link: '/pentimento', activeMatch: '/pentimento' },
+      { text: 'Corpus', link: '/guide/corpus' },
       {
         // NOT a version number. Baseline section 16 keeps unreleased versions out of public
         // artefacts, and naming one in the nav of a published site is a promise about something
@@ -69,31 +69,21 @@ export default {
           items: [
             { text: 'What it is', link: '/guide/what-it-is' },
             { text: 'Quickstart', link: '/guide/quickstart' },
-            { text: 'Build a corpus', link: '/guide/build-a-corpus' },
+            { text: 'The corpus', link: '/guide/corpus' },
           ],
         },
         {
-          // The two ideas the harness is built around, and the one that voided a whole round of
-          // measurements here before it was enforced rather than described.
           text: 'The discipline',
           items: [
             { text: 'Pairing, and what breaks it', link: '/guide/pairing' },
             { text: 'Scores, not verdicts', link: '/guide/scores' },
-            { text: 'Tiers, and why they nest', link: '/distribution' },
           ],
         },
         {
-          text: 'The corpus',
+          text: 'Going further',
           items: [
-            { text: 'Pentimento', link: '/pentimento' },
-            { text: 'Where the covers come from', link: '/cover-source-licensing' },
-            { text: 'Read this before quoting a number', link: '/guide/limits' },
-          ],
-        },
-        {
-          text: 'Related work',
-          items: [
-            { text: 'REVEAL, and what this adds', link: '/reveal' },
+            { text: 'Build a corpus', link: '/guide/build-a-corpus' },
+            { text: 'Limitations', link: '/guide/limits' },
           ],
         },
       ],
