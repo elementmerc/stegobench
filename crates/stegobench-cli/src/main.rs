@@ -359,7 +359,35 @@ fn cmd_completions(shell: clap_complete::Shell) -> Output {
     let name = cmd.get_name().to_string();
     let mut buf = Vec::new();
     clap_complete::generate(shell, &mut cmd, name, &mut buf);
-    let script = String::from_utf8(buf).unwrap_or_default();
+    // Not `unwrap_or_default()`: an empty string is a completion script that
+    // silently does nothing, written to a shell's completion directory with an
+    // exit code of zero. A generator that produced bytes we cannot read has to
+    // say so.
+    let script = match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => {
+            return Output::err(
+                exit::FAILURE,
+                format!(
+                    "the {shell} completion generator produced {} bytes that \
+                     are not valid UTF-8, so the script cannot be written. \
+                     This is a bug in stegobench or clap_complete, not in \
+                     your shell; please report it with this message: {e}",
+                    e.as_bytes().len()
+                ),
+            )
+        }
+    };
+    if script.trim().is_empty() {
+        return Output::err(
+            exit::FAILURE,
+            format!(
+                "the {shell} completion generator produced an empty script. \
+                 Writing that to a completion directory would look like it \
+                 worked and complete nothing, so it is refused instead"
+            ),
+        );
+    }
     Output::ok(
         serde_json::json!({ "shell": shell.to_string(), "script": script }),
         script,
@@ -604,6 +632,24 @@ mod tests {
                 !out.human.trim().is_empty(),
                 "{name:?} produced no human text, so a failure would print \
                  nothing to stderr"
+            );
+        }
+    }
+
+    #[test]
+    fn every_shell_gets_a_script_with_the_command_names_in_it() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+            clap_complete::Shell::Elvish,
+        ] {
+            let out = cmd_completions(shell);
+            assert_eq!(out.code, exit::OK, "{shell} completions failed");
+            assert!(
+                out.human.contains("doctor") && out.human.contains("validate"),
+                "{shell} script does not mention the subcommands it completes"
             );
         }
     }
