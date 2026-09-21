@@ -21,6 +21,7 @@ citation = "Kombrink, van Lierop, Stolwijk, Worring, Vrijdag and Geradts, Forens
 [licence]
 status = "verified"
 spdx = "CC-BY-SA-4.0"
+spdx_version_inferred = true
 url = "https://creativecommons.org/licenses/by-sa/4.0/legalcode"
 verified_on = "2026-09-16"
 source = "the dataset's own terms in the DANS deposit 10.17026/PT/DITX0A, read on that date"

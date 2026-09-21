@@ -16,6 +16,7 @@ accepting its rules rather than by a plain download.\
 [licence]
 status = "verified"
 spdx = "CC-BY-NC-ND-4.0"
+spdx_version_inferred = true
 url = "https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode"
 verified_on = "2026-09-15"
 source = "the ALASKA organisers' own terms page, read for the cover source licensing survey"

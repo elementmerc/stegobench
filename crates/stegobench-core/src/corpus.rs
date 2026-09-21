@@ -132,6 +132,22 @@ pub struct Licence {
     pub attribution_required: bool,
     #[serde(default)]
     pub share_alike: bool,
+    /// The SPDX id names a VERSION the source did not state.
+    ///
+    /// REVEAL is the case this exists for. The DANS deposit's own sentence says
+    /// "CC-BY-SA" with no version number, and the `4.0` in its entry comes from
+    /// the paper and from this project's licence survey. Every CC BY-SA version
+    /// carries the same obligations, so the version decides which licence text
+    /// a republication must NAME rather than whether one is allowed, and
+    /// downgrading the whole claim to `unverified` over a digit would overstate
+    /// the doubt as badly as hiding it would understate it.
+    ///
+    /// What is not acceptable is a field asserting more than its own `source`
+    /// supports with nothing but a paragraph to say so. A prose note is invisible
+    /// to anything reading the field, and this corpus argues that licence claims
+    /// should be checkable by machine rather than by careful reading.
+    #[serde(default)]
+    pub spdx_version_inferred: bool,
     /// Anything a reader needs in order to trust or distrust the fields above.
     #[serde(default)]
     pub note: Option<String>,
@@ -247,6 +263,32 @@ impl CorpusEntry {
 
     fn validate_licence(&self, bad: &mut Vec<String>) {
         let l = &self.licence;
+
+        // The flag is a statement about the spdx field, so it cannot outlive
+        // it. Set with no identifier to qualify, it reads as doubt about
+        // nothing; set on an unverified entry it is redundant, because such an
+        // entry may not name a licence at all.
+        if l.spdx_version_inferred {
+            if l.status != LicenceStatus::Verified {
+                bad.push(
+                    "licence.spdx_version_inferred is set but the status is                      not verified. An unverified entry names no licence, so                      there is no version to be inferred"
+                        .into(),
+                );
+            }
+            if l.spdx.as_ref().is_none_or(|s| s.trim().is_empty()) {
+                bad.push(
+                    "licence.spdx_version_inferred is set but no spdx                      identifier is given; the flag qualifies that field and                      means nothing without it"
+                        .into(),
+                );
+            }
+            if l.note.as_ref().is_none_or(|s| s.trim().is_empty()) {
+                bad.push(
+                    "licence.spdx_version_inferred is set but licence.note                      does not say where the version came from. The flag tells                      a machine the source did not state it; the note is what                      tells a person what to re-check"
+                        .into(),
+                );
+            }
+        }
+
         match l.status {
             LicenceStatus::Verified => {
                 if l.spdx.as_ref().is_none_or(|s| s.trim().is_empty()) {
@@ -443,12 +485,23 @@ impl CorpusEntry {
     /// A one-line summary for `stegobench list corpora`, in the same shape as
     /// [`crate::registry::Entry::summary`].
     pub fn summary(&self) -> String {
+        // A trailing `?` on the version, because the listing is where people
+        // actually look and a qualification only `describe` shows is one most
+        // readers never see. It marks the VERSION as inferred, not the licence
+        // as doubtful: the obligations are the same across versions.
         let licence = match self.licence.status {
-            LicenceStatus::Verified => self
-                .licence
-                .spdx
-                .clone()
-                .unwrap_or_else(|| "verified".into()),
+            LicenceStatus::Verified => {
+                let named = self
+                    .licence
+                    .spdx
+                    .clone()
+                    .unwrap_or_else(|| "verified".into());
+                if self.licence.spdx_version_inferred {
+                    format!("{named}?")
+                } else {
+                    named
+                }
+            }
             LicenceStatus::Unverified => "UNVERIFIED".into(),
             LicenceStatus::NoneGranted => "NO LICENCE".into(),
         };
@@ -981,5 +1034,110 @@ base_images = 100
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/a.toml"), toml_for("")).unwrap();
         assert_eq!(load_dir(dir.path()).unwrap().len(), 1);
+    }
+
+    // ── The version-inferred flag ──────────────────────────────────────────
+    //
+    // REVEAL is why this exists. The DANS deposit says "CC-BY-SA" with no
+    // version, so the `4.0` is inferred from the paper. Recording that only in
+    // a prose note leaves the spdx field asserting more than its own `source`
+    // supports, which is the mislabelled-mirror shape this schema exists to
+    // refuse, and a note is invisible to anything reading the field.
+
+    fn licensed(block: &str) -> CorpusEntry {
+        let base = toml_for("");
+        let start = base.find("[licence]").expect("has a licence block");
+        let end = base.find("[obtain]").expect("has an obtain block");
+        let replaced = format!("{}{}\n\n{}", &base[..start], block, &base[end..]);
+        toml::from_str(&replaced).expect("parses")
+    }
+
+    const VERIFIED_INFERRED: &str = r#"[licence]
+status = "verified"
+spdx = "CC-BY-SA-4.0"
+spdx_version_inferred = true
+url = "https://creativecommons.org/licenses/by-sa/4.0/legalcode"
+verified_on = "2026-09-21"
+source = "the deposit's own terms, which name no version"
+redistribution = "permitted"
+redistribution_reason = "Share-alike permits redistribution of derivatives."
+note = "The deposit names CC-BY-SA with no version; 4.0 comes from the paper."
+"#;
+
+    #[test]
+    fn an_inferred_version_is_accepted_when_it_is_declared_and_explained() {
+        licensed(VERIFIED_INFERRED).validate().expect("valid");
+    }
+
+    #[test]
+    fn an_inferred_version_with_no_note_is_refused() {
+        // The flag tells a machine the source did not state the version. The
+        // note is what tells a person what to go and re-read.
+        let without = VERIFIED_INFERRED
+            .lines()
+            .filter(|l| !l.starts_with("note = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let found = problems(&licensed(&without));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("does not say where the version")),
+            "got {found:?}"
+        );
+    }
+
+    #[test]
+    fn the_flag_cannot_outlive_the_field_it_qualifies() {
+        // Set with no spdx id, it expresses doubt about nothing.
+        let block = r#"[licence]
+status = "verified"
+spdx_version_inferred = true
+url = "https://creativecommons.org/licenses/by/4.0/legalcode"
+verified_on = "2026-09-21"
+source = "somewhere"
+redistribution = "permitted"
+redistribution_reason = "because"
+note = "explained"
+"#;
+        let found = problems(&licensed(block));
+        assert!(
+            found.iter().any(|m| m.contains("means nothing without it")),
+            "got {found:?}"
+        );
+    }
+
+    #[test]
+    fn the_flag_on_an_unverified_entry_is_refused() {
+        // An unverified entry may not name a licence at all, so there is no
+        // version for the flag to be about.
+        let block = r#"[licence]
+status = "unverified"
+spdx_version_inferred = true
+redistribution = "unknown"
+redistribution_reason = "nobody has read the terms"
+note = "the terms page is gone"
+"#;
+        let found = problems(&licensed(block));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("there is no version to be inferred")),
+            "got {found:?}"
+        );
+    }
+
+    #[test]
+    fn the_listing_marks_an_inferred_version_where_people_look() {
+        // `describe` showing it is not enough: most readers only ever see the
+        // one-line listing.
+        assert!(licensed(VERIFIED_INFERRED)
+            .summary()
+            .contains("CC-BY-SA-4.0?"));
+    }
+
+    #[test]
+    fn a_stated_version_is_not_marked() {
+        assert!(!parse("").summary().contains('?'));
     }
 }
