@@ -3,6 +3,23 @@
 # Copyright (C) 2026 Daniel Iwugo
 """Push a packed tier to the archives, slowly, resumably, and not by accident.
 
+THIS FILE IS DELIBERATELY STANDALONE. DO NOT FOLD IT INTO A PACKAGE.
+--------------------------------------------------------------------
+`upload-in-container.sh` bind-mounts THIS ONE FILE into the upload container:
+
+    -v "$REPO/tools/release/upload_tier.py:/upload_tier.py:ro"
+
+That container holds write tokens for four public archives, runs unattended for
+six hours, and is given `--cap-drop=ALL` and a read-only root so that a
+credential leak has as little to reach as possible. Nothing else is mounted, so
+this module may not import from `generators/`: the import would simply fail
+inside the container. Mounting the whole package instead would widen what a
+credential-holding process can read, which is the one property that container
+exists to preserve.
+
+So it keeps its own copy of anything it needs, and that duplication is the
+price of the isolation rather than an oversight.
+
 DRY RUN IS THE DEFAULT AND STAYS THE DEFAULT
 ---------------------------------------------
 Uploading 45 GB to four public archives is not reversible in any useful sense.

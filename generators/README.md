@@ -123,6 +123,35 @@ because a measurement was once wrong in exactly the way it detects.
 | `verify_release.py` | CLI | Every invariant this corpus must satisfy before it is published, in one run |
 | `make_fixtures.py` | CLI | Build the self-test fixtures: one image that is clean, one that is not |
 
+## Two pieces of the corpus pipeline that are deliberately NOT here
+
+They look like strays. They are not, and consolidating them would break the
+release.
+
+**`../tools/release/upload_tier.py`** is the last step of the chain and lives
+outside the package on purpose. `upload-in-container.sh` bind-mounts **that one
+file** into a container that holds write tokens for four public archives and
+runs unattended for six hours with `--cap-drop=ALL` and a read-only root:
+
+    -v "$REPO/tools/release/upload_tier.py:/upload_tier.py:ro"
+
+So it has to be a standalone module with no package imports, because nothing
+else is mounted for it to import. Moving it into `generators/` would break the
+upload outright, and mounting the whole package instead would widen what a
+credential-holding container can read, which is the one thing that container
+exists to keep small. It is separate because the blast radius is small, and
+that is worth more than tidiness.
+
+**`../tools/ci/tier_smoke.py`** runs on three operating systems in CI, because
+the corpus is built on Linux and the paper says anyone can rebuild it. Docker
+cannot check that: a Linux host cannot run Windows or macOS containers, so the
+only honest test is a runner of each kind. It belongs with CI, not with the
+builders.
+
+Both are reachable from the release chain and neither is orphaned. If a future
+tidying pass wants to fold them in, read this section first and then read
+`upload-in-container.sh`.
+
 ## The order things run in, and why it is not the order you would guess
 
     fetch_commons ─▶ dedup ─▶ cover_quality ─▶ manifest_repair
