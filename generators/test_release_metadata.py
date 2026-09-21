@@ -128,6 +128,89 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(parsed[1][3], "Smith, John")
 
 
+class CroissantTests(unittest.TestCase):
+    """The record Kaggle and HuggingFace index.
+
+    The first version of this file shipped an abbreviated `@context`, which
+    looks harmless and is not: the reference validator resolves every Croissant
+    term through that map, so the record failed to expand and was rejected
+    before a single field in it was read. Nothing in our own test suite noticed,
+    because nothing here had ever run the validator.
+    """
+
+    COVER_INDEX = {
+        "tier": "Core", "samples": 10000,
+        "shards": [{"shard": "pentimento-core-00000.tar", "samples": 1000,
+                    "bytes": 1, "sha256": "a" * 64}],
+    }
+    LICENCES = {"total": 10000, "licences": {"CC0": 2597},
+                "attribution_required": 5429, "attribution_required_pct": 54.3}
+    ARMS = {"arms": [
+        {"arm": "wow-0200", "samples": 10000,
+         "shards": [{"shard": "w", "samples": 500, "bytes": 1, "sha256": "b" * 64}]},
+        {"arm": "clean-grey", "samples": 10000,
+         "shards": [{"shard": "c", "samples": 500, "bytes": 1, "sha256": "d" * 64}]},
+    ]}
+
+    def record(self, tier: str = "Core", samples: int = 10000) -> dict:
+        index = dict(self.COVER_INDEX, tier=tier, samples=samples)
+        return release_metadata.croissant(
+            index, self.LICENCES, self.ARMS, "1.0.0", "2026-09-21")
+
+    def test_the_context_carries_the_whole_croissant_vocabulary(self):
+        context = self.record()["@context"]
+        # Every term the spec resolves through the context. A record missing
+        # any of these silently fails to expand.
+        for term in ("recordSet", "field", "source", "extract", "fileSet",
+                     "fileObject", "dataType", "references", "transform",
+                     "includes", "regex", "fileProperty", "jsonPath",
+                     "equivalentProperty", "@language", "dct", "rai"):
+            self.assertIn(term, context, f"context is missing {term}")
+
+    def test_the_cover_glob_does_not_also_match_the_arm_shards(self):
+        """`pentimento-core-*.tar` matches `pentimento-core-wow-0200-00000.tar`.
+
+        Left that way, the cover file set swallows all 769 arm shards and a
+        loader reading "covers" gets stego images labelled as clean.
+        """
+        sets = {d["@id"]: d for d in self.record()["distribution"]}
+        covers = sets["cover-shards"]["includes"]
+        self.assertNotIn("*-*", covers)
+        import fnmatch
+        self.assertTrue(fnmatch.fnmatch("pentimento-core-00000.tar", covers))
+        self.assertFalse(
+            fnmatch.fnmatch("pentimento-core-wow-0200-00000.tar", covers),
+            "the cover glob still matches an arm shard")
+
+    def test_every_file_set_is_contained_in_something(self):
+        for d in self.record()["distribution"]:
+            if d["@type"] == "cr:FileSet":
+                self.assertIn("containedIn", d, f"{d['@id']} floats free")
+
+    def test_the_tier_reaches_the_urls_and_the_name(self):
+        record = self.record("Nano", 200)
+        self.assertEqual(record["name"], "pentimento-nano")
+        self.assertIn("pentimento-nano-v1", record["url"])
+        sets = {d["@id"]: d for d in record["distribution"]}
+        self.assertIn("pentimento-nano-", sets["cover-shards"]["includes"])
+
+    def test_it_validates_against_the_reference_implementation(self):
+        """The assertion that would have caught the original defect.
+
+        Skipped rather than vendored when mlcroissant is absent, because the
+        validator pulls a large dependency tree and this suite runs on three
+        operating systems in CI.
+        """
+        try:
+            import mlcroissant
+        except ImportError:
+            self.skipTest("mlcroissant is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "croissant.json"
+            path.write_text(json.dumps(self.record(), indent=2))
+            mlcroissant.Dataset(jsonld=str(path))
+
+
 class LoaderTests(unittest.TestCase):
     """The loader ships to strangers, so it is executed here rather than read."""
 

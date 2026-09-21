@@ -221,47 +221,191 @@ authors:
 """
 
 
+#: The official Croissant 1.0 context, verbatim. An abbreviated one looks
+#: harmless and is not: the reference validator resolves `recordSet`, `field`,
+#: `source` and the rest THROUGH this map, so a record carrying a shortened
+#: context fails to expand and is rejected before anything in it is read.
+CROISSANT_CONTEXT = {
+    "@language": "en",
+    "@vocab": "https://schema.org/",
+    "citeAs": "cr:citeAs",
+    "column": "cr:column",
+    "conformsTo": "dct:conformsTo",
+    "cr": "http://mlcommons.org/croissant/",
+    "rai": "http://mlcommons.org/croissant/RAI/",
+    "data": {"@id": "cr:data", "@type": "@json"},
+    "dataType": {"@id": "cr:dataType", "@type": "@vocab"},
+    "dct": "http://purl.org/dc/terms/",
+    "equivalentProperty": "cr:equivalentProperty",
+    "examples": {"@id": "cr:examples", "@type": "@json"},
+    "extract": "cr:extract",
+    "field": "cr:field",
+    "fileProperty": "cr:fileProperty",
+    "fileObject": "cr:fileObject",
+    "fileSet": "cr:fileSet",
+    "format": "cr:format",
+    "includes": "cr:includes",
+    "isLiveDataset": "cr:isLiveDataset",
+    "jsonPath": "cr:jsonPath",
+    "key": "cr:key",
+    "md5": "cr:md5",
+    "parentField": "cr:parentField",
+    "path": "cr:path",
+    "recordSet": "cr:recordSet",
+    "references": "cr:references",
+    "regex": "cr:regex",
+    "repeated": "cr:repeated",
+    "replace": "cr:replace",
+    "samplingRate": "cr:samplingRate",
+    "sc": "https://schema.org/",
+    "separator": "cr:separator",
+    "source": "cr:source",
+    "subField": "cr:subField",
+    "transform": "cr:transform",
+}
+
+#: Where the canonical copy lives. The Archive is the one host that needs no
+#: account and makes no promise it can later withdraw.
+ARCHIVE_ITEM = "https://archive.org/download/pentimento-{slug}-v1"
+
+
 def croissant(cover_index: dict, licences: dict, arms: dict | None,
               version: str, today: str) -> dict:
-    """ML Commons Croissant, which is what Kaggle and HuggingFace actually index."""
-    distribution = [{
-        "@type": "cr:FileSet",
-        "@id": "covers",
-        "name": "covers",
-        "description": f"{cover_index.get('samples', 0)} cover images as WebDataset shards.",
-        "encodingFormat": "application/x-tar",
-        "includes": "pentimento-core-*.tar",
-    }]
+    """ML Commons Croissant, which is what Kaggle and HuggingFace actually index.
+
+    The shape matters as much as the content. A `cr:FileSet` has to be
+    contained in something, and a record set has to say which fields it has and
+    where each one is extracted from, or a reader can discover that the dataset
+    exists and still not be able to load a single sample from it.
+    """
+    tier = cover_index.get("tier", "Core")
+    slug = tier.lower()
+    stego_total, stego_count, clean_total, clean_count = split_arms(arms)
+
+    distribution = [
+        {
+            "@type": "cr:FileObject",
+            "@id": "archive",
+            "name": "archive",
+            "description": "The Internet Archive item holding every shard.",
+            "contentUrl": ARCHIVE_ITEM.format(slug=slug),
+            "encodingFormat": "text/html",
+            "sha256": "https://github.com/mlcommons/croissant/issues/80",
+        },
+        {
+            "@type": "cr:FileSet",
+            "@id": "cover-shards",
+            "name": "cover-shards",
+            "description": f"{cover_index.get('samples', 0):,} cover images as "
+                           "WebDataset tar shards.",
+            "containedIn": {"@id": "archive"},
+            "encodingFormat": "application/x-tar",
+            # Anchored on the digits, so this does NOT also swallow the arm
+            # shards, whose names carry a tool and a rate between the tier and
+            # the shard number.
+            "includes": f"pentimento-{slug}-[0-9][0-9][0-9][0-9][0-9].tar",
+        },
+        {
+            "@type": "cr:FileSet",
+            "@id": "cover-images",
+            "name": "cover-images",
+            "description": "The cover images inside the shards.",
+            "containedIn": {"@id": "cover-shards"},
+            "encodingFormat": "image/png",
+            "includes": "*.png",
+        },
+        {
+            "@type": "cr:FileSet",
+            "@id": "cover-records",
+            "name": "cover-records",
+            "description": "One record per cover, carrying its licence and provenance.",
+            "containedIn": {"@id": "cover-shards"},
+            "encodingFormat": "application/json",
+            "includes": "*.json",
+        },
+    ]
     if arms:
         distribution.append({
             "@type": "cr:FileSet",
-            "@id": "arms",
-            "name": "arms",
-            "description": (f"{split_arms(arms)[0]} stego images across "
-                            f"{split_arms(arms)[1]} labelled arms, plus "
-                            f"{split_arms(arms)[2]} clean halves in "
-                            f"{split_arms(arms)[3]} more."),
+            "@id": "arm-shards",
+            "name": "arm-shards",
+            "description": (f"{stego_total:,} stego images across {stego_count} "
+                            f"labelled arms, plus {clean_total:,} clean halves "
+                            f"in {clean_count} more."),
+            "containedIn": {"@id": "archive"},
             "encodingFormat": "application/x-tar",
-            "includes": "pentimento-core-*-*.tar",
+            "includes": f"pentimento-{slug}-*-[0-9][0-9][0-9][0-9][0-9].tar",
         })
+
+    # The image and its record are two files that share a basename, so a reader
+    # assembling a sample has to join them. Croissant will not infer that: a
+    # record set drawing on two file sets without a declared join is rejected
+    # by the reference validator, which is how the previous record went out
+    # unreadable. The key is the basename, and every field taken from the JSON
+    # side references it.
+    KEY = {
+        "fileSet": {"@id": "cover-images"},
+        "extract": {"fileProperty": "filename"},
+        "transform": {"regex": "^(.*)\\.png$"},
+    }
+
+    def field(fid: str, name: str, description: str, data_type: str,
+              file_set: str, extract: dict) -> dict:
+        spec = {
+            "@type": "cr:Field",
+            "@id": fid,
+            "name": name,
+            "description": description,
+            "dataType": data_type,
+            "source": {"fileSet": {"@id": file_set}, "extract": extract},
+        }
+        if file_set != "cover-images":
+            spec["references"] = dict(KEY)
+        return spec
+
+    record_sets = [{
+        "@type": "cr:RecordSet",
+        "@id": "covers",
+        "name": "covers",
+        "description": "One record per cover photograph.",
+        "field": [
+            dict(field("covers/key", "key",
+                       "The sample key, which is the cover's position in tier "
+                       "order. It is what joins a cover to its stego versions.",
+                       "sc:Text", "cover-images", {"fileProperty": "filename"}),
+                 source=dict(KEY)),
+            field("covers/image", "image", "The cover image itself.",
+                  "sc:ImageObject", "cover-images", {"fileProperty": "content"}),
+            field("covers/licence", "licence",
+                  "The licence this specific image carries. Authoritative.",
+                  "sc:Text", "cover-records", {"jsonPath": "$.licence"}),
+            field("covers/attribution", "attribution",
+                  "A ready-made credit line, where the licence requires one.",
+                  "sc:Text", "cover-records", {"jsonPath": "$.attribution"}),
+            field("covers/source_url", "source_url",
+                  "Where the original came from on Wikimedia Commons.",
+                  "sc:URL", "cover-records", {"jsonPath": "$.descriptionurl"}),
+        ],
+    }]
+
     return {
-        "@context": {
-            "@vocab": "https://schema.org/",
-            "cr": "http://mlcommons.org/croissant/",
-            "sc": "https://schema.org/",
-        },
+        "@context": CROISSANT_CONTEXT,
         "@type": "sc:Dataset",
         "conformsTo": "http://mlcommons.org/croissant/1.0",
-        "name": "pentimento-core",
+        "name": f"pentimento-{slug}",
         "version": version,
         "datePublished": today,
         "description": NOT_COMPARABLE + " A steganalysis corpus with per-file "
                        "licensing and per-file checksums.",
         "license": "https://creativecommons.org/licenses/by/4.0/",
+        "url": ARCHIVE_ITEM.format(slug=slug),
         "creator": {"@type": "Person", "name": "Daniel Iwugo"},
+        "citeAs": (f"Iwugo, D. ({today[:4]}). Pentimento {tier}: a "
+                   f"licence-traceable steganalysis corpus ({version})."),
         "keywords": ["steganalysis", "steganography", "image forensics",
                      "dataset", "cover source mismatch"],
         "distribution": distribution,
+        "recordSet": record_sets,
     }
 
 
