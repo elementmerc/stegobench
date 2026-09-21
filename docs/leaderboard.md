@@ -109,9 +109,9 @@ multi-party table on day one, once it exists; it does not exist yet.
 
 No corpus registry entries beyond what `plugins/registry/` already carries
 for tool discovery, no submission mechanism, no site, and no result has ever
-been submitted by anyone outside this project. `09-leaderboard.md` in
-`Stegcore/private/plans/constellation/` is the fuller planning document this
-page summarises into something publishable; that file also carries the
-hosting plan (a static site over a directory of submitted `result-v1` files,
-reviewed by pull request) which is not repeated here because it is
-implementation detail rather than a rule a submitter needs to know.
+been submitted by anyone outside this project.
+
+The hosting plan behind this page is a static site over a directory of
+submitted `result-v1` files, reviewed by pull request. It's left out of the
+rules above because it's implementation detail rather than something a
+submitter needs to know.

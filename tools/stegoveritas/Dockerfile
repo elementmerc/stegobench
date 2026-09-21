@@ -1,4 +1,4 @@
-# stegoVeritas (bannsec) — multi-technique image steganalysis (detector).
+# stegoVeritas (bannsec): multi-technique image steganalysis (detector).
 # Pulls in exiftool, steghide, foremost etc. via its dep installer.
 # Base pinned by digest on 2026-09-21. A tag moves; a digest does not,
 # and a corpus whose tools were built from "whatever stable-slim meant

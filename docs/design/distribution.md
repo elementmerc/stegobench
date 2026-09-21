@@ -84,7 +84,7 @@ simply will not.
 
 A larger tier than Core is not built and is deliberately not sized here: a
 projected figure next to three measured ones invites a reader to treat it as
-equally real. See `private/plans/roadmap.md` for what comes after Core.
+equally real.
 
 ### The requirement that makes tiers safe
 
