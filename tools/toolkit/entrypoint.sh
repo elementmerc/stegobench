@@ -1,0 +1,48 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# Dispatches to one of the bundled tools by name, and on an interactive or
+# argument-less invocation prints the freshness banner the constellation plan
+# (06-docker-image.md section 5) asks for: what was built, when, and from
+# which commit, because the complaint about the predecessor this image
+# replaces is that you cannot tell whether it is alive without trying it.
+set -eu
+
+TOOLS="steghide outguess openstego stegosuite zsteg stegexpose hstego"
+
+banner() {
+    echo "stegobench toolkit  ·  built ${STEGOBENCH_BUILD_DATE:-unknown}  ·  ${STEGOBENCH_VCS_REF:-unknown}  ·  7 tools" >&2
+    echo >&2
+    echo "  steghide, outguess, openstego, stegosuite, zsteg, stegexpose, hstego" >&2
+    echo "  each runs as: docker run stegobench/toolkit <tool> [args...]" >&2
+    echo "  stegobench doctor    would check everything still works (not yet wired here)" >&2
+}
+
+if [ "$#" -eq 0 ]; then
+    banner
+    exit 0
+fi
+
+tool="$1"
+shift
+
+case "$tool" in
+    steghide|outguess|openstego|stegosuite|zsteg)
+        exec "$tool" "$@"
+        ;;
+    stegexpose)
+        exec java -jar /opt/stegexpose/StegExpose.jar "$@"
+        ;;
+    hstego)
+        exec /opt/hstego-venv/bin/hstego.py "$@"
+        ;;
+    --help|-h|help)
+        banner
+        exit 0
+        ;;
+    *)
+        echo "unknown tool '$tool'. Known: $TOOLS" >&2
+        exit 2
+        ;;
+esac
