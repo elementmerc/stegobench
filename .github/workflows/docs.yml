@@ -1,26 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Daniel Iwugo
 #
-# Publish both documentation sites to GitHub Pages.
+# Publish the Stegobench documentation site to GitHub Pages.
 #
-# TWO SITES, ONE PAGES DEPLOYMENT
+# THIS USED TO PUBLISH TWO SITES
 #
 # Stegobench is a harness people run. Pentimento is a corpus people download.
-# They have different readers and they are documented separately, which is the
-# point of the split.
+# While they shared a repository, GitHub Pages could serve only one site, so
+# both were built into one deployment with the corpus nested under
+# `/pentimento/`. The corpus now has its own repository and publishes itself,
+# which is what the header here always said would happen.
 #
-# GitHub Pages serves one site per repository, so until Pentimento has a
-# repository of its own the two are published into one deployment: Stegobench
-# at the root and Pentimento under `/pentimento/`. That is the honest
-# arrangement rather than the ideal one, and the cost is that Pentimento's URL
-# currently sits inside Stegobench's.
-#
-# WHEN PENTIMENTO GETS ITS OWN REPOSITORY
-#
-# The whole `pentimento/` directory moves across unchanged, its `base` goes
-# back to `/pentimento/` for the new host, and the second half of the build
-# job below is deleted. Nothing else needs to move, which is why its docs and
-# its config live in one self-contained folder.
+# The cost that arrangement carried was that a citation pointed at a URL inside
+# a benchmark tool. That is the thing the split fixes.
 #
 # WHY THIS DOES NOT RUN ON A PUSH YET
 #
@@ -30,9 +22,8 @@
 # only fail, and a red check that everybody learns to ignore costs more than it
 # reports.
 #
-# It is therefore manual for now. Both sites are still built and link-checked
-# by the `docs` job in ci.yml on every push, so a broken link fails
-# immediately.
+# It is therefore manual for now. The site is still built and link-checked by
+# the `docs` job in ci.yml on every push, so a broken link fails immediately.
 #
 # WHEN THE REPOSITORY GOES PUBLIC, two lines:
 #   1. enable Pages with Actions as the source
@@ -54,7 +45,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build both sites
+    name: Build the site
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -76,23 +67,6 @@ jobs:
       - name: Build Stegobench's site
         working-directory: docs
         run: npm run build
-
-      - name: Install Pentimento's site, from the lockfile only
-        working-directory: pentimento/docs
-        run: npm ci
-      - name: Build Pentimento's site
-        working-directory: pentimento/docs
-        # Nested under Stegobench's base for as long as they share a
-        # repository. The site is otherwise unchanged by living here.
-        env:
-          DOCS_BASE: /stegobench/pentimento/
-        run: npm run build
-
-      - name: Put the corpus site inside the harness site
-        run: |
-          set -euo pipefail
-          mkdir -p docs/.vitepress/dist/pentimento
-          cp -r pentimento/docs/.vitepress/dist/. docs/.vitepress/dist/pentimento/
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
@@ -118,15 +92,14 @@ jobs:
       # guarding against: a site can be built and link-checked on every push
       # for the life of a project while its published README links return 404,
       # because nothing ever fetches the published site. This does.
-      - name: Both sites' entry points resolve once published
+      - name: The site's entry points resolve once published
         run: |
           set -uo pipefail
           base="${{ steps.deployment.outputs.page_url }}"
           base="${base%/}"
           rc=0
           for path in "" "/guide/what-it-is" "/guide/quickstart" \
-                      "/pentimento/" "/pentimento/guide/get-it" \
-                      "/pentimento/guide/licence"; do
+                      "/guide/build-a-corpus" "/guide/pairing" "/guide/limits"; do
             url="$base$path"
             code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 5 "$url" || echo 000)"
             if [ "$code" = "200" ]; then
