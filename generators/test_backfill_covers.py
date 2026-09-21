@@ -196,3 +196,38 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecondRunTests(unittest.TestCase):
+    """A backfill run must not spend a candidate the corpus already holds."""
+
+    def test_a_candidate_already_in_the_corpus_is_not_chosen_again(self):
+        """The defect this guards.
+
+        The pool is read in order and nothing in it records having been spent,
+        so a second run picks the same candidates as the first. The corpus
+        would then carry one photograph at two tier positions under two
+        filenames with two digests, and every downstream check would pass. It
+        would surface as a cover and its supposedly unrelated counterpart
+        landing on opposite sides of a train/test split.
+        """
+        pool = [candidate(n) for n in range(5)]
+        for n, c in enumerate(pool):
+            c["pageid"] = 9000 + n
+        picks = choose(pool, set(), 2, already_used={9000, 9001})
+        self.assertEqual([p["pageid"] for p in picks], [9002, 9003])
+
+    def test_exhausting_the_pool_is_refused_rather_than_reusing(self):
+        pool = [candidate(n) for n in range(3)]
+        for n, c in enumerate(pool):
+            c["pageid"] = 9000 + n
+        with self.assertRaises(BackfillError) as cm:
+            choose(pool, set(), 2, already_used={9000, 9001})
+        self.assertIn("publishable and unused", str(cm.exception))
+
+    def test_a_candidate_with_no_pageid_is_still_available(self):
+        # Absence is not a match. A pool row missing the field must not be
+        # excluded by a set that cannot contain it.
+        pool = [candidate(0)]
+        pool[0].pop("pageid", None)
+        self.assertEqual(len(choose(pool, set(), 1, already_used={9000})), 1)

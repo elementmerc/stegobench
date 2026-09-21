@@ -77,15 +77,28 @@ def digest_of(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def choose(candidates: list[dict], unusable: set[str], wanted: int) -> list[dict]:
-    """The first `wanted` candidates that are not themselves unpublishable."""
-    clean = [c for c in candidates if c["file"] not in unusable]
+def choose(candidates: list[dict], unusable: set[str], wanted: int,
+           already_used: set[int] | None = None) -> list[dict]:
+    """The first `wanted` candidates that are publishable and not already in.
+
+    `already_used` is the set of Commons pageids the live corpus holds. Without
+    it a second backfill run picks the same candidates as the first, because
+    the pool is read in order and nothing in it records having been spent. The
+    corpus would then carry the same photograph at two tier positions, with two
+    different filenames and two different digests, and every check downstream
+    would pass: the files exist, the digests match, the licences join. It would
+    surface as a cover and its "unrelated" counterpart landing on opposite
+    sides of a train/test split.
+    """
+    used = already_used or set()
+    clean = [c for c in candidates
+             if c["file"] not in unusable and c.get("pageid") not in used]
     if len(clean) < wanted:
         raise BackfillError(
             f"{wanted} replacements needed and only {len(clean)} of "
-            f"{len(candidates)} candidates are publishable. Fetch more rather "
-            f"than lowering the standard: the covers being replaced failed "
-            f"this same test.")
+            f"{len(candidates)} candidates are publishable and unused. Fetch "
+            f"more rather than lowering the standard: the covers being "
+            f"replaced failed this same test.")
     return clean[:wanted]
 
 
@@ -161,8 +174,9 @@ def main(argv: list[str] | None = None) -> int:
     for reason, count in sorted(by_reason.items()):
         print(f"  {reason:16} {count:>4}")
 
+    in_corpus = {r.get("pageid") for r in rows if r.get("pageid") is not None}
     try:
-        chosen = choose(candidates, unusable, len(targets))
+        chosen = choose(candidates, unusable, len(targets), in_corpus)
     except BackfillError as e:
         print(f"\n{e}", file=sys.stderr)
         return 1
