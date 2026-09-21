@@ -38,4 +38,4 @@ features:
 | Know what it does not do | [Limitations](/guide/limits) |
 
 Looking for the corpus rather than the harness? That is
-[Pentimento](/pentimento/), documented separately.
+[Pentimento](https://github.com/elementmerc/pentimento), documented separately.

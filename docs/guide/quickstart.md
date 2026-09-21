@@ -48,7 +48,7 @@ scores against whatever answers on it.
 ## Or skip the building
 
 A corpus built with this harness is already published, with its own
-documentation: see [Pentimento](/pentimento/).
+documentation: see [Pentimento](https://github.com/elementmerc/pentimento).
 
 ## Before you quote a number
 

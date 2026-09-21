@@ -119,12 +119,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two sites, because there are two things with two sets of readers:
-          # a harness people run, and a corpus people download.
+          # One site. The corpus that used to be documented here has its own
+          # repository now, and builds its own docs there.
           - name: Stegobench
             path: docs
-          - name: Pentimento
-            path: pentimento/docs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v5.0.0
@@ -136,8 +134,6 @@ jobs:
         working-directory: ${{ matrix.path }}
         run: npm ci
       - name: Build, which fails on a dead link
-        # Pentimento sets no `ignoreDeadLinks` at all. Stegobench excepts only
-        # `/pentimento/`, the sibling site this build cannot see, so a link from
-        # one page of a site to another cannot break without failing here.
+        # `ignoreDeadLinks` is unset, so any broken internal link fails here.
         working-directory: ${{ matrix.path }}
         run: npm run build

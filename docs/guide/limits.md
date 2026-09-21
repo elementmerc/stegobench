@@ -41,5 +41,5 @@ appears as a verdict rate and is not comparable with an AUC. See
 
 There is no submission process and no leaderboard. The output is a table you
 can rebuild, and the corpus it was measured on is
-[published separately](/pentimento/) so somebody
+[published separately](https://github.com/elementmerc/pentimento) so somebody
 else can rebuild it too.

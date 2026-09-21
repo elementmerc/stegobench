@@ -35,4 +35,4 @@ It is not a leaderboard. There is no submission process and no ranking; the
 output is a table you can rebuild.
 
 It is not the corpus. A corpus built with it is published separately, with its
-own documentation: [Pentimento](/pentimento/).
+own documentation: [Pentimento](https://github.com/elementmerc/pentimento).
