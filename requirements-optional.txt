@@ -22,6 +22,22 @@ matplotlib==3.11.0
 # tests skip when it is absent.
 lir==1.8.0
 
+# The reference validator for the Croissant record, which is the file that
+# decides whether a dataset loads for Hugging Face, Kaggle and the ML Commons
+# tooling. `generators/validate_croissant.py` runs a structural check without
+# it and defers to it when present.
+#
+# It belongs here rather than in `requirements.txt` because nothing in the
+# build needs it, and it belongs here rather than nowhere because it was
+# nowhere: the record was validated once, by hand, on a machine where the
+# package no longer exists. A check that cannot be re-run is not a check.
+#
+# UNPINNED ON PURPOSE, and it must not stay that way. Baseline Section 5 wants
+# an exact pin, and writing a version here that nobody has installed would be a
+# guess dressed as a pin. Whoever installs it first records the resolved
+# version here, after the 7 day cooldown.
+mlcroissant
+
 # The Hansken extraction plugin SDK, used only by `integrations/hansken/`.
 hansken-extraction-plugin==0.10.0
 logbook==1.8.2

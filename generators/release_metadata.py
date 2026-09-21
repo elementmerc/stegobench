@@ -775,9 +775,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     cover_index_path = found[0]
     licences_path = rel / "licence-summary.json"
+    # Each missing file names the tool that WRITES it. The two come from
+    # different tools, and a message that names the wrong one sends the reader
+    # round the same loop: re-running pack_tier.py never produces the licence
+    # summary, so the error repeats and looks like a bug in the packer.
+    produced_by = {
+        cover_index_path.name: "pack_tier.py",
+        licences_path.name: "publish_tier.py prepare",
+    }
     for p in (cover_index_path, licences_path):
         if not p.exists():
-            print(f"missing {p.name}; run pack_tier.py first", file=sys.stderr)
+            print(f"missing {p.name}; run {produced_by[p.name]} first",
+                  file=sys.stderr)
             return 1
 
     cover_index = load(cover_index_path)
