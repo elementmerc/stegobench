@@ -102,6 +102,57 @@ def append_after_eoi(source: pathlib.Path, dest: pathlib.Path) -> int:
     return len(TRAILER)
 
 
+def shard_manifests(out: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(out.glob("manifest.shard-*.jsonl"))
+
+
+def merge_shards(out: pathlib.Path) -> int:
+    """Fold the per-shard manifests into one, in a stable order.
+
+    Sorted by the stego path rather than by arrival, so the merged manifest is
+    the same whatever order the shards happened to finish in. Iteration order
+    leaking into a published artefact is the kind of difference that makes two
+    honest runs disagree.
+    """
+    shards = shard_manifests(out)
+    if not shards:
+        print(f"no shard manifests under {out}", file=sys.stderr)
+        return 1
+
+    manifest = out / "manifest.jsonl"
+    rows = []
+    if manifest.exists():
+        rows += [json.loads(l) for l in manifest.read_text().splitlines()
+                 if l.strip()]
+    before = len(rows)
+    for path in shards:
+        rows += [json.loads(l) for l in path.read_text().splitlines()
+                 if l.strip()]
+
+    # A stego path appearing twice means two shards built the same pair, which
+    # the stride makes impossible. If it happens, something is wrong with the
+    # sharding and silently keeping one is the worst answer.
+    seen: dict[str, dict] = {}
+    for row in rows:
+        key = row["stego"]
+        if key in seen and seen[key] != row:
+            print(f"{key} was built twice with different results; refusing to "
+                  f"merge", file=sys.stderr)
+            return 1
+        seen[key] = row
+
+    ordered = sorted(seen.values(), key=lambda r: r["stego"])
+    part = manifest.with_suffix(".jsonl.part")
+    part.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                            for r in ordered))
+    part.replace(manifest)
+    for path in shards:
+        path.unlink()
+    print(f"merged {len(shards)} shard(s): {before:,} existing + "
+          f"{len(rows) - before:,} new = {len(ordered):,} rows in {manifest}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--covers", required=True, help="the Pentimento cover directory")
@@ -116,7 +167,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--rates", default=",".join(str(r) for r in DEFAULT_RATES),
                     help="payload sizes as a fraction of the tool's reported capacity")
+    # Sharding is by stride rather than by block, so every shard sees the same
+    # mix of cover sizes and they finish together. Each cover belongs to exactly
+    # one shard, so no two shards ever write the same file.
+    ap.add_argument("--shards", type=int, default=1,
+                    help="split the covers across this many parallel runs")
+    ap.add_argument("--shard", type=int, default=0,
+                    help="which shard this run is, from 0")
+    ap.add_argument("--merge", action="store_true",
+                    help="merge the shard manifests into manifest.jsonl and "
+                         "exit, building nothing")
     args = ap.parse_args(argv)
+    if args.shards < 1 or not 0 <= args.shard < args.shards:
+        print(f"--shard must be in 0..{max(args.shards - 1, 0)} for "
+              f"--shards {args.shards}", file=sys.stderr)
+        return 2
 
     sys.stdout.reconfigure(line_buffering=True)
     covers_dir = pathlib.Path(args.covers)
@@ -152,19 +217,34 @@ def main(argv: list[str] | None = None) -> int:
                   "result rather than a warning to scroll past", file=sys.stderr)
             return 2
 
-    manifest = out / "manifest.jsonl"
     out.mkdir(parents=True, exist_ok=True)
+    if args.merge:
+        return merge_shards(out)
+
+    # A sharded run writes its own manifest, because concurrent appends to one
+    # file interleave partial lines. `--merge` folds them back afterwards.
+    manifest = (out / "manifest.jsonl" if args.shards == 1
+                else out / f"manifest.shard-{args.shard:02d}.jsonl")
+    # The resume set spans EVERY manifest, not just this shard's. A shard that
+    # read only its own would rebuild work a previous unsharded run had done.
     done = set()
-    if manifest.exists():
-        done = {json.loads(l)["stego"] for l in manifest.read_text().splitlines()
-                if l.strip()}
+    for path in shard_manifests(out) + [out / "manifest.jsonl"]:
+        if path.exists():
+            done |= {json.loads(l)["stego"]
+                     for l in path.read_text().splitlines() if l.strip()}
+    if done:
         print(f"resuming: {len(done)} pairs already built")
+    if args.shards > 1:
+        print(f"shard {args.shard} of {args.shards}: covers where "
+              f"index % {args.shards} == {args.shard}")
 
     counts = {"clean": 0, "pairs": 0, "skipped": 0, "failed": 0}
     last_beat = time.monotonic()
 
     with manifest.open("a") as mf:
         for index, png in enumerate(chosen):
+            if index % args.shards != args.shard:
+                continue
             stem = f"{index:05d}"
             clean = out / "clean" / f"{stem}.jpg"
             if not clean.is_file():
