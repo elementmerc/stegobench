@@ -1,0 +1,57 @@
+# The Python half of this repository, installable.
+#
+# The Rust workspace builds `stegobench`, the benchmark. This builds
+# `pentimento`, the corpus. Two products, two entry points, one repository,
+# and deliberately not one name: `crates/stegobench-cli` already installs a
+# binary called `stegobench`, and two different programs of one name on one
+# PATH is a worse problem than the one a single entry point solves.
+#
+#     pip install -e .
+#     pentimento
+#
+# Versions are pinned rather than bounded, and the reasoning is in
+# requirements.txt: a corpus whose dependency set floats is a corpus whose
+# numbers move without anybody touching it. To REPRODUCE the published corpus
+# rather than merely build one, install requirements.lock instead, which
+# records what was actually present including numba, the compiler behind the
+# code that decides which pixels carry a payload.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pentimento"
+version = "1.0.0"
+description = "Build, audit, pack and verify the Pentimento cover corpus"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+authors = [{ name = "Daniel Iwugo" }]
+keywords = ["steganography", "steganalysis", "dataset", "corpus"]
+
+dependencies = [
+    "numpy==2.5.3",
+    "scipy==1.18.1",
+    "pillow==12.3.0",
+    "conseal==2025.11",
+    "jpeglib==1.0.2",
+    "opencv-python==5.0.0.93",
+]
+
+[project.optional-dependencies]
+# Publishing a dataset needs more than building one. mlcroissant validates the
+# record that decides whether the corpus loads for Hugging Face, Kaggle and the
+# ML Commons tooling; `pentimento validate-croissant` runs a structural check
+# without it and defers to it when present.
+publish = ["mlcroissant"]
+test = ["pytest==9.1.1"]
+
+[project.scripts]
+pentimento = "generators.cli:main"
+
+[tool.setuptools]
+packages = ["generators"]
+
+[tool.setuptools.package-dir]
+generators = "generators"
