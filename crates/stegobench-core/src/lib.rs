@@ -7,11 +7,15 @@
 //! beyond parsing: scoring, plugin execution and storage live elsewhere, so
 //! that the definition of a result never depends on how a result was obtained.
 
+pub mod manifest;
 pub mod registry;
 pub mod result;
+pub mod run;
 
+pub use manifest::{ManifestV1, MANIFEST_SCHEMA_ID};
 pub use registry::{Entry, Kind, Registry};
 pub use result::{Result1, RESULT_SCHEMA_ID};
+pub use run::{RunV1, RUN_SCHEMA_ID};
 
 /// Process exit codes, which are part of the CLI's contract and are documented
 /// in the man page. A caller, human or otherwise, distinguishes "I refused" from
