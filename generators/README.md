@@ -1,12 +1,14 @@
 # Corpus generators
 
-Forty-two programs that fetch covers, build arms, check licences, pack a
+Forty-four programs that fetch covers, build arms, check licences, pack a
 release and verify it before it leaves the machine.
 
 This file used to describe three of them and claim to describe all of them,
-which is how a directory grows to forty-two without anybody noticing. The table
-below is generated from each module's own docstring, so it goes stale
-loudly rather than quietly.
+which is how a directory grows to forty-four without anybody noticing. The
+table below is hand-written, so `test_readme.py` fails when a module is added
+without a row: the claim that it goes stale loudly is only true if something
+checks, and the first version of this file made that claim while two modules
+were already missing from it.
 
 ## The pairing rule, which is the whole method
 
@@ -98,6 +100,7 @@ because a measurement was once wrong in exactly the way it detects.
 | `repair_writer_matched_pairs.py` | CLI | Give an already-built arm the clean half it should have had |
 | `repair_jpeg_pair_passes.py` | CLI | Give the clean JPEG half the second writer pass its stego twin already had |
 | `rebuild_replaced_covers.py` | CLI | Invalidate the arm files derived from covers that were replaced |
+| `stamp_source_digests.py` | CLI | Write the cover digest onto every arm row, once the rebuild has landed |
 
 ### Scoring
 
@@ -122,6 +125,12 @@ because a measurement was once wrong in exactly the way it detects.
 | `validate_croissant.py` | CLI | Check a Croissant record before it is published |
 | `verify_release.py` | CLI | Every invariant this corpus must satisfy before it is published, in one run |
 | `make_fixtures.py` | CLI | Build the self-test fixtures: one image that is clean, one that is not |
+
+### The way in
+
+| Module | | What it does |
+|---|---|---|
+| `cli.py` | CLI | `pentimento`, one entry point to all of these, found by import not by a list |
 
 ## Two pieces of the corpus pipeline that are deliberately NOT here
 
@@ -169,6 +178,13 @@ tidying pass wants to fold them in, read this section first and then read
          cover pool the other                 by POSITION)
          one reads)
                     └───────────────┬───────────────┘
+                                    ▼
+                          stamp_source_digests
+                     (arms cannot prove where they
+                      came from until this has run,
+                      and verify_release refuses a
+                      corpus whose arms cannot)
+                                    │
                                     ▼
                      pack_tier ─▶ pack_arms ─▶ publish_tier
                                     │
