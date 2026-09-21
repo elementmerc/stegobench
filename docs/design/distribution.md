@@ -81,13 +81,16 @@ simply will not.
 | **Nano** | 200 | 66 MB / 1.0 GB | Continuous integration and smoke tests. Downloads in seconds |
 | **Lite** | 1,000 | 327 MB / 4.8 GB | A developer checking their integration against real data |
 | **Core** | 10,000 | 3.3 GB / 48 GB | **Version 1.** The publishable corpus |
-| **Full** | 100,000 | 31 GB / ~1.1 TB | Training. The tier that needs sponsored storage |
+
+A larger tier than Core is not built and is deliberately not sized here: a
+projected figure next to three measured ones invites a reader to treat it as
+equally real. See `private/plans/roadmap.md` for what comes after Core.
 
 ### The requirement that makes tiers safe
 
 **The tiers are strictly nested: Nano is a subset of Lite, which is a subset of
-Core, which is a subset of Full. There is exactly one train and test split, and
-it is defined at Full and inherited downward.**
+Core. There is exactly one train and test split, defined once over the covers
+that exist and inherited downward.**
 
 This is not tidiness. Without it, the obvious mistake is invisible and fatal:
 somebody trains on Lite, evaluates on Core, and unknowingly tests on images
@@ -106,7 +109,7 @@ So, concretely:
 - A tier is a prefix of a single deterministic ordering of covers, not a fresh
   sample. Nano is the first 200 of that order, Lite the first 1,000, and so on.
 - Every tier carries the same arm structure, so code written against Nano runs
-  unchanged against Full and only the numbers move.
+  unchanged against a larger tier and only the numbers move.
 - The manifest of a smaller tier is a strict subset of the larger one's, line for
   line, so a checksum comparison proves the nesting rather than asserting it.
 
@@ -137,10 +140,10 @@ done carelessly it is a way to poison every result built on the dataset.
 
 ## Packing: not half a million loose files
 
-Version 1 is roughly 520,000 images and the full tier would be 5,200,000.
-HuggingFace publishes its limits plainly: **under 10,000 files per folder, and
-under 100,000 files per repository recommended**. Shipping loose PNGs breaks the
-platform we most want to be on, and it is slow to download everywhere else too.
+Version 1 is roughly 520,000 images. HuggingFace publishes its limits plainly:
+**under 10,000 files per folder, and under 100,000 files per repository
+recommended**. Shipping loose PNGs breaks the platform we most want to be on,
+and it is slow to download everywhere else too.
 
 The corpus therefore ships as **sharded archives** (WebDataset tar shards, with
 Parquet for the manifests). Both are formats HuggingFace explicitly recommends
@@ -162,10 +165,10 @@ is not a plan you can schedule around.
 | Destination | Version 1 | Capacity | Why |
 |---|---|---|---|
 | **Internet Archive** | **yes** | unlimited, free | No approval, no size ceiling, permanent, and it has outlived most of the hosts in `cover-source-licensing.md` |
-| **Academic Torrents** | **yes** | unlimited, free | Built precisely for this; costs nothing to seed and scales to the full tier later |
-| **Kaggle** | **yes** | about 200 GB per dataset | No approval, and it is where practitioners actually look. Core fits; Full will not |
+| **Academic Torrents** | **yes** | unlimited, free | Built precisely for this; costs nothing to seed and scales with the corpus |
+| **Kaggle** | **yes** | about 200 GB per dataset | No approval, and it is where practitioners actually look. Core fits comfortably |
 | **Zenodo** | later | 50 GB per record by default, more on request | The DOI and the tombstoned withdrawal make it the right home for a citable curated tier, but the size request is an approval step |
-| **AWS Open Data Registry** | later | free hosting | How iNaturalist itself is hosted, and the natural home for the full tier. Requires an application |
+| **AWS Open Data Registry** | later | free hosting | How iNaturalist itself is hosted. Requires an application |
 | **HuggingFace** | later | best-effort free, grants available | The free public tier is "best-effort", not unlimited. Storage grants exist for high-impact open work through `datasets@huggingface.co`, and that is worth applying for **once there is a corpus and download numbers to point at**, not before |
 
 Version 1 goes only to the free, unlimited, no-approval destinations. The
