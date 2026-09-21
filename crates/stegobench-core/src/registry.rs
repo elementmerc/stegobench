@@ -40,6 +40,9 @@ use serde::{Deserialize, Serialize};
 /// human maintains beside a number a machine measures drifts from it.
 pub const BUNDLE_THRESHOLD_MB: u64 = 750;
 
+/// A sha256 digest written as lowercase hexadecimal: 32 bytes, 64 characters.
+const SHA256_HEX_LEN: usize = 64;
+
 /// A registered tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -461,13 +464,31 @@ impl Entry {
 
         if let Some(img) = &self.image {
             // The single most common way a result becomes unreproducible.
-            if !img.reference.contains("@sha256:") {
-                bad.push(format!(
+            //
+            // The digest itself is checked, not only the `@sha256:` marker: a
+            // truncated or placeholder digest looks pinned to a substring test
+            // and pins nothing, and a registry entry written ahead of the build
+            // that produces the real digest is exactly how one gets written.
+            match img.reference.split_once("@sha256:") {
+                Some((repo, digest))
+                    if !repo.is_empty()
+                        && digest.len() == SHA256_HEX_LEN
+                        && digest.bytes().all(|b| b.is_ascii_hexdigit()) => {}
+                Some((_, digest)) => bad.push(format!(
+                    "image {:?} names a digest of {} character(s), but a \
+                     sha256 digest is {SHA256_HEX_LEN} hexadecimal \
+                     characters. A short or placeholder digest reads as \
+                     pinned and pins nothing; run `docker pull` and paste \
+                     the digest it reports",
+                    img.reference,
+                    digest.len()
+                )),
+                None => bad.push(format!(
                     "image {:?} is not pinned by digest. A tag can move under \
                      you, so a result naming one cannot be reproduced; pull the \
                      image and add its @sha256:... digest to the reference",
                     img.reference
-                ));
+                )),
             }
         }
 
@@ -720,9 +741,13 @@ must_clear = "b.png"
         toml::from_str(&minimal(extra)).expect("parses")
     }
 
+    const A_REAL_DIGEST: &str = "59710f7b5fbaeb7c3b1d4333e64654c1721a3ddb60b489d8e54d5d0e8b269bfb";
+
     #[test]
     fn a_container_entry_pinned_by_digest_is_valid() {
-        let e = parse("[image]\nreference = \"ghcr.io/x/y@sha256:abc\"");
+        let e = parse(&format!(
+            "[image]\nreference = \"ghcr.io/x/y@sha256:{A_REAL_DIGEST}\""
+        ));
         assert_eq!(e.validate(), Ok(()));
     }
 
@@ -730,6 +755,32 @@ must_clear = "b.png"
     fn a_mutable_tag_is_refused() {
         let e = parse("[image]\nreference = \"ghcr.io/x/y:latest\"");
         assert!(e.validate().unwrap_err()[0].contains("not pinned by digest"));
+    }
+
+    /// `@sha256:` as a substring is not a pin. A placeholder waiting on a
+    /// build, a digest truncated in a paste, or one with a non-hex character
+    /// in it all satisfy a `contains` test and identify no image at all.
+    #[test]
+    fn a_digest_that_is_not_a_digest_is_refused() {
+        for bad in [
+            "ghcr.io/x/y@sha256:abc",
+            "ghcr.io/x/y@sha256:REAL_DIGEST_AFTER_BUILD",
+            "ghcr.io/x/y@sha256:",
+            &format!("ghcr.io/x/y@sha256:{A_REAL_DIGEST}beef"),
+            &format!("ghcr.io/x/y@sha256:{}z", &A_REAL_DIGEST[..63]),
+        ] {
+            let e = parse(&format!("[image]\nreference = \"{bad}\""));
+            let problems = match e.validate() {
+                Ok(()) => panic!("{bad} was accepted as pinned"),
+                Err(problems) => problems,
+            };
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("hexadecimal characters")),
+                "{bad} was refused for the wrong reason: {problems:?}"
+            );
+        }
     }
 
     #[test]
@@ -880,7 +931,7 @@ must_clear = "b.png"
         )
         .unwrap();
         e.image = Some(Image {
-            reference: "x@sha256:a".into(),
+            reference: format!("x@sha256:{}", "a".repeat(SHA256_HEX_LEN)),
             needs_network: false,
             size_mb: Some(size),
             bundled,
