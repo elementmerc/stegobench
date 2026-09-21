@@ -77,6 +77,13 @@ GROUND_PREFIXES = ("PD-", "PD ", "Public domain")
 GROUND_EXACT = {
     "Template:PD", "Template:CC0", "Template:No rights reserved",
     "Template:Copyrighted free use", "Template:Attribution",
+    # The Creative Commons dedications. `Cc-pd` is the pre-CC0 "Creative
+    # Commons Public Domain Dedication" and `Cc-zero` is CC0 1.0 itself, and
+    # both state a ground as plainly as any PD- template does. Neither carries
+    # the PD prefix, so a prefix test alone reports the file as having no
+    # recoverable ground, which reads as a licensing problem rather than as a
+    # gap in the reader. One cover in this corpus sat in that hole.
+    "Template:Cc-pd", "Template:Cc-zero", "Template:Cc-pd-self",
 }
 
 #: Templates that carry the PD prefix and state nothing. They are the shared
