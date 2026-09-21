@@ -10,19 +10,24 @@ where BOSSbase and ALASKA2 cannot be republished at all and where mirrors of
 Dresden and UCID carry licences their sources never granted. That claim is only
 worth making if we are stricter with ourselves than the mirrors were.
 
-An audit against Commons found four groups that fail it. They are listed here
+An audit against Commons found five groups that fail it. They are listed here
 rather than handled quietly, because a corpus that drops images without saying
 which ones is asking to be taken on trust, and taking a corpus on trust is the
 habit this one exists to break.
 
-THE FOUR GROUPS
+THE FIVE GROUPS
 ---------------
 `share-alike`
-    Recorded as public domain, but the file page carries CC BY-SA. Share-alike
-    is a copyleft obligation: derivatives must be licensed alike. Every stego
-    image here is a derivative, and the collection is published CC BY 4.0, so
-    keeping these would breach the term AND falsify the collection statement,
-    which says CC BY is the strictest obligation present.
+    The file page offers share-alike and nothing matching what we recorded.
+    Share-alike is a copyleft obligation: derivatives must be licensed alike.
+    Every stego image here is a derivative, and the collection is published
+    CC BY 4.0, so keeping these would breach the term AND falsify the
+    collection statement, which says CC BY is the strictest obligation present.
+
+`misrecorded`
+    The page grants something, and it is not what the manifest says. Not
+    necessarily stricter; still wrong, and wrong in the field this corpus
+    claims to get right.
 
 `unattributable`
     Requires attribution and records no author, so the credit line reads "by
@@ -46,6 +51,23 @@ WHAT IT DOES NOT DO
 It selects. It does not delete, and it does not choose replacements. Run
 `backfill_covers.py` with its output.
 
+A FIRST VERSION OF THIS FILE SELECTED 1,177 COVERS, and 1,068 of those were
+sound. Two rules were too strict, and both were too strict in the same way:
+they read a single fact off a page and did not ask what the page as a whole
+granted.
+
+    - Any page mentioning share-alike was flagged. Commons files are very
+      often offered under several licences at once, `Cc-by-4.0` beside `GFDL`
+      being the commonest, and taking the permissive one is the point of a
+      multi-licence offer rather than an abuse of it.
+    - Any `PD-USGov` ground was read as United States only. A work of the US
+      federal government is uncopyrighted by statute rather than by a term
+      expiring, and is treated as free worldwide.
+
+Dropping 12% of a corpus is not a safe default just because it errs towards
+caution. It throws away work, it changes what the corpus measures, and it
+would have been done on a rule nobody checked.
+
 Usage::
 
     python select_unpublishable.py --manifest ~/pentimento/covers/commons/manifest.jsonl \\
@@ -60,10 +82,18 @@ import json
 import pathlib
 import sys
 
-#: A PD template naming the United States and nothing else. A file that also
-#: carries a source-country ground (`PD-old-70`, `PD-Russia-expired`) is fine:
-#: the US tag is then one of several, not the only one.
-US_ONLY_PREFIXES = ("PD-US", "PD-1996", "PD-USGov")
+#: Grounds that rest on a United States COPYRIGHT TERM having run out, and say
+#: nothing about the source country. A photograph first published in Hungary in
+#: 1930 can be out of copyright in the United States and in copyright at home,
+#: and this corpus is served from the United Kingdom to everywhere.
+#:
+#: `PD-USGov*` is deliberately NOT here, though it names the United States in
+#: every one of its 576 appearances. A work of the US federal government is
+#: uncopyrighted by statute rather than by expiry, the government does not
+#: assert copyright in it abroad either, and Commons hosts it on that basis.
+#: Treating those as jurisdiction-limited would have dropped 576 sound covers,
+#: which is what a first version of this file did.
+US_EXPIRY_PREFIXES = ("PD-US", "PD-1996")
 
 #: A ground that says the work is free everywhere, or that the author released
 #: it themselves. Either settles the jurisdiction question.
@@ -73,17 +103,43 @@ UNIVERSAL_PREFIXES = ("PD-self", "PD-user", "PD-author", "CC0",
 
 
 def is_us_only(grounds: list[str]) -> bool:
-    """Every stated ground rests on United States law.
+    """Every stated ground is a United States copyright term expiring.
 
-    Asked as "are they ALL US" rather than "is any US", because a file tagged
-    both PD-USGov and PD-old-70 is free on a ground that does not depend on
-    where the reader is.
+    Asked as "are they ALL US expiry" rather than "is any", because a file
+    tagged both `PD-US-expired` and `PD-old-70` is free on a ground that does
+    not depend on where the reader is.
     """
     if not grounds:
         return False
     if any(g.startswith(UNIVERSAL_PREFIXES) for g in grounds):
         return False
-    return all(g.startswith(US_ONLY_PREFIXES) for g in grounds)
+    if any(g.startswith("PD-USGov") for g in grounds):
+        return False
+    return all(g.startswith(US_EXPIRY_PREFIXES) for g in grounds)
+
+
+def matches(stated: str, recorded: str) -> bool:
+    """Whether a template on the page grants what the manifest recorded.
+
+    Coarse, and deliberately generous about version: `Cc-by-3.0` on the page
+    against `CC BY 3.0` recorded is the same grant, and this is not the place
+    to argue about 3.0 versus 4.0.
+    """
+    s = stated.lower().replace("_", "-")
+    r = recorded.lower().replace(" ", "-")
+    if r.startswith("public-domain"):
+        return s.startswith(("pd", "cc-pd", "cc-zero", "no-rights",
+                             "copyrighted-free-use"))
+    if r.startswith("cc0"):
+        return s.startswith(("cc-zero", "cc0", "cc-pd", "pd"))
+    if r.startswith("cc-by-sa"):
+        return s.startswith(("cc-by-sa", "cc-sa"))
+    if r.startswith("cc-by"):
+        # A share-alike tag does NOT satisfy a plain CC BY record: the two
+        # carry different obligations and we would be publishing under the
+        # looser one.
+        return s.startswith("cc-by") and not s.startswith(("cc-by-sa", "cc-sa"))
+    return False
 
 
 def classify(row: dict, page_licences: dict[str, list[str]]) -> str | None:
@@ -91,12 +147,23 @@ def classify(row: dict, page_licences: dict[str, list[str]]) -> str | None:
     licence = (row.get("licence") or "").strip()
     lowered = licence.lower()
 
-    # Checked first: it is the only group that is an outright breach rather
-    # than a gap, and a row can be in more than one.
+    # A COMMONS FILE MAY OFFER SEVERAL LICENCES AND THE USER PICKS ONE.
+    #
+    # The question is not "does this page mention share-alike" but "does it
+    # offer anything matching what we recorded". A file offered as CC BY 2.5 or
+    # CC BY-SA 3.0 or GFDL is one we may take under CC BY 2.5, which is the
+    # permissive option and the one recorded.
+    #
+    # Asking the first question flagged 522 covers, almost all of them dual
+    # licensed and correctly recorded, because GFDL sits beside a CC BY tag on
+    # a great many Commons files. The share-alike group is for a page that
+    # offers share-alike AND NOTHING ELSE while the manifest claims otherwise.
     stated = page_licences.get(row.get("title", ""), [])
-    if any(s.lower().startswith(("cc-by-sa", "cc-sa", "gfdl")) for s in stated):
-        if not lowered.startswith("cc by-sa"):
+    if stated and not any(matches(s, licence) for s in stated):
+        if any(s.lower().startswith(("cc-by-sa", "cc-sa", "gfdl"))
+               for s in stated):
             return "share-alike"
+        return "misrecorded"
 
     if row.get("attribution_required") and not (row.get("artist") or "").strip():
         return "unattributable"
@@ -158,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
 
     total = sum(len(v) for v in groups.values())
     print(f"{total:,} of {len(rows):,} covers cannot be published as recorded\n")
-    for group in ("share-alike", "unattributable", "us-only", "ungrounded"):
+    for group in ("share-alike", "misrecorded", "unattributable", "us-only",
+                  "ungrounded"):
         picked = groups.get(group, [])
         if not picked:
             continue

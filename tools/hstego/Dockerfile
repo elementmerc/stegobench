@@ -19,8 +19,10 @@
 # So the IJG release is built and installed alongside, and the extension is
 # pointed at it. This is also why the tool is containerised rather than put in
 # the virtual environment: it wants a libjpeg the host should not have.
-FROM python:3.11-slim
-
+# Base pinned by digest on 2026-09-21. A tag moves; a digest does not,
+# and a corpus whose tools were built from "whatever stable-slim meant
+# that week" is not rebuildable in any sense a reader can check.
+FROM python@sha256:174bec68e0451bffabbb08c7d5d21c6b253f772d81d52b9558af97bb3159b761
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc g++ libc6-dev make curl ca-certificates git \

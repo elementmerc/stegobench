@@ -1,7 +1,9 @@
 # StegExpose (b3dk7) — LSB steganalysis ensemble (Sample Pairs, RS, Chi-square,
 # Primary Sets) for lossless images. Detector. Distributed as a jar.
-FROM eclipse-temurin:17-jre-jammy
-
+# Base pinned by digest on 2026-09-21. A tag moves; a digest does not,
+# and a corpus whose tools were built from "whatever stable-slim meant
+# that week" is not rebuildable in any sense a reader can check.
+FROM eclipse-temurin@sha256:24cd8eed18b5976441d27b45823490eb5e8efff4b3ecdc632e442717ea66f160
 ARG STEGEXPOSE_REF=master
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \

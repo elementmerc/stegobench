@@ -1,8 +1,10 @@
 # Aletheia (daniellerch) — the steganalysis parity reference (CLAUDE.md A3).
 # Detector. We benchmark Stegcore's SPA/RS/WS against Aletheia's
 # implementations to floating-point precision on a documented corpus.
-FROM python:3.11-slim
-
+# Base pinned by digest on 2026-09-21. A tag moves; a digest does not,
+# and a corpus whose tools were built from "whatever stable-slim meant
+# that week" is not rebuildable in any sense a reader can check.
+FROM python@sha256:174bec68e0451bffabbb08c7d5d21c6b253f772d81d52b9558af97bb3159b761
 # Pin to a commit for reproducible numbers (fairness requirement). Override
 # with --build-arg ALETHEIA_REF=<sha>. Default tracks master; PIN before any
 # published benchmark so the comparison is stable across releases.
