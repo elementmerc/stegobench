@@ -49,7 +49,12 @@ fn main() {
         return;
     }
 
-    let cmd = Cli::command();
+    // `build()` is what propagates the globals (`--json`, `--registry`) down
+    // into each subcommand. Without it the per-subcommand pages list neither,
+    // although the binary accepts both on every subcommand, so the pages would
+    // drift from the parser in the one way this whole file exists to prevent.
+    let mut cmd = Cli::command();
+    cmd.build();
     if let Err(e) = write_man_pages(&cmd, &man_dir) {
         println!("cargo:warning=stegobench: man page generation failed: {e}");
         return;

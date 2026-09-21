@@ -483,6 +483,32 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// `build.rs` renders one man page per subcommand from this same tree, and
+    /// a subcommand's page can only name `--json` and `--registry` once clap
+    /// has propagated the globals into it. Pinned here because the failure is
+    /// silent: the pages still generate, they just quietly stop describing two
+    /// flags the binary accepts, which is the drift the generation exists to
+    /// prevent.
+    #[test]
+    fn the_globals_reach_every_subcommand_so_the_man_pages_can_name_them() {
+        let mut root = Cli::command();
+        root.build();
+        let mut seen = 0;
+        for sub in root.get_subcommands() {
+            let longs: Vec<&str> = sub.get_arguments().filter_map(|a| a.get_long()).collect();
+            for global in ["json", "registry"] {
+                assert!(
+                    longs.contains(&global),
+                    "`{}` does not carry --{global}, so its man page cannot \
+                     name a flag the binary accepts",
+                    sub.get_name()
+                );
+            }
+            seen += 1;
+        }
+        assert!(seen >= 9, "checked only {seen} subcommand(s)");
+    }
+
     #[test]
     fn json_is_accepted_by_every_subcommand() {
         // The rule in the module docstring, asserted rather than trusted.
