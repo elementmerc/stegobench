@@ -24,7 +24,7 @@ CITATION.cff       GitHub and Zenodo both read this to render a citation
 croissant.json     ML Commons metadata, which Kaggle and HuggingFace index
 DATASHEET.md       Gebru et al., the questions a reviewer will ask anyway
 SPLITS.md          how to split without leaking a cover across the boundary
-SHA256SUMS         so `sha256sum -c` works without parsing an index
+SHA256SUMS-<part>  so `sha256sum -c` works without parsing an index
 ATTRIBUTION.md     the credit lines for the 54% that require one
 ATTRIBUTION.csv    the same, joinable
 load_pentimento.py a reader that runs with nothing installed
@@ -147,9 +147,15 @@ They stream without unpacking, and every major dataset loader reads them.
 | Covers | {total_covers:,} | {cover_shards} |
 {arm_lines}
 
-Each part ships a `SHA256SUMS` beside its shards, so `sha256sum -c SHA256SUMS`
-verifies a download in one command. Do it before use: a shard that arrived
-truncated reads as a smaller corpus rather than as an error.
+Each part ships its own checksum file, `SHA256SUMS-covers` and
+`SHA256SUMS-arms`, so verifying a download is one command:
+
+```
+sha256sum -c SHA256SUMS-covers
+```
+
+Do it before use: a shard that arrived truncated reads as a smaller corpus
+rather than as an error.
 
 Tiers nest. Nano is the first 200 covers of the same ordering Lite's first
 1,000 and Core's 10,000 follow, so you can develop against a small tier and
@@ -510,8 +516,12 @@ look for it: the number simply comes out better than it should.
 
 ## How
 
-Every sample JSON carries `source_png`, the cover it descends from. Partition on
-that field, then take whole groups:
+Every sample JSON in an arm shard carries `source_png`, the cover it descends
+from. The cover shards name the same value `file` instead, so a fold function
+written against one raises `KeyError` on the other; `record.get("source_png") or
+record["file"]` covers both.
+
+Partition on that value, then take whole groups:
 
 ```python
 import json, tarfile, hashlib
@@ -525,6 +535,20 @@ def fold(source_png: str, folds: int = 5) -> int:
 
 A cover and every stego image derived from it land in the same fold, whatever
 arm they came from.
+
+## The `split` field is a second, different partition
+
+Cover records also carry a fixed `split` of `train` or `test`, 8,032 covers
+against 1,968, and a `split_salt` naming the string those labels were derived
+under. It is partitioned by cover, so it does not leak either, but it is NOT the
+same partition as `fold()` above. Pick one and stay with it; a run that uses
+both puts the same photograph on both sides of the boundary.
+
+`split` is recorded in the data, so two readers get identical sets without
+reimplementing anything, and it is the one to quote for a headline number. It
+rides on the cover records only, so using it from an arm means joining against
+the cover tier. `fold()` needs nothing but the arm you already have, and gives
+you k folds rather than one holdout.
 
 ## Across arms too
 

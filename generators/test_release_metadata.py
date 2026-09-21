@@ -309,24 +309,24 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(self.run_main("--covers-manifest", str(self.manifest)), 0)
         for name in ("README.md", "CITATION.cff", "croissant.json", "DATASHEET.md",
                      "SPLITS.md", "load_pentimento.py", "ATTRIBUTION.md",
-                     "ATTRIBUTION.csv", "SHA256SUMS"):
+                     "ATTRIBUTION.csv", "SHA256SUMS-covers"):
             self.assertTrue((self.rel / name).exists(), f"{name} was not written")
-        self.assertTrue((self.arms / "SHA256SUMS").exists())
+        self.assertTrue((self.arms / "SHA256SUMS-arms").exists())
 
     def test_the_checksum_file_covers_the_paperwork_written_beside_it(self):
         self.run_main("--covers-manifest", str(self.manifest))
-        body = (self.rel / "SHA256SUMS").read_text()
+        body = (self.rel / "SHA256SUMS-covers").read_text()
         self.assertIn("README.md", body)
         self.assertIn("pentimento-core-00000.tar", body)
         # It cannot contain its own digest, and claiming to would be worse
         # than the gap.
-        self.assertNotIn("  SHA256SUMS", body)
+        self.assertNotIn("  SHA256SUMS-covers", body)
 
     def test_running_twice_produces_identical_checksums(self):
         self.run_main("--covers-manifest", str(self.manifest))
-        first = (self.rel / "SHA256SUMS").read_text()
+        first = (self.rel / "SHA256SUMS-covers").read_text()
         self.run_main("--covers-manifest", str(self.manifest))
-        self.assertEqual(first, (self.rel / "SHA256SUMS").read_text())
+        self.assertEqual(first, (self.rel / "SHA256SUMS-covers").read_text())
 
     def test_without_a_manifest_it_says_so_rather_than_writing_an_empty_list(self):
         self.assertEqual(self.run_main(), 0)
@@ -383,6 +383,41 @@ class EndToEndTests(unittest.TestCase):
             json.dumps({"tier": "Core", "part": "arms", "arms": []}))
         self.assertEqual(self.run_main(), 0)
         self.assertIn("2 permissively licensed", (self.rel / "README.md").read_text())
+
+    def test_the_split_guide_names_both_fields_that_hold_the_cover(self):
+        # The cover shards call it `file` and the arm shards call it
+        # `source_png`. A fold function written from this page against one of
+        # them raises KeyError on the other, so the page has to say so.
+        body = release_metadata.splits()
+        self.assertIn("source_png", body)
+        self.assertIn('record["file"]', body)
+
+    def test_the_split_guide_warns_that_the_split_field_is_a_second_partition(self):
+        # Two split definitions ship in one release and they disagree. A reader
+        # who mixes them leaks covers across the boundary, which is the exact
+        # failure this file exists to prevent.
+        body = release_metadata.splits()
+        self.assertIn("split_salt", body)
+        self.assertIn("8,032", body)
+        self.assertIn("1,968", body)
+
+    def test_the_two_parts_do_not_write_the_same_filename(self):
+        """Every destination is flat.
+
+        The covers and the arms are packed in separate directories and land in
+        one namespace at the Archive and on HuggingFace. Two files both called
+        SHA256SUMS meant the second replacing the first, leaving a checksum
+        file that covers ten shards and claims to cover 769.
+        """
+        self.run_main("--covers-manifest", str(self.manifest))
+        cover_sums = {p.name for p in self.rel.iterdir()
+                      if p.name.startswith("SHA256SUMS")}
+        arm_sums = {p.name for p in self.arms.iterdir()
+                    if p.name.startswith("SHA256SUMS")}
+        self.assertTrue(cover_sums)
+        self.assertTrue(arm_sums)
+        self.assertFalse(cover_sums & arm_sums,
+                         f"{cover_sums & arm_sums} would collide on upload")
 
     def test_a_missing_release_directory_is_refused(self):
         self.assertEqual(release_metadata.main(
