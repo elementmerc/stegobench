@@ -105,11 +105,57 @@ fn load_registry(dir: &Path) -> Result<Registry, Output> {
     })
 }
 
+/// The human block for the registered corpora.
+///
+/// An empty registry prints a sentence saying so rather than nothing at all.
+/// A blank listing under an exit code of zero reads as "checked, all fine",
+/// and the honest statement is that nothing has been declared, which is a
+/// different fact from there being no corpus in the world. `list` is a listing
+/// rather than a check, so an empty one is not a failure: it is the count that
+/// has to be visible, and it is, in both the text and the JSON.
+fn corpora_block(reg: &Registry, dir: &Path) -> String {
+    if reg.corpora.is_empty() {
+        return format!(
+            "No corpora are registered in {}/corpora. A corpus entry declares \
+             where a dataset lives and what its terms permit; nothing here \
+             means nothing has been declared.",
+            dir.display()
+        );
+    }
+    let mut text = reg
+        .corpora
+        .values()
+        .map(|c| c.summary())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let publishable = reg
+        .corpora
+        .values()
+        .filter(|c| c.licence.redistribution.allows_publishing())
+        .count();
+    text.push_str(&format!(
+        "\n\n{} corpora, {publishable} of which may be republished. \
+         `describe <id>` prints the terms in full; a corpus you may use is not \
+         always one you may publish.",
+        reg.corpora.len()
+    ));
+    text
+}
+
 fn cmd_list(dir: &Path, kind: &str) -> Output {
     let reg = match load_registry(dir) {
         Ok(r) => r,
         Err(o) => return o,
     };
+    if kind == "corpora" {
+        return Output::ok(
+            serde_json::json!({
+                "corpora": reg.corpora.values().collect::<Vec<_>>(),
+                "count": reg.corpora.len(),
+            }),
+            corpora_block(&reg, dir),
+        );
+    }
     let wanted: Vec<_> = match kind {
         "detectors" => reg.of_kind(Kind::Detector),
         "embedders" => reg.of_kind(Kind::Embedder),
@@ -117,7 +163,7 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
         other => {
             return Output::err(
                 exit::USAGE,
-                format!("unknown kind {other:?}. Known: detectors, embedders, all"),
+                format!("unknown kind {other:?}. Known: detectors, embedders, corpora, all"),
             )
         }
     };
@@ -140,10 +186,12 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
             f.on_demand_mb as f64 / 1024.0
         ));
     }
-    Output::ok(
-        serde_json::json!({ "tools": wanted, "footprint": reg.footprint() }),
-        human,
-    )
+    let mut json = serde_json::json!({ "tools": wanted, "footprint": reg.footprint() });
+    if kind == "all" {
+        human.push_str(&format!("\n\n{}", corpora_block(&reg, dir)));
+        json["corpora"] = serde_json::json!(reg.corpora.values().collect::<Vec<_>>());
+    }
+    Output::ok(json, human)
 }
 
 fn cmd_describe(dir: &Path, name: &str) -> Output {
@@ -151,19 +199,34 @@ fn cmd_describe(dir: &Path, name: &str) -> Output {
         Ok(r) => r,
         Err(o) => return o,
     };
-    match reg.entries.get(name) {
-        Some(e) => Output::ok(
+    if let Some(e) = reg.entries.get(name) {
+        return Output::ok(
             serde_json::to_value(e).unwrap_or(serde_json::Value::Null),
             toml::to_string_pretty(e).unwrap_or_else(|_| format!("{e:#?}")),
-        ),
-        None => {
-            let known: Vec<_> = reg.entries.keys().cloned().collect();
-            Output::err(
-                exit::USAGE,
-                format!("no tool named {name:?}. Known: {}", known.join(", ")),
-            )
-        }
+        );
     }
+    // One vocabulary: a corpus id is looked up in the same breath as a tool
+    // name, because a user should not have to know which of the two a thing is
+    // before they can ask about it.
+    if let Some(c) = reg.corpora.get(name) {
+        return Output::ok(
+            serde_json::to_value(c).unwrap_or(serde_json::Value::Null),
+            toml::to_string_pretty(c).unwrap_or_else(|_| format!("{c:#?}")),
+        );
+    }
+    let known: Vec<_> = reg
+        .entries
+        .keys()
+        .chain(reg.corpora.keys())
+        .cloned()
+        .collect();
+    Output::err(
+        exit::USAGE,
+        format!(
+            "nothing registered as {name:?}. Known tools and corpora: {}",
+            known.join(", ")
+        ),
+    )
 }
 
 fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
@@ -634,6 +697,100 @@ mod tests {
                  nothing to stderr"
             );
         }
+    }
+
+    /// The registry this repository actually ships, not a fixture.
+    fn shipped_registry() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry")
+    }
+
+    /// Every corpus file in the repository is loaded and validated.
+    ///
+    /// The count is asserted first and deliberately. A loop over an empty
+    /// directory passes every assertion inside it by never reaching one, which
+    /// is the same fault as a check that reports clean because it could not
+    /// look: this file would go green on a registry with the corpora deleted.
+    #[test]
+    fn every_shipped_corpus_validates_and_there_is_at_least_one_to_validate() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        assert!(
+            !reg.corpora.is_empty(),
+            "no corpora were loaded from {}, so this test verified nothing. A \
+             count of zero here is a failure, not a pass",
+            shipped_registry().display()
+        );
+        for (id, corpus) in &reg.corpora {
+            assert_eq!(corpus.validate(), Ok(()), "{id} is registered but invalid");
+            assert_eq!(id, &corpus.id, "keyed under a name that is not its id");
+        }
+    }
+
+    /// One registry to a user: the same two verbs reach a corpus and a tool.
+    #[test]
+    fn list_corpora_and_describe_reach_a_corpus_the_way_they_reach_a_tool() {
+        let dir = shipped_registry();
+        let listed = cmd_list(&dir, "corpora");
+        assert_eq!(listed.code, exit::OK);
+        assert!(
+            listed.human.contains("reveal") && listed.human.contains("republish:"),
+            "got: {}",
+            listed.human
+        );
+        assert!(
+            listed.json["count"].as_u64().is_some_and(|n| n > 0),
+            "the machine output must carry the count, not only the rows"
+        );
+
+        let described = cmd_describe(&dir, "reveal");
+        assert_eq!(described.code, exit::OK);
+        assert_eq!(described.json["licence"]["redistribution"], "permitted");
+        assert!(described.human.contains("verified_on"));
+
+        // And a tool still answers the same verb.
+        assert_eq!(cmd_describe(&dir, "steghide").code, exit::OK);
+        // An unknown name is a usage error that names both kinds.
+        let missing = cmd_describe(&dir, "not-registered");
+        assert_eq!(missing.code, exit::USAGE);
+        assert!(missing.human.contains("reveal") && missing.human.contains("steghide"));
+    }
+
+    /// `list all` is the whole registry, so leaving corpora out of it would
+    /// make the two halves reachable only by knowing which is which.
+    #[test]
+    fn list_all_carries_the_corpora_as_well_as_the_tools() {
+        let out = cmd_list(&shipped_registry(), "all");
+        assert_eq!(out.code, exit::OK);
+        assert!(out.json["tools"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(out.json["corpora"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+        assert!(
+            out.human.contains("may be republished"),
+            "got: {}",
+            out.human
+        );
+    }
+
+    /// An empty listing under exit zero reads as "checked, all fine". It has
+    /// to say that nothing is declared, which is a different fact.
+    #[test]
+    fn an_empty_corpora_listing_says_so_rather_than_printing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = cmd_list(dir.path(), "corpora");
+        assert_eq!(out.code, exit::OK);
+        assert_eq!(out.json["count"], 0);
+        assert!(
+            out.human.contains("nothing has been declared"),
+            "an empty registry printed: {:?}",
+            out.human
+        );
+    }
+
+    #[test]
+    fn an_unknown_list_kind_names_corpora_among_the_known_ones() {
+        let out = cmd_list(&shipped_registry(), "corpuses");
+        assert_eq!(out.code, exit::USAGE);
+        assert!(out.human.contains("corpora"), "got: {}", out.human);
     }
 
     #[test]

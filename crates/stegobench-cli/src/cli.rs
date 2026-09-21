@@ -103,17 +103,21 @@ pub enum Command {
     /// Example:
     ///   stegobench list detectors --json | jq '.[].name'
     List {
-        /// One of: detectors, embedders, all.
+        /// One of: detectors, embedders, corpora, all.
         #[arg(value_name = "KIND", default_value = "all")]
         kind: String,
     },
 
-    /// Show everything registered about one tool
+    /// Show everything registered about one tool or corpus
+    ///
+    /// Takes a tool name or a corpus id: one vocabulary, whichever kind of
+    /// thing it names.
     ///
     /// Example:
     ///   stegobench describe steghide
+    ///   stegobench describe reveal
     Describe {
-        /// A name as `list` prints it.
+        /// A name or id as `list` prints it.
         #[arg(value_name = "NAME")]
         name: String,
     },
