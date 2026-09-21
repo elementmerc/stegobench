@@ -63,6 +63,13 @@ import pathlib
 import random
 import re
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+# The licence vocabulary lives there. It belongs beside LICENCE_URLS below
+# rather than in a publishing module, and moving both into one place is
+# part of the generators consolidation rather than a change to make here.
+from publish_tier import canonical_licence  # noqa: E402
+
 from collections import Counter
 
 #: Resolvable URL per licence short name. A short name is not a licence: it does
@@ -78,6 +85,20 @@ LICENCE_URLS = {
 
 #: Licences that oblige a downstream user to credit the author.
 ATTRIBUTION_REQUIRED = {"CC BY 1.0", "CC BY 2.0", "CC BY 2.5", "CC BY 3.0", "CC BY 4.0"}
+
+#: Artist values that name nobody. A CC BY credit line asks for the author as
+#: designated, and "Unknown author" designates no one, so a row carrying it
+#: cannot discharge the obligation any more than an empty field can.
+#:
+#: EXPORTED BECAUSE TWO PLACES NEED THE SAME ANSWER. `attribution_for` uses it
+#: to decide whether to write "author not recorded by the source", and
+#: `select_unpublishable.py` uses it to decide whether a cover can ship at all.
+#: Those two had separate rules for a while: the selector tested only for an
+#: empty string, so twelve covers whose artist read "Unknown" or "Unknown
+#: author" were judged attributable by one and unattributable by the other, and
+#: survived a cull they should not have.
+UNUSABLE_ARTIST = {"", "unknown", "unknown author", "various",
+                   "various authors", "anonymous", "n/a", "-"}
 
 #: Scanner and reprographic hardware, matched against EXIF Make and Model.
 #:
@@ -199,8 +220,7 @@ def attribution_for(row: dict, modification: str = "cropped") -> tuple[str | Non
     title = (row.get("title") or "").strip()
     source = row.get("descriptionurl") or row.get("source_url") or ""
 
-    unusable = artist.lower() in {"", "unknown", "unknown author", "various",
-                                  "various authors", "anonymous", "n/a", "-"}
+    unusable = artist.lower() in UNUSABLE_ARTIST
     if unusable:
         artist_part = "author not recorded by the source" if required else None
     else:
@@ -281,7 +301,19 @@ def main(argv: list[str] | None = None) -> int:
         if "reprographic" in r["capture_class_basis"]:
             stats["capture_camera_uncertain"] += 1
 
-        licence = (r.get("licence") or "").strip()
+        # ONE SPELLING PER LICENCE, IN THE MANIFEST AND NOT ONLY AT PACK TIME.
+        #
+        # Commons returns the licence as free text, so `Public Domain` and
+        # `Public domain` both arrived and were counted as two licences. The
+        # packer canonicalised them and the published table showed seven, while
+        # the shipped rows carried eight. A reader grouping by `licence` got a
+        # breakdown that did not match our own documentation, and no amount of
+        # care at the packing end fixes a field that is inconsistent upstream.
+        before_licence = (r.get("licence") or "").strip()
+        licence = canonical_licence(before_licence) or ""
+        if licence != before_licence:
+            r["licence"] = licence
+            stats["licence_canonicalised"] += 1
         r["licence_url"] = LICENCE_URLS.get(licence)
         if licence and r["licence_url"] is None:
             stats["licence_no_url"] += 1

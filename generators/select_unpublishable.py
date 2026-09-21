@@ -82,6 +82,9 @@ import json
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from manifest_repair import UNUSABLE_ARTIST  # noqa: E402
+
 #: Grounds that rest on a United States COPYRIGHT TERM having run out, and say
 #: nothing about the source country. A photograph first published in Hungary in
 #: 1930 can be out of copyright in the United States and in copyright at home,
@@ -165,7 +168,12 @@ def classify(row: dict, page_licences: dict[str, list[str]]) -> str | None:
             return "share-alike"
         return "misrecorded"
 
-    if row.get("attribution_required") and not (row.get("artist") or "").strip():
+    # The SAME rule the credit line uses. An earlier version tested only for an
+    # empty string, so twelve covers whose artist read "Unknown author" passed
+    # here and then produced a credit line saying "author not recorded by the
+    # source". One definition, imported, rather than two that agree by habit.
+    if (row.get("attribution_required")
+            and (row.get("artist") or "").strip().lower() in UNUSABLE_ARTIST):
         return "unattributable"
 
     if lowered.startswith("public domain"):
