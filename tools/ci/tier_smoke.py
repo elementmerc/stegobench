@@ -206,9 +206,16 @@ def main(argv: list[str] | None = None) -> int:
             f"build the {SMOKE_SCHEME} arm at {SMOKE_RATE}")
 
         packed = work / "packed"
+        # `--count` IS NOT OPTIONAL HERE, whatever its default says. pack_arms.py gained a tier
+        # size on 2026-09-21 and defaults it to Core, which is right for the real corpus and
+        # wrong for every caller that builds something smaller. This harness builds Nano, so the
+        # default asked for 10,000 covers from a 200-cover manifest and the packer refused, as it
+        # should. The refusal was correct and new; the caller had simply never had to say which
+        # tier it meant, so nothing updated it when saying so became necessary.
         run([sys.executable, str(GENERATORS / "pack_arms.py"),
              "--arms", str(arms), "--covers-manifest", str(manifest),
-             "--out", str(packed), "--per-shard", "50"],
+             "--out", str(packed), "--per-shard", "50",
+             "--count", str(TIER_SIZES[0])],
             "pack the arm into shards")
 
         checked = check_every_sample_is_licensed(packed)
