@@ -79,8 +79,8 @@ simply will not.
 | Tier | Covers | Size (covers only / with stego arms) | Intended reader |
 |---|---|---|---|
 | **Nano** | 200 | 66 MB / 1.0 GB | Continuous integration and smoke tests. Downloads in seconds |
-| **Lite** | 1,000 | 327 MB / 4.7 GB | A developer checking their integration against real data |
-| **Core** | 10,000 | 3.1 GB / 45 GB | **Version 1.** The publishable corpus |
+| **Lite** | 1,000 | 327 MB / 4.8 GB | A developer checking their integration against real data |
+| **Core** | 10,000 | 3.3 GB / 48 GB | **Version 1.** The publishable corpus |
 | **Full** | 100,000 | 31 GB / ~1.1 TB | Training. The tier that needs sponsored storage |
 
 ### The requirement that makes tiers safe
