@@ -54,8 +54,67 @@ import os
 import pathlib
 import sys
 
-#: The strictest obligation that appears in this corpus. See the header.
+#: The collection licence this corpus DECLARES. See the header for why the
+#: strictest obligation is the honest choice rather than the loosest.
+#:
+#: It is a declaration, and `strictest_obligation()` below is what checks it is
+#: still true. Until 2026-09-21 this constant was the whole mechanism: the run
+#: printed "strictest present, not loosest" while nothing had looked at a single
+#: licence in the manifest. One share-alike cover reaching the corpus would have
+#: published the collection under a licence that did not cover it, and the
+#: sentence asserting otherwise would have printed exactly the same.
 COLLECTION_LICENCE = "CC BY 4.0"
+
+#: Obligation classes, loosest first. Within a class, version differences are
+#: not ordered: CC BY 2.0 and CC BY 4.0 impose the same KIND of obligation, and
+#: the collection licence covers a user who complies with it either way. What
+#: matters is whether a class appears that CC BY does not cover.
+OBLIGATION_CLASSES = ("none", "attribution")
+
+#: Beyond these, the declared collection licence is not a superset and
+#: publishing under it would understate what a user owes.
+UNCOVERED_MARKERS = ("-sa", "share", "nc", "noncommercial", "non-commercial",
+                     "nd", "noderiv", "no-deriv", "gfdl")
+
+
+def obligation_class(licence: str) -> str:
+    """Which obligation a per-file licence imposes, or 'uncovered'.
+
+    Coarse on purpose. The question is not which licence this is, it is
+    whether a user who complies with the collection licence is thereby
+    compliant for this file. Anything this cannot place is 'uncovered', because
+    an unrecognised licence is exactly the case where guessing is worst.
+    """
+    lowered = licence.strip().lower().replace(" ", "-")
+    if any(marker in lowered for marker in UNCOVERED_MARKERS):
+        return "uncovered"
+    if lowered.startswith(("cc0", "public-domain", "no-rights",
+                           "copyrighted-free-use")):
+        return "none"
+    if lowered.startswith("cc-by"):
+        return "attribution"
+    return "uncovered"
+
+
+def strictest_obligation(licences) -> tuple[str, list[str]]:
+    """The strictest class present, and the licences that are not covered.
+
+    Returns the class name and every distinct licence value the declared
+    collection licence does not account for. An empty second element is what
+    makes the printed claim true rather than decorative.
+    """
+    seen = {obligation_class(l): [] for l in ("none", "attribution")}
+    uncovered = []
+    strictest = "none"
+    for licence in licences:
+        kind = obligation_class(licence)
+        if kind == "uncovered":
+            if licence not in uncovered:
+                uncovered.append(licence)
+            continue
+        if OBLIGATION_CLASSES.index(kind) > OBLIGATION_CLASSES.index(strictest):
+            strictest = kind
+    return strictest, sorted(uncovered)
 COLLECTION_LICENCE_URL = "https://creativecommons.org/licenses/by/4.0/"
 
 #: Kaggle accepts an enumerated licence, and none of its values means "mixed".
@@ -256,6 +315,26 @@ def cmd_prepare(args) -> int:
     tier = index["tier"]
     summary = licence_summary(manifest, index["samples"])
 
+    # THE DECLARED COLLECTION LICENCE HAS TO BE CHECKED, NOT ASSERTED.
+    #
+    # Publishing under a licence that does not cover every file in the
+    # collection understates what a recipient owes, and this is the corpus
+    # whose whole argument is that licensing should be traceable. Refusing here
+    # costs a rebuild; being wrong costs a stranger.
+    strictest, uncovered = strictest_obligation(summary["licences"])
+    if uncovered:
+        print(f"\nREFUSING TO PREPARE: {len(uncovered)} licence value(s) are "
+              f"not covered by {COLLECTION_LICENCE}:", file=sys.stderr)
+        for licence in uncovered:
+            print(f"  {licence:24} {summary['licences'][licence]:>6,} cover(s)",
+                  file=sys.stderr)
+        print(f"\nA user who complies with {COLLECTION_LICENCE} would NOT be "
+              f"compliant for those files, so declaring it would understate "
+              f"what they owe. Either remove them with "
+              f"select_unpublishable.py, or change the declared collection "
+              f"licence deliberately.", file=sys.stderr)
+        return 1
+
     identifier = f"pentimento-{tier.lower()}-v1"
     total_bytes = sum(s["bytes"] for s in index["shards"])
     blurb = (
@@ -298,7 +377,9 @@ def cmd_prepare(args) -> int:
 
     print(f"tier {tier}: {summary['total']:,} covers, "
           f"{len(index['shards'])} shard(s), {total_bytes / 1e9:.2f} GB")
-    print(f"collection licence: {COLLECTION_LICENCE} (strictest present, not loosest)")
+    print(f"collection licence: {COLLECTION_LICENCE}, and {strictest} is the "
+          f"strictest obligation actually present across "
+          f"{len(summary['licences'])} licence value(s)")
     for licence, count in summary["licences"].items():
         print(f"  {count:>6,}  {licence}")
     print(f"\nattribution required on {summary['attribution_required']:,} "
