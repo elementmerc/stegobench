@@ -5,6 +5,11 @@
 # Python 3.14.4 is what these were built and run against.
 #
 # Install:  python -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+# To REPRODUCE the published corpus, install `requirements.lock` instead. This
+# file names what we chose; that one records what was actually installed, and
+# the difference includes numba, which compiles the code that decides which
+# pixels carry the payload.
 
 # Corpus construction and scoring.
 numpy==2.5.3
