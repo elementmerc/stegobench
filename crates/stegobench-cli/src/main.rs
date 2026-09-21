@@ -463,6 +463,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Every code `stegobench_core::exit` publishes, which is what the help
+    /// text, `llms.txt` and the man page all print as the contract.
+    const CONTRACT_EXIT_CODES: &[i32] = &[
+        exit::OK,
+        exit::FAILURE,
+        exit::USAGE,
+        exit::PREFLIGHT_REFUSED,
+        exit::PLUGIN_FAILED,
+        exit::VERIFY_MISMATCH,
+        exit::SCHEMA_INVALID,
+        exit::LICENCE_REFUSED,
+        exit::ENVIRONMENT_UNFIT,
+        exit::INTERRUPTED,
+    ];
+
     #[test]
     fn the_command_tree_is_well_formed() {
         Cli::command().debug_assert();
@@ -499,6 +514,17 @@ mod tests {
     #[test]
     fn every_subcommand_in_the_tree_accepts_json_and_the_run_output_is_parseable() {
         let root = Cli::command();
+        // A walker over an empty tree passes every assertion inside the loop
+        // by never reaching one, which is the same fault as a check that
+        // reports clean because it could not look. The tree is therefore
+        // required to hold at least the commands the docs name.
+        let walked = root.get_subcommands().count();
+        assert!(
+            walked >= 9,
+            "walked {walked} subcommand(s); the command tree should carry at \
+             least the nine 04-cli-surface.md names, so this walk looked at \
+             almost nothing"
+        );
         for sub in root.get_subcommands() {
             let name = sub.get_name().to_string();
             let mut argv = vec!["stegobench".to_string(), "--json".to_string(), name.clone()];
@@ -524,11 +550,34 @@ mod tests {
             // and any future not-yet-built command still emit a JSON error
             // object, which is exactly the point: --json is honoured on the
             // refusal path too.
+            //
+            // Asserting `to_string(&out.json).is_ok()` would be a check that
+            // cannot fail: `out.json` is already a `serde_json::Value`, whose
+            // object keys are `String`s, so serialising one always succeeds.
+            // The bytes are therefore rendered and re-parsed, and the result
+            // is required to be the documented envelope (an object) carrying
+            // a code the exit contract actually names.
             let cli = parsed.unwrap();
             let out = run(&cli);
+            let rendered =
+                serde_json::to_string(&out.json).expect("a Value always renders to text");
+            let reparsed: serde_json::Value = serde_json::from_str(&rendered)
+                .unwrap_or_else(|e| panic!("{name:?} produced JSON that will not re-parse: {e}"));
             assert!(
-                serde_json::to_string(&out.json).is_ok(),
-                "{name:?} produced JSON that will not serialise"
+                reparsed.is_object(),
+                "{name:?} emitted {reparsed} on --json, but every subcommand's \
+                 machine output is a JSON object"
+            );
+            assert!(
+                CONTRACT_EXIT_CODES.contains(&out.code),
+                "{name:?} exited {} with --json, which is not in the exit code \
+                 contract the help text and the man page publish",
+                out.code
+            );
+            assert!(
+                !out.human.trim().is_empty(),
+                "{name:?} produced no human text, so a failure would print \
+                 nothing to stderr"
             );
         }
     }
