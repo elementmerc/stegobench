@@ -173,7 +173,27 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
         .collect::<Vec<_>>()
         .join("\n");
     if human.is_empty() {
-        human = format!("nothing registered under {kind:?}");
+        // Same standard as `corpora_block`: a bare line under an exit code of
+        // zero reads as "checked, all fine". Say where it looked, and say
+        // whether the registry is empty or merely has nothing of this kind,
+        // because those two call for different actions.
+        human = if reg.entries.is_empty() {
+            format!(
+                "No tools are registered under {}, so there is nothing to list \
+                 as {kind:?}. A tool entry declares how to run a detector or an \
+                 embedder; nothing here means nothing has been declared, which \
+                 is not the same as nothing existing.",
+                dir.display()
+            )
+        } else {
+            format!(
+                "{} tool(s) are registered under {}, but none of them is a {}. \
+                 `list all` prints every one.",
+                reg.entries.len(),
+                dir.display(),
+                kind.trim_end_matches('s')
+            )
+        };
     } else {
         let f = reg.footprint();
         human.push_str(&format!(
@@ -767,6 +787,57 @@ mod tests {
         assert!(
             out.human.contains("may be republished"),
             "got: {}",
+            out.human
+        );
+    }
+
+    /// The tools half had the fault the corpora half was written to avoid: it
+    /// printed `nothing registered under "detectors"` and exited zero, which
+    /// says neither where it looked nor whether anything is registered at all.
+    #[test]
+    fn an_empty_tools_listing_says_where_it_looked() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = cmd_list(dir.path(), "detectors");
+        assert_eq!(out.code, exit::OK);
+        assert!(
+            out.human.contains("nothing has been declared")
+                && out.human.contains(&dir.path().display().to_string()),
+            "got: {}",
+            out.human
+        );
+    }
+
+    /// A registry with tools but none of this kind is a different fact from an
+    /// empty registry, and calls for a different next step.
+    #[test]
+    fn a_kind_with_no_tools_is_distinguished_from_an_empty_registry() {
+        // Built here rather than read from the shipped registry, which has
+        // both kinds: a test that only checks this when the registry happens
+        // to be one-sided is a test that can pass without looking.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("only-a-detector.toml"),
+            format!(
+                "name = \"solo\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+                 [image]\nreference = \"ghcr.io/x/y@sha256:{}\"\n\
+                 [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+                "5".repeat(64)
+            ),
+        )
+        .unwrap();
+
+        let out = cmd_list(dir.path(), "embedders");
+        assert_eq!(out.code, exit::OK);
+        assert!(out.json["tools"].as_array().is_some_and(|a| a.is_empty()));
+        assert!(
+            out.human.contains("1 tool(s) are registered")
+                && out.human.contains("none of them is a embedder"),
+            "got: {}",
+            out.human
+        );
+        assert!(
+            !out.human.contains("nothing has been declared"),
+            "a registry with a tool in it was reported as empty: {}",
             out.human
         );
     }

@@ -475,7 +475,22 @@ impl Entry {
                 Some((repo, digest))
                     if !repo.is_empty()
                         && digest.len() == SHA256_HEX_LEN
-                        && digest.bytes().all(|b| b.is_ascii_hexdigit()) => {}
+                        && digest.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                {
+                    // `ManifestV1::validate` and `CorpusEntry::validate` both
+                    // refuse an uppercase digest on the grounds that digests
+                    // are compared as text. This half of the registry accepted
+                    // one, so the same paste passed here and failed there.
+                    if digest.bytes().any(|b| b.is_ascii_uppercase()) {
+                        bad.push(format!(
+                            "image {:?} names an upper case digest; digests are \
+                             compared as text here, so case has to be settled. \
+                             `docker pull` reports lower case, which is the form \
+                             to paste",
+                            img.reference
+                        ));
+                    }
+                }
                 Some((_, digest)) => bad.push(format!(
                     "image {:?} names a digest of {} character(s), but a \
                      sha256 digest is {SHA256_HEX_LEN} hexadecimal \
@@ -806,6 +821,23 @@ must_clear = "b.png"
     fn a_mutable_tag_is_refused() {
         let e = parse("[image]\nreference = \"ghcr.io/x/y:latest\"");
         assert!(e.validate().unwrap_err()[0].contains("not pinned by digest"));
+    }
+
+    /// The two halves of the registry have to hold one standard. `ManifestV1`
+    /// and `CorpusEntry` both refuse an uppercase digest because digests are
+    /// compared as text; this half accepted one, so the same paste passed in
+    /// one file and failed in another with nothing to explain the difference.
+    #[test]
+    fn an_upper_case_image_digest_is_refused_as_it_is_everywhere_else() {
+        let e = parse(&format!(
+            "[image]\nreference = \"ghcr.io/x/y@sha256:{}\"",
+            A_REAL_DIGEST.to_uppercase()
+        ));
+        let problems = e.validate().expect_err("upper case digest was accepted");
+        assert!(
+            problems.iter().any(|p| p.contains("upper case")),
+            "refused for the wrong reason: {problems:?}"
+        );
     }
 
     /// `@sha256:` as a substring is not a pin. A placeholder waiting on a
