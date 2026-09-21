@@ -78,11 +78,14 @@ A tier is the first *n* covers of one fixed ordering, so a smaller tier is
 always a prefix of a larger one. You can develop against Nano and evaluate on
 Core without the two overlapping in a way that flatters your results.
 
-| Tier | Covers | Covers only / with arms |
-|---|---|---|
-| Nano | 200 | 64 MB / ~1 GB |
-| Lite | 1,000 | 310 MB / ~20 GB |
-| **Core** | **10,000** | **3.1 GB / ~45 GB** |
+| Tier | Covers | Covers only | With every arm |
+|---|---|---|---|
+| Nano | 200 | 66 MB | 1.0 GB |
+| Lite | 1,000 | 327 MB | 4.7 GB |
+| **Core** | **10,000** | **3.1 GB** | **45 GB** |
+
+The nesting is exact rather than approximate: Lite's cover shard is the same
+file, byte for byte, as Core's first cover shard.
 
 ## Check what you downloaded
 

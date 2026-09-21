@@ -252,6 +252,55 @@ class EndToEndTests(unittest.TestCase):
     def test_a_missing_manifest_is_refused(self):
         self.assertEqual(self.run_main("--covers-manifest", "/nonexistent.jsonl"), 1)
 
+    def test_the_tier_name_reaches_the_reader_facing_files(self):
+        """A Nano download must not introduce itself as Core.
+
+        The index is globbed rather than named, so the same run packages every
+        tier. If the name did not flow through, Nano would ship a README and a
+        citation claiming 10,000 covers while holding 200.
+        """
+        for path in self.rel.glob("pentimento-*-index.json"):
+            path.unlink()
+        (self.rel / "pentimento-nano-index.json").write_text(json.dumps({
+            "tier": "Nano", "samples": 2,
+            "shards": [{"shard": "pentimento-nano-00000.tar", "samples": 2,
+                        "bytes": 1024, "sha256": "a" * 64}],
+        }))
+        self.assertEqual(self.run_main(), 0)
+        self.assertIn("# Pentimento Nano", (self.rel / "README.md").read_text())
+        self.assertIn("Pentimento Nano", (self.rel / "CITATION.cff").read_text())
+
+    def test_a_small_tier_credits_only_its_own_photographers(self):
+        """Nano must not ship Core's credit list.
+
+        Naming a photographer whose work is not in the download is a false
+        statement about what was used, and it is the kind that only a
+        photographer notices.
+        """
+        rows = [dict(row(f"{i:05d}.png"), tier_order=i) for i in range(4)]
+        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        for path in self.rel.glob("pentimento-*-index.json"):
+            path.unlink()
+        (self.rel / "pentimento-nano-index.json").write_text(json.dumps({
+            "tier": "Nano", "samples": 2,
+            "shards": [{"shard": "pentimento-nano-00000.tar", "samples": 2,
+                        "bytes": 1024, "sha256": "a" * 64}],
+        }))
+        self.assertEqual(self.run_main("--covers-manifest", str(self.manifest)), 0)
+        body = (self.rel / "ATTRIBUTION.md").read_text()
+        self.assertIn("00000.png", body)
+        self.assertIn("00001.png", body)
+        self.assertNotIn("00002.png", body)
+        self.assertIn("**2 of 2 covers require attribution.**", body)
+
+    def test_an_arms_index_is_not_mistaken_for_the_cover_index(self):
+        # Both match pentimento-*-index.json, and the arms one has no "samples"
+        # key, so picking it would produce a README claiming zero covers.
+        (self.rel / "pentimento-core-arms-index.json").write_text(
+            json.dumps({"tier": "Core", "part": "arms", "arms": []}))
+        self.assertEqual(self.run_main(), 0)
+        self.assertIn("2 permissively licensed", (self.rel / "README.md").read_text())
+
     def test_a_missing_release_directory_is_refused(self):
         self.assertEqual(release_metadata.main(
             ["--release", "/nonexistent/core"]), 1)

@@ -46,6 +46,9 @@ import json
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from tiers import TierError, tier_cover_names  # noqa: E402
+
 #: The one sentence that must appear before anything else, everywhere. A reader
 #: who takes a number from here and compares it with a BOSSbase number has been
 #: misled, and the corpus is responsible for saying so first rather than in a
@@ -81,6 +84,7 @@ def split_arms(arms: dict | None) -> tuple[int, int, int, int]:
 
 
 def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -> str:
+    tier = cover_index.get("tier", "Core")
     total_covers = cover_index.get("samples", licences.get("total", 0))
     cover_shards = len(cover_index.get("shards", []))
     stego_total, stego_count, clean_total, clean_count = split_arms(arms)
@@ -96,7 +100,7 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
                                   key=lambda kv: -kv[1])
     )
 
-    return f"""# Pentimento Core, v{version}
+    return f"""# Pentimento {tier}, v{version}
 
 **{NOT_COMPARABLE}**
 
@@ -131,7 +135,7 @@ Shards are [WebDataset](https://github.com/webdataset/webdataset) tar files.
 Inside each, a sample's parts share a basename:
 
 ```
-pentimento-core-00000.tar
+pentimento-{tier.lower()}-00000.tar
   000000.png     the image
   000000.json    its manifest row, licence included
 ```
@@ -143,7 +147,14 @@ They stream without unpacking, and every major dataset loader reads them.
 | Covers | {total_covers:,} | {cover_shards} |
 {arm_lines}
 
-Each part carries an index JSON with a sha256 per shard. Verify before use.
+Each part ships a `SHA256SUMS` beside its shards, so `sha256sum -c SHA256SUMS`
+verifies a download in one command. Do it before use: a shard that arrived
+truncated reads as a smaller corpus rather than as an error.
+
+Tiers nest. Nano is the first 200 covers of the same ordering Lite's first
+1,000 and Core's 10,000 follow, so you can develop against a small tier and
+evaluate on a larger one without the two overlapping in a way that flatters
+the result.
 
 ## Licensing, in one paragraph
 
@@ -184,10 +195,10 @@ candidates are recorded with their reason rather than silently dropped.
 """
 
 
-def citation(version: str, today: str) -> str:
+def citation(version: str, today: str, tier: str = "Core") -> str:
     return f"""cff-version: 1.2.0
 message: "If you use this corpus, please cite it as below."
-title: "Pentimento Core: a licence-traceable steganalysis corpus"
+title: "Pentimento {tier}: a licence-traceable steganalysis corpus"
 abstract: >-
   {NOT_COMPARABLE}
   A steganalysis corpus of permissively licensed cover photographs with matched
@@ -586,7 +597,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no release directory at {rel}", file=sys.stderr)
         return 1
 
-    cover_index_path = rel / "pentimento-core-index.json"
+    # Globbed rather than named, so Nano and Lite are packaged by the same
+    # run as Core rather than by a second code path that can drift from it.
+    found = sorted(rel.glob("pentimento-*-index.json"))
+    found = [p for p in found if "arms" not in p.name]
+    if not found:
+        print(f"no pentimento-*-index.json in {rel}; run pack_tier.py first",
+              file=sys.stderr)
+        return 1
+    cover_index_path = found[0]
     licences_path = rel / "licence-summary.json"
     for p in (cover_index_path, licences_path):
         if not p.exists():
@@ -604,7 +623,8 @@ def main(argv: list[str] | None = None) -> int:
     today = datetime.date.today().isoformat()
     written = {
         "README.md": readme(cover_index, licences, arms, args.version),
-        "CITATION.cff": citation(args.version, today),
+        "CITATION.cff": citation(args.version, today,
+                                 cover_index.get("tier", "Core")),
         "croissant.json": json.dumps(
             croissant(cover_index, licences, arms, args.version, today),
             indent=2, sort_keys=True) + "\n",
@@ -620,6 +640,20 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         rows = [json.loads(line) for line in
                 manifest.read_text().splitlines() if line.strip()]
+        # The manifest covers the whole corpus, so a smaller tier has to be cut
+        # down to its own covers. Shipping Core's 5,429 credit lines with a
+        # 200 cover Nano would name photographers whose work is not in the
+        # download, which is a false statement about what was used.
+        packed = cover_index.get("samples", len(rows))
+        if packed < len(rows):
+            try:
+                in_tier = tier_cover_names(manifest, packed)
+            except TierError as e:
+                print(f"cannot select the tier for attribution: {e}", file=sys.stderr)
+                return 1
+            rows = [r for r in rows if r.get("file") in in_tier]
+            print(f"  attribution scoped to {cover_index.get('tier', '?')}: "
+                  f"{len(rows):,} covers")
         written["ATTRIBUTION.md"] = attribution(rows)
         written["ATTRIBUTION.csv"] = attribution_csv(rows)
     else:
