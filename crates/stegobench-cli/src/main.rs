@@ -22,123 +22,12 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser};
+use stegobench_cli::cli::{Cli, Command};
+use stegobench_cli::help_topics;
 use stegobench_core::registry::{Kind, Registry};
-use stegobench_core::{exit, Result1};
+use stegobench_core::{exit, ManifestV1, Result1, RunV1};
 use stegobench_plugin::{availability, selftest, Verified};
-
-#[derive(Parser)]
-#[command(
-    name = "stegobench",
-    version,
-    about = "A reproducible benchmark for image steganalysis",
-    long_about = "Build a labelled corpus, run detectors over identical bytes, \
-                  and report numbers somebody else can check.\n\n\
-                  Machine-readable output goes to stdout with --json; progress \
-                  and diagnostics go to stderr, so the two can be separated."
-)]
-struct Cli {
-    /// Machine-readable output on stdout. Accepted by every subcommand.
-    #[arg(long, global = true)]
-    json: bool,
-
-    /// Where the tool registry lives.
-    #[arg(
-        long,
-        global = true,
-        value_name = "DIR",
-        env = "STEGOBENCH_REGISTRY",
-        default_value = "plugins/registry"
-    )]
-    registry: PathBuf,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Print a published schema, generated from the types the tool writes
-    ///
-    /// The schema is not maintained by hand beside the code; it is derived
-    /// from it, so a document that validates is one this version can read.
-    ///
-    /// Example:
-    ///   stegobench schema result-v1 > result-v1.schema.json
-    Schema {
-        /// Which schema. Currently only `result-v1`.
-        #[arg(value_name = "NAME", default_value = "result-v1")]
-        name: String,
-    },
-
-    /// Check a document against its schema and the rules the schema cannot hold
-    ///
-    /// Exits 6 when the document is invalid, naming every problem rather than
-    /// only the first, because fixing them one round trip at a time is how a
-    /// format gets a reputation for being fussy.
-    ///
-    /// Example:
-    ///   stegobench validate results/rich-model-suniward-0400.json
-    Validate {
-        /// Path to a JSON document.
-        #[arg(value_name = "FILE")]
-        file: PathBuf,
-    },
-
-    /// List what this installation can do
-    ///
-    /// Generated from the registry, so what it prints is what the tool will
-    /// actually run. A README goes stale; this cannot.
-    ///
-    /// Example:
-    ///   stegobench list detectors --json | jq '.[].name'
-    List {
-        /// One of: detectors, embedders, all.
-        #[arg(value_name = "KIND", default_value = "all")]
-        kind: String,
-    },
-
-    /// Show everything registered about one tool
-    Describe {
-        /// A name as `list` prints it.
-        #[arg(value_name = "NAME")]
-        name: String,
-    },
-
-    /// Estimate what a run would cost, without running anything
-    Plan {
-        /// The command that would be run, as it would be typed.
-        #[arg(value_name = "COMMAND", trailing_var_arg = true, num_args = 0..)]
-        command: Vec<String>,
-    },
-
-    /// Check that this machine can run what it claims to
-    ///
-    /// Reports what is installed and what is missing. It does NOT yet run each
-    /// tool against a known positive and a known negative, and says so per
-    /// line rather than letting "present" read as "working": a rich-model
-    /// extraction once ran over 2,000 images, exited zero every time and
-    /// produced nothing, because a support package was missing.
-    ///
-    /// Exits 8 when something needed is missing.
-    Doctor {
-        /// Where the self-test fixtures live.
-        #[arg(long, value_name = "DIR", default_value = "fixtures")]
-        fixtures: PathBuf,
-        /// Skip the self-tests and only report what is installed. Faster, and
-        /// honest about being weaker: it cannot tell a working tool from a
-        /// broken one.
-        #[arg(long)]
-        no_selftest: bool,
-    },
-
-    /// Score a corpus with one or more detectors
-    Score {
-        /// Corpus name or directory.
-        #[arg(long, value_name = "NAME_OR_PATH")]
-        corpus: String,
-    },
-}
 
 /// What a subcommand produced: a JSON value for stdout, and human text for stderr.
 struct Output {
@@ -168,18 +57,37 @@ impl Output {
     }
 }
 
+const KNOWN_SCHEMAS: &[&str] = &["result-v1", "run-v1", "manifest-v1"];
+
+fn schema_value(name: &str) -> Option<serde_json::Value> {
+    let schema = match name {
+        "result-v1" => serde_json::to_value(schemars::schema_for!(Result1)),
+        "run-v1" => serde_json::to_value(schemars::schema_for!(RunV1)),
+        "manifest-v1" => serde_json::to_value(schemars::schema_for!(ManifestV1)),
+        _ => return None,
+    };
+    Some(schema.expect("a generated schema serialises"))
+}
+
 fn cmd_schema(name: &str) -> Output {
-    match name {
-        "result-v1" => {
-            let schema = schemars::schema_for!(Result1);
-            Output::ok(
-                serde_json::to_value(&schema).expect("a generated schema serialises"),
-                "result-v1 schema written to stdout",
-            )
-        }
-        other => Output::err(
+    if name == "all" {
+        let map: serde_json::Map<String, serde_json::Value> = KNOWN_SCHEMAS
+            .iter()
+            .map(|n| (n.to_string(), schema_value(n).expect("known schema")))
+            .collect();
+        return Output::ok(
+            serde_json::Value::Object(map),
+            "all schemas written to stdout",
+        );
+    }
+    match schema_value(name) {
+        Some(v) => Output::ok(v, format!("{name} schema written to stdout")),
+        None => Output::err(
             exit::USAGE,
-            format!("unknown schema {other:?}. Known schemas: result-v1"),
+            format!(
+                "unknown schema {name:?}. Known schemas: {}, or `all`",
+                KNOWN_SCHEMAS.join(", ")
+            ),
         ),
     }
 }
@@ -360,6 +268,12 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
     out
 }
 
+/// Which of the three published schemas a document is judged against.
+///
+/// Dispatched on the document's own `schema` field rather than guessed from
+/// its shape, so a document that claims to be a `result-v1` but is missing a
+/// required field fails with a reason instead of being silently tried against
+/// the wrong type.
 fn cmd_validate(file: &Path) -> Output {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
@@ -370,32 +284,113 @@ fn cmd_validate(file: &Path) -> Output {
             )
         }
     };
-    let parsed: Result1 = match serde_json::from_str(&text) {
+    let sniff: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
             return Output::err(
                 exit::SCHEMA_INVALID,
-                format!("{} is not a result-v1 document: {e}", file.display()),
+                format!("{} is not valid JSON: {e}", file.display()),
             )
         }
     };
-    match parsed.validate() {
-        Ok(()) => Output::ok(
-            serde_json::json!({ "ok": true, "schema": parsed.schema }),
-            format!("{} is a valid result-v1 document", file.display()),
-        ),
-        Err(problems) => {
-            let mut out = Output::err(
-                exit::SCHEMA_INVALID,
-                format!(
-                    "{} is not valid:\n  {}",
-                    file.display(),
-                    problems.join("\n  ")
+    let schema_field = sniff.get("schema").and_then(|v| v.as_str());
+
+    macro_rules! validate_as {
+        ($ty:ty, $label:literal) => {{
+            let parsed: $ty = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Output::err(
+                        exit::SCHEMA_INVALID,
+                        format!("{} is not a {} document: {e}", file.display(), $label),
+                    )
+                }
+            };
+            match parsed.validate() {
+                Ok(()) => Output::ok(
+                    serde_json::json!({ "ok": true, "schema": parsed.schema }),
+                    format!("{} is a valid {} document", file.display(), $label),
                 ),
-            );
-            out.json = serde_json::json!({ "ok": false, "problems": problems });
-            out
+                Err(problems) => {
+                    let mut out = Output::err(
+                        exit::SCHEMA_INVALID,
+                        format!(
+                            "{} is not valid:\n  {}",
+                            file.display(),
+                            problems.join("\n  ")
+                        ),
+                    );
+                    out.json = serde_json::json!({ "ok": false, "problems": problems });
+                    out
+                }
+            }
+        }};
+    }
+
+    match schema_field {
+        Some(s) if s.starts_with("stegobench/result-v") => validate_as!(Result1, "result-v1"),
+        Some(s) if s.starts_with("stegobench/run-v") => validate_as!(RunV1, "run-v1"),
+        Some(s) if s.starts_with("stegobench/manifest-v") => {
+            validate_as!(ManifestV1, "manifest-v1")
         }
+        Some(other) => Output::err(
+            exit::SCHEMA_INVALID,
+            format!(
+                "{} declares schema {other:?}, which this version does not \
+                 know. Known: {}",
+                file.display(),
+                KNOWN_SCHEMAS.join(", ")
+            ),
+        ),
+        None => Output::err(
+            exit::SCHEMA_INVALID,
+            format!(
+                "{} has no \"schema\" field, so it cannot be dispatched to a \
+                 validator. Known: {}",
+                file.display(),
+                KNOWN_SCHEMAS.join(", ")
+            ),
+        ),
+    }
+}
+
+fn cmd_completions(shell: clap_complete::Shell) -> Output {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut cmd, name, &mut buf);
+    let script = String::from_utf8(buf).unwrap_or_default();
+    Output::ok(
+        serde_json::json!({ "shell": shell.to_string(), "script": script }),
+        script,
+    )
+}
+
+fn cmd_help(topic: Option<&str>) -> Output {
+    match topic {
+        None => {
+            let human = format!(
+                "Known topics: {}\n\nExample:\n  stegobench help pairing",
+                help_topics::TOPICS.join(", ")
+            );
+            Output::ok(
+                serde_json::json!({ "topics": help_topics::TOPICS }),
+                human,
+            )
+        }
+        Some(t) => match help_topics::text(t) {
+            Some(text) => Output::ok(
+                serde_json::json!({ "topic": t, "text": text }),
+                text.to_string(),
+            ),
+            None => Output::err(
+                exit::USAGE,
+                format!(
+                    "no help topic {t:?}. Known: {}",
+                    help_topics::TOPICS.join(", ")
+                ),
+            ),
+        },
     }
 }
 
@@ -427,6 +422,8 @@ fn run(cli: &Cli) -> Output {
             no_selftest,
         } => cmd_doctor(&cli.registry, fixtures, *no_selftest),
         Command::Score { .. } => not_yet("score", "needs the plugin host"),
+        Command::Completions { shell } => cmd_completions(*shell),
+        Command::Help { topic } => cmd_help(topic.as_deref()),
     }
 }
 
@@ -440,12 +437,20 @@ fn main() {
         let _ = writeln!(stdout);
     } else if out.code == exit::OK {
         // Human mode still puts the payload on stdout when the payload IS the
-        // point, as it is for `schema`, so redirecting to a file works without
-        // remembering a flag.
+        // point, so redirecting to a file works without remembering a flag.
+        // `schema` writes structured JSON even in human mode, because the
+        // schema itself is JSON; `completions` and `help` write the plain
+        // text a shell or a reader wants, not a JSON wrapper around it.
         if matches!(cli.command, Command::Schema { .. }) {
             let mut stdout = std::io::stdout().lock();
             let _ = serde_json::to_writer_pretty(&mut stdout, &out.json);
             let _ = writeln!(stdout);
+        } else if matches!(
+            cli.command,
+            Command::Completions { .. } | Command::Help { .. }
+        ) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{}", out.human);
         } else {
             eprintln!("{}", out.human);
         }
@@ -459,7 +464,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn the_command_tree_is_well_formed() {
@@ -474,11 +478,60 @@ mod tests {
             vec!["stegobench", "--json", "schema", "result-v1"],
             vec!["stegobench", "--json", "validate", "x.json"],
             vec!["stegobench", "--json", "list", "detectors"],
+            vec!["stegobench", "--json", "describe", "steghide"],
+            vec!["stegobench", "--json", "plan", "score"],
             vec!["stegobench", "--json", "doctor"],
             vec!["stegobench", "--json", "doctor", "--no-selftest"],
             vec!["stegobench", "--json", "score", "--corpus", "x"],
+            vec!["stegobench", "--json", "completions", "bash"],
+            vec!["stegobench", "--json", "help", "pairing"],
+            vec!["stegobench", "--json", "help"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "rejected: {args:?}");
+        }
+    }
+
+    /// L: walks the actual command tree from `Cli::command()` rather than a
+    /// hand-kept list, so a subcommand added later without `--json` fails
+    /// here even if nobody remembered to update a fixture list by hand. Each
+    /// subcommand's required positionals are filled with a placeholder value
+    /// picked from what the argument declares (or `bash` for the one enum
+    /// value, `completions`' shell), since the parse succeeding is what is
+    /// under test, not what the placeholder does downstream.
+    #[test]
+    fn every_subcommand_in_the_tree_accepts_json_and_the_run_output_is_parseable() {
+        let root = Cli::command();
+        for sub in root.get_subcommands() {
+            let name = sub.get_name().to_string();
+            let mut argv = vec!["stegobench".to_string(), "--json".to_string(), name.clone()];
+            for arg in sub.get_arguments() {
+                if !arg.is_required_set() {
+                    continue;
+                }
+                let placeholder = if name == "completions" {
+                    "bash".to_string()
+                } else {
+                    "x".to_string()
+                };
+                if let Some(long) = arg.get_long() {
+                    argv.push(format!("--{long}"));
+                }
+                argv.push(placeholder);
+            }
+            let parsed = Cli::try_parse_from(&argv);
+            assert!(parsed.is_ok(), "{name:?} rejected --json: {argv:?}");
+
+            // And the command actually runs to a well-formed, parseable JSON
+            // payload rather than merely parsing its flags. `score`, `plan`
+            // and any future not-yet-built command still emit a JSON error
+            // object, which is exactly the point: --json is honoured on the
+            // refusal path too.
+            let cli = parsed.unwrap();
+            let out = run(&cli);
+            assert!(
+                serde_json::to_string(&out.json).is_ok(),
+                "{name:?} produced JSON that will not serialise"
+            );
         }
     }
 

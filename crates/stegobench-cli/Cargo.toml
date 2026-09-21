@@ -8,15 +8,31 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "stegobench_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "stegobench"
 path = "src/main.rs"
+
+[build-dependencies]
+# build.rs textually includes src/cli.rs (see build.rs) rather than depending
+# on this package's own lib target, because Cargo does not allow a package to
+# depend on itself even by path. Including the same source file both here and
+# from lib.rs means the man pages are generated from the identical command
+# tree definition the binary parses against, so they cannot drift from it: a
+# hand-written man page can, this cannot.
+clap_mangen = "0.2"
+clap.workspace = true
+clap_complete = "4"
 
 [dependencies]
 stegobench-core = { path = "../stegobench-core" }
 stegobench-metrics = { path = "../stegobench-metrics" }
 stegobench-plugin = { path = "../stegobench-plugin" }
 clap.workspace = true
+clap_complete = "4"
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
