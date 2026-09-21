@@ -235,6 +235,75 @@ mod tests {
         std::env::remove_var("STEGOBENCH_TEST_SET_VAR");
     }
 
+    /// The StegaShield token-leak test named in the v0.1 shortlist (13-v0.1-
+    /// scope.md section 2): "a test asserts that: run the plugin with a known
+    /// token value and grep every artefact the run produced for it."
+    ///
+    /// This exercises the REAL registered entry (`plugins/registry/detectors/
+    /// stegashield.toml`), not a synthetic one, on both paths the item asks
+    /// for:
+    ///
+    /// - **Absent token**: `check()` must report `STEGASHIELD_LICENCE` as
+    ///   missing rather than silently proceeding or panicking.
+    /// - **Present token**: given a sentinel value, that value must not
+    ///   appear anywhere in `Availability`'s Debug output, its `summary()`
+    ///   line, or the JSON `stegobench describe stegashield` would emit
+    ///   (`Entry` only ever carries the variable's NAME in `secrets`, never a
+    ///   value, so this also guards against a future change to `Entry`
+    ///   accidentally starting to carry one).
+    ///
+    /// **What this does NOT test, and why.** `score`/`run` do not exist yet
+    /// (see `main.rs`'s `not_yet`), so there is no code path that actually
+    /// starts the StegaShield container, and therefore nothing yet writes a
+    /// log line, a manifest row or a `result-v1` document from a real
+    /// invocation for a real run to grep. The full "run it and grep every
+    /// artefact" version of this test has to wait for that command to exist;
+    /// this test is written so it keeps passing unchanged once it does, and
+    /// so the absent-token path (the one that must fail clearly) is checked
+    /// today rather than left untested until then. No real
+    /// `STEGASHIELD_LICENCE` token was available to this session and none
+    /// was requested, per the instruction that the token is user-supplied
+    /// and never hardcoded; the sentinel here stands in for it.
+    #[test]
+    fn the_stegashield_licence_token_never_leaks_on_either_path() {
+        let registry_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry");
+        let reg = stegobench_core::registry::Registry::load(&registry_dir)
+            .expect("the real registry loads");
+        let stegashield = reg
+            .entries
+            .get("stegashield")
+            .expect("stegashield is registered");
+        assert_eq!(stegashield.secret_names(), ["STEGASHIELD_LICENCE"]);
+
+        // Absent-token path: must be reported missing, not silently ignored.
+        std::env::remove_var("STEGASHIELD_LICENCE");
+        let absent = check(stegashield);
+        assert_eq!(absent.missing_secrets, ["STEGASHIELD_LICENCE"]);
+
+        // Present-token path: a sentinel must never surface anywhere.
+        const SENTINEL: &str = "sk-test-sentinel-do-not-print-9f31c2";
+        std::env::set_var("STEGASHIELD_LICENCE", SENTINEL);
+        let present = check(stegashield);
+        std::env::remove_var("STEGASHIELD_LICENCE");
+
+        assert!(present.missing_secrets.is_empty());
+        let debug_repr = format!("{present:?}");
+        assert!(
+            !debug_repr.contains(SENTINEL),
+            "the token leaked into Availability's Debug output: {debug_repr}"
+        );
+        assert!(
+            !present.summary().contains(SENTINEL),
+            "the token leaked into the doctor summary line"
+        );
+        let describe_json = serde_json::to_string(stegashield).expect("Entry serialises");
+        assert!(
+            !describe_json.contains(SENTINEL),
+            "the token leaked into what `stegobench describe stegashield` would print"
+        );
+    }
+
     #[test]
     fn an_entry_with_neither_image_nor_binary_is_unknown_not_absent() {
         let mut e = entry(&format!(
