@@ -92,7 +92,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from pack_arms import container_of  # noqa: E402
+from pack_arms import container_of, cover_of, load_jpeg_cover_map  # noqa: E402
 
 #: Licences this corpus may carry. Anything else is either a mistake or a
 #: decision nobody recorded, and both are worth refusing over.
@@ -405,11 +405,23 @@ def check_provenance(arm_root: pathlib.Path, rows: list[dict],
     the kind of claim this corpus exists to refuse.
     """
     known = {r["file"]: r["sha256"] for r in rows}
-    unstamped, wrong, checked = 0, [], 0
+
+    # The DCT arms are built from the clean JPEG pool, so they carry
+    # `source_jpeg` rather than `source_png`. Skipping a row whose direct field
+    # is absent exempted all 80,000 of them from this check, and the exemption
+    # rendered as a smaller number rather than as a warning.
+    jpeg_manifest = arm_root / "jpeg-tools" / "manifest.jsonl"
+    jpeg_map = (load_jpeg_cover_map(jpeg_manifest)
+                if jpeg_manifest.is_file() else {})
+
+    known_rows = 0
+    unstamped, wrong, checked, unresolved = 0, [], 0, 0
     for path in sorted(arm_root.rglob("manifest.jsonl")):
         for row in load_rows(path):
-            source = row.get("source_png")
+            known_rows += 1
+            source, _ = cover_of(row, jpeg_map)
             if not source:
+                unresolved += 1
                 continue
             stamped = row.get("source_sha256")
             if not stamped:
@@ -419,6 +431,12 @@ def check_provenance(arm_root: pathlib.Path, rows: list[dict],
             if known.get(source) != stamped:
                 wrong.append(row.get("stego", source))
 
+    if unresolved:
+        report.fail("provenance",
+                    f"{unresolved:,} arm row(s) name no cover at all, directly "
+                    f"or through the clean JPEG pool, so this check could not "
+                    f"look at them. Skipping them would report on the rest and "
+                    f"read as a pass")
     if unstamped:
         report.fail("provenance",
                     f"{unstamped:,} arm row(s) carry no source_sha256, so "
@@ -432,9 +450,12 @@ def check_provenance(arm_root: pathlib.Path, rows: list[dict],
     if not unstamped and nothing_checked("provenance", checked, report,
                                          "arm rows"):
         return
-    if not unstamped and not wrong:
-        report.note("provenance", f"{checked:,} rows name the cover they were "
-                                  f"built from, by content")
+    if not unstamped and not wrong and not unresolved:
+        # Both numbers, deliberately. "261,997 rows checked" looked clean while
+        # 80,000 rows were being skipped for carrying a different field name,
+        # and only the total says whether the check saw the whole corpus.
+        report.note("provenance", f"{checked:,} of {known_rows:,} rows name "
+                                  f"the cover they were built from, by content")
 
 
 def check_stale(arm_root: pathlib.Path, sample_per_arm: int,

@@ -59,6 +59,10 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from rebuild_replaced_covers import RebuildError, positions, stems_of  # noqa: E402
+# The same join `pack_arms.py` uses, imported rather than rewritten: two
+# implementations of "which cover is this row descended from" is how the two
+# halves of a release come to disagree about who took the photograph.
+from pack_arms import cover_of, load_jpeg_cover_map  # noqa: E402
 
 
 class StampError(RuntimeError):
@@ -91,13 +95,29 @@ def cover_digests(covers: pathlib.Path) -> dict[str, str]:
     return out
 
 
-def unknown_sources(rows: list[dict], known: dict[str, str]) -> list[str]:
-    return sorted({r["source_png"] for r in rows
-                   if r.get("source_png") and r["source_png"] not in known})
+def unknown_sources(rows: list[dict], known: dict[str, str],
+                    jpeg_map: dict[str, str] | None = None) -> list[str]:
+    jpeg_map = jpeg_map or {}
+    found = set()
+    for row in rows:
+        cover, _ = cover_of(row, jpeg_map)
+        if cover and cover not in known:
+            found.add(cover)
+    return sorted(found)
 
 
-def rows_without_a_source(rows: list[dict]) -> int:
-    return sum(1 for r in rows if not r.get("source_png"))
+def rows_without_a_source(rows: list[dict],
+                          jpeg_map: dict[str, str] | None = None) -> int:
+    """Rows whose cover cannot be established, directly or indirectly.
+
+    The DCT arms are built from the clean JPEG pool rather than from the cover
+    PNG, so they carry `source_jpeg` and no `source_png`. Counting only the
+    direct field reported all 80,000 of them as unprovenanced, which is a
+    refusal over a field name: the pool's own manifest records which cover each
+    clean JPEG came from, so the chain is there to follow.
+    """
+    jpeg_map = jpeg_map or {}
+    return sum(1 for r in rows if not cover_of(r, jpeg_map)[0])
 
 
 def missing_rebuilt(rows: list[dict], stems: set[str]) -> list[str]:
@@ -123,11 +143,13 @@ def drifted(rows: list[dict], base: pathlib.Path, limit: int) -> list[str]:
     return out
 
 
-def stamp(rows: list[dict], known: dict[str, str]) -> int:
+def stamp(rows: list[dict], known: dict[str, str],
+          jpeg_map: dict[str, str] | None = None) -> int:
     """Write `source_sha256` onto every row that lacks it. Returns how many."""
+    jpeg_map = jpeg_map or {}
     written = 0
     for row in rows:
-        source = row.get("source_png")
+        source, _ = cover_of(row, jpeg_map)
         if not source:
             continue
         want = known[source]
@@ -143,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--covers", required=True)
     ap.add_argument("--swaps", action="append", default=[],
                     help="backfill_covers.py logs, to check the rebuild landed")
+    ap.add_argument("--jpeg-covers-manifest", default=None,
+                    help="the manifest recording which cover each clean JPEG "
+                         "was made from, for the DCT arms that carry "
+                         "source_jpeg rather than source_png. Defaults to "
+                         "<arms>/jpeg-tools/manifest.jsonl")
     ap.add_argument("--drift-sample", type=int, default=2000,
                     help="rows per manifest to re-digest; 0 means all")
     ap.add_argument("--dry-run", action="store_true")
@@ -158,6 +185,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot start: {e}", file=sys.stderr)
         return 1
     print(f"{len(known):,} covers in the manifest")
+
+    # Without this the DCT arms look unprovenanced: they are built from the
+    # clean JPEG pool, so they carry `source_jpeg`, and the pool's own manifest
+    # is what turns that back into a cover.
+    jpeg_manifest = pathlib.Path(
+        args.jpeg_covers_manifest or arms / "jpeg-tools" / "manifest.jsonl")
+    jpeg_map: dict[str, str] = {}
+    if jpeg_manifest.is_file():
+        jpeg_map = load_jpeg_cover_map(jpeg_manifest)
+        print(f"{len(jpeg_map):,} clean JPEGs joined to the covers they "
+              f"came from")
+    else:
+        print(f"no JPEG cover map at {jpeg_manifest}, so any DCT arm will be "
+              f"reported as unprovenanced rather than silently skipped")
 
     stems: set[str] = set()
     if args.swaps:
@@ -181,14 +222,15 @@ def main(argv: list[str] | None = None) -> int:
         loaded[path] = rows
         name = str(path.relative_to(arms))
 
-        orphans = rows_without_a_source(rows)
+        orphans = rows_without_a_source(rows, jpeg_map)
         if orphans:
-            problems[name].append(f"{orphans:,} row(s) record no source_png, so "
-                                  f"nothing says which cover they came from")
-        unknown = unknown_sources(rows, known)
+            problems[name].append(f"{orphans:,} row(s) name no cover, directly or "
+                                  f"through the clean JPEG pool, so nothing "
+                                  f"says where they came from")
+        unknown = unknown_sources(rows, known, jpeg_map)
         if unknown:
             problems[name].append(
-                f"{len(unknown)} source_png value(s) are not in the cover "
+                f"{len(unknown)} cover name(s) are not in the cover "
                 f"manifest, e.g. {unknown[:3]}")
         absent = missing_rebuilt(rows, stems) if stems else []
         if absent:
@@ -213,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
 
     total = 0
     for path, rows in loaded.items():
-        written = stamp(rows, known)
+        written = stamp(rows, known, jpeg_map)
         total += written
         print(f"  {path.relative_to(arms)}: {written:,} of {len(rows):,} "
               f"row(s) stamped")

@@ -58,6 +58,38 @@ class PureTests(unittest.TestCase):
         self.assertEqual(rows[0]["source_sha256"], "aa")
 
 
+class IndirectProvenanceTests(unittest.TestCase):
+    """The DCT arms name a clean JPEG, not a cover.
+
+    They are built from the clean JPEG pool, so they carry `source_jpeg`.
+    Reading only `source_png` reported all 80,000 of them as having no
+    provenance and refused the whole stamp, which is a refusal over a field
+    name: the pool's own manifest records which cover each clean JPEG came
+    from, and `pack_arms.py` already followed that chain for the licence join.
+    """
+
+    JPEG_MAP = {"00007.jpg": "00007.png"}
+
+    def test_a_dct_row_is_resolved_through_the_pool(self):
+        rows = [{"source_jpeg": "clean_juniward/00007.jpg"}]
+        self.assertEqual(rows_without_a_source(rows, self.JPEG_MAP), 0)
+
+    def test_without_the_map_it_is_reported_rather_than_assumed(self):
+        rows = [{"source_jpeg": "clean_juniward/00007.jpg"}]
+        self.assertEqual(rows_without_a_source(rows, {}), 1)
+
+    def test_a_dct_row_is_stamped_with_its_covers_digest(self):
+        rows = [{"source_jpeg": "clean_juniward/00007.jpg"}]
+        self.assertEqual(stamp(rows, {"00007.png": "dd"}, self.JPEG_MAP), 1)
+        self.assertEqual(rows[0]["source_sha256"], "dd")
+
+    def test_a_pool_entry_pointing_outside_the_cover_manifest_is_named(self):
+        rows = [{"source_jpeg": "clean_juniward/00007.jpg"}]
+        self.assertEqual(
+            unknown_sources(rows, {"other.png": "d"}, self.JPEG_MAP),
+            ["00007.png"])
+
+
 class EndToEndTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

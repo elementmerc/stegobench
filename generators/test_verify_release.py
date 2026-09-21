@@ -344,6 +344,59 @@ class ProvenanceTests(unittest.TestCase):
                             for m in r.failures["provenance"]))
 
 
+class DctProvenanceTests(unittest.TestCase):
+    """The DCT arms were exempt from the provenance check, and it showed as a
+    smaller number rather than as a warning.
+
+    They are built from the clean JPEG pool, so they carry `source_jpeg` and no
+    `source_png`, and the check skipped any row whose direct field was absent.
+    80,000 rows went unexamined while the summary read clean.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.arms = pathlib.Path(self.tmp.name) / "arms"
+        (self.arms / "jpeg-tools").mkdir(parents=True)
+        (self.arms / "jpeg-tools" / "manifest.jsonl").write_text(json.dumps({
+            "clean": "clean/00001.jpg", "source_png": "00001.png",
+            "source_sha256": "digest1", "stego": "s/00001.jpg"}) + "\n")
+        self.covers = [cover(n, sha256=f"digest{n}") for n in range(3)]
+        (self.arms / "adaptive").mkdir()
+
+    def write(self, rows):
+        (self.arms / "adaptive" / "manifest.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+
+    def test_a_dct_row_is_resolved_through_the_pool_and_passes(self):
+        self.write([{"stego": "a", "source_jpeg": "clean_uerd/00001.jpg",
+                     "source_sha256": "digest1"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertTrue(r.ok, r.failures)
+
+    def test_an_unstamped_dct_row_is_no_longer_exempt(self):
+        self.write([{"stego": "a", "source_jpeg": "clean_uerd/00001.jpg"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertTrue(any("no source_sha256" in m
+                            for m in r.failures["provenance"]), r.failures)
+
+    def test_a_row_naming_no_cover_at_all_is_reported_not_skipped(self):
+        self.write([{"stego": "a"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertTrue(any("could not look" in m
+                            for m in r.failures["provenance"]), r.failures)
+
+    def test_the_note_says_how_many_rows_there_were_in_total(self):
+        self.write([{"stego": "a", "source_jpeg": "clean_uerd/00001.jpg",
+                     "source_sha256": "digest1"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertIn("of 2 rows", r.notes["provenance"])
+
+
 class CouldNotLookTests(unittest.TestCase):
     """The fault found eight times across this fleet in one day.
 
