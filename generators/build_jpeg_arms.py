@@ -246,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
             if index % args.shards != args.shard:
                 continue
             stem = f"{index:05d}"
+            # See build_adaptive_arms.py: a filename survives an in-place
+            # cover replacement, a digest does not.
+            source_digest = hashlib.sha256(png.read_bytes()).hexdigest()
             clean = out / "clean" / f"{stem}.jpg"
             if not clean.is_file():
                 jpeg_of(png, clean, args.quality)
@@ -334,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
                     "arm": arm, "tool": tool_id, "rate": rate,
                     "clean": str(pair_clean.relative_to(out)), "stego": key,
                     "source_png": png.name,
+                    "source_sha256": source_digest,
                     "pairing": ("writer-matched" if tool_id in matched
                                 else "cover-as-written"),
                     "capacity_bytes": room, "payload_bytes": result.payload_bytes,
@@ -357,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
                         "clean": str(clean.relative_to(out)),
                         "stego": str(structural.relative_to(out)),
                         "source_png": png.name,
+                    "source_sha256": source_digest,
                         "payload_bytes": added, "jpeg_quality": args.quality,
                         "clean_sha256": hashlib.sha256(clean.read_bytes()).hexdigest(),
                         "stego_sha256": hashlib.sha256(

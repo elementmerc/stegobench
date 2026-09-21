@@ -256,6 +256,11 @@ def main(argv: list[str] | None = None) -> int:
             grey_dir = out / "clean_grey"
             for index, png in enumerate(chosen):
                 stem = f"{index:05d}"
+                # The cover a row was built from, by content rather than by
+                # name. A backfill replaces a cover in place and keeps its
+                # filename, so `source_png` cannot witness the swap and every
+                # downstream check passes over a stale arm.
+                source_digest = hashlib.sha256(png.read_bytes()).hexdigest()
                 clean = grey_dir / f"{stem}.png"
                 if not clean.is_file():
                     with Image.open(png) as img:
@@ -291,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
                             "domain": "spatial", "rate_unit": "bits per pixel",
                             "clean": str(clean.relative_to(out)), "stego": key,
                             "source_png": png.name,
+                            "source_sha256": source_digest,
                             "samples_changed": changed,
                             "change_rate": round(changed / arr.size, 6),
                             "coding": "simulated at the optimal rate, not a real STC",

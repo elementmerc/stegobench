@@ -60,6 +60,12 @@ THE CHECKS, AND WHY EACH ONE IS HERE
     images: the stego half went through one more jpeglib write than the clean
     half, and jpeglib prepends a JFIF APP0 every time.
 
+`provenance`
+    Every arm row names the DIGEST of the cover it was built from, not only its
+    filename. A backfill replaces a cover in place under the same name, so a
+    filename cannot witness the swap and a whole arm can be derived from an
+    image that no longer exists while every other field still agrees.
+
 `stale`
     No arm derives from a cover that has since been replaced. A backfill keeps
     the cover's FILENAME, so nothing in an arm manifest changes when the image
@@ -350,6 +356,47 @@ def check_pairs(arm_root: pathlib.Path, sample_per_arm: int,
                              f"containers identical")
 
 
+def check_provenance(arm_root: pathlib.Path, rows: list[dict],
+                     report: Report) -> None:
+    """Can every arm prove which cover it came from?
+
+    `source_png` is a filename, and `backfill_covers.py` replaces a cover in
+    place keeping that filename, so the field cannot witness a swap. The digest
+    can, and `stamp_source_digests.py` writes it under a precondition that
+    makes it true rather than assumed. A published arm without one is an arm
+    whose provenance rests on nobody having replaced anything, which is exactly
+    the kind of claim this corpus exists to refuse.
+    """
+    known = {r["file"]: r["sha256"] for r in rows}
+    unstamped, wrong, checked = 0, [], 0
+    for path in sorted(arm_root.rglob("manifest.jsonl")):
+        for row in load_rows(path):
+            source = row.get("source_png")
+            if not source:
+                continue
+            stamped = row.get("source_sha256")
+            if not stamped:
+                unstamped += 1
+                continue
+            checked += 1
+            if known.get(source) != stamped:
+                wrong.append(row.get("stego", source))
+
+    if unstamped:
+        report.fail("provenance",
+                    f"{unstamped:,} arm row(s) carry no source_sha256, so "
+                    f"nothing in them survives a cover being replaced under "
+                    f"the same filename. Run stamp_source_digests.py")
+    if wrong:
+        report.fail("provenance",
+                    f"{len(wrong):,} arm row(s) name a cover digest the "
+                    f"manifest does not agree with, e.g. {wrong[:3]}. The arm "
+                    f"was built from an image that is no longer there")
+    if not unstamped and not wrong:
+        report.note("provenance", f"{checked:,} rows name the cover they were "
+                                  f"built from, by content")
+
+
 def check_stale(arm_root: pathlib.Path, sample_per_arm: int,
                 report: Report) -> None:
     """No arm half differs from the digest its manifest recorded.
@@ -419,9 +466,10 @@ def main(argv: list[str] | None = None) -> int:
         per_arm = 10 ** 9 if args.full else args.sample_per_arm
         check_pairs(arm_root, per_arm, report)
         check_stale(arm_root, per_arm, report)
+        check_provenance(arm_root, rows, report)
 
     order = ["covers", "licences", "digests", "pool", "pairs", "stale",
-             "packed"]
+             "provenance", "packed"]
     print()
     for check in order:
         if check in report.failures:

@@ -282,3 +282,42 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProvenanceTests(unittest.TestCase):
+    """An arm that cannot name the cover it came from, by content."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.arms = pathlib.Path(self.tmp.name) / "arms"
+        self.arms.mkdir(parents=True)
+        self.covers = [cover(n, sha256=f"digest{n}") for n in range(3)]
+
+    def write(self, rows):
+        (self.arms / "manifest.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+
+    def test_stamped_rows_that_agree_pass(self):
+        self.write([{"stego": "a", "source_png": "00001.png",
+                     "source_sha256": "digest1"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertTrue(r.ok, r.failures)
+
+    def test_an_unstamped_row_is_caught(self):
+        self.write([{"stego": "a", "source_png": "00001.png"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertTrue(any("no source_sha256" in m
+                            for m in r.failures["provenance"]))
+
+    def test_a_row_naming_a_digest_the_manifest_disowns_is_caught(self):
+        """The shape of a stale arm: the filename still resolves, the image
+        behind it does not."""
+        self.write([{"stego": "a", "source_png": "00001.png",
+                     "source_sha256": "the-old-photograph"}])
+        r = Report()
+        vr.check_provenance(self.arms, self.covers, r)
+        self.assertTrue(any("does not agree" in m
+                            for m in r.failures["provenance"]))
