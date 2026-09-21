@@ -84,6 +84,7 @@ import tarfile
 import time
 
 from publish_tier import canonical_licence
+from tiers import TierError, tier_cover_names, tier_name
 
 #: Licence-bearing fields lifted from the cover row onto every derivative. If
 #: the cover manifest gains a field that the licence depends on, it belongs
@@ -213,6 +214,7 @@ def pack_arm(
     per_shard: int,
     path_field: str,
     digest_field: str,
+    slug: str = "core",
 ) -> dict:
     """One arm into shards. Returns its index."""
     shards: list[dict] = []
@@ -232,7 +234,7 @@ def pack_arm(
 
     for shard_no in range((len(rows) + per_shard - 1) // per_shard):
         chunk = rows[shard_no * per_shard : (shard_no + 1) * per_shard]
-        shard = out / f"pentimento-core-{name}-{shard_no:05d}.tar"
+        shard = out / f"pentimento-{slug}-{name}-{shard_no:05d}.tar"
         packed = 0
         with tarfile.open(shard, "w", format=tarfile.PAX_FORMAT) as tar:
             for row in chunk:
@@ -352,6 +354,10 @@ def main(argv: list[str] | None = None) -> int:
                          "Default: every directory holding a manifest.jsonl")
     ap.add_argument("--only", action="append", default=None,
                     help="pack only these arms, e.g. --only wow-0200")
+    ap.add_argument("--count", type=int, default=10000,
+                    help="tier size: 200 Nano, 1000 Lite, 10000 Core. Rows are "
+                         "kept when their COVER is in the tier, so an arm tier "
+                         "is a prefix for the same reason the cover tier is")
     args = ap.parse_args(argv)
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -380,6 +386,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no JPEG cover manifest at {jpeg_manifest}: any DCT arm will "
               f"fail its licence join", file=sys.stderr)
 
+    tier = tier_name(args.count)
+    slug = tier.lower()
+    try:
+        in_tier = tier_cover_names(pathlib.Path(args.covers_manifest), args.count)
+    except TierError as e:
+        print(f"cannot select a tier: {e}", file=sys.stderr)
+        return 1
+    print(f"tier: {tier} ({len(in_tier)} covers)")
+
     groups = args.group or [
         p.parent.name for p in sorted(arms_root.glob("*/manifest.jsonl"))
     ]
@@ -402,6 +417,20 @@ def main(argv: list[str] | None = None) -> int:
         for name, rows in sorted(by_arm.items()):
             if args.only and name not in args.only:
                 continue
+            if args.count < 10000:
+                # Selected on the COVER, not on the arm row's own position. An
+                # arm can be short of a full 10,000 (outguess is, by 1,884), so
+                # taking its first n would pick a different set of covers per
+                # arm and the tiers would stop lining up across arms.
+                kept = []
+                for r in rows:
+                    cover, _ = cover_of(r, jpeg_map)
+                    if cover and pathlib.PurePosixPath(cover).name in in_tier:
+                        kept.append(r)
+                print(f"{name}: {len(rows)} rows, {len(kept)} in {tier}")
+                rows = kept
+                if not rows:
+                    continue
             # A stego row carries both halves; only the stego half is packed
             # under the arm's own name, because the clean half is packed once
             # as a clean arm rather than repeated under all four rates.
@@ -410,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {len(rows)} rows")
             indices.append(pack_arm(
                 name, rows, arms_root / group, licences, jpeg_map, out,
-                args.per_shard, path_field, digest_field,
+                args.per_shard, path_field, digest_field, slug,
             ))
 
     total_samples = sum(i["samples"] for i in indices)
@@ -420,9 +449,9 @@ def main(argv: list[str] | None = None) -> int:
     bare = sum(len(i["unlicensed"]) for i in indices)
     odd = sum(len(i["mispaired"]) for i in indices)
 
-    index_path = out / "pentimento-core-arms-index.json"
+    index_path = out / f"pentimento-{slug}-arms-index.json"
     index_path.write_text(json.dumps({
-        "tier": "Core",
+        "tier": tier,
         "part": "arms",
         "arms": indices,
         "total_samples": total_samples,

@@ -101,6 +101,48 @@ def covers_in_tier_order(manifest: pathlib.Path, covers_dir: pathlib.Path,
     return chosen
 
 
+def tier_cover_names(manifest: pathlib.Path, count: int) -> set[str]:
+    """The filenames of the first `count` covers by `tier_order`.
+
+    The same prefix rule as `covers_in_tier_order`, without requiring the cover
+    files themselves. Packing an ARM needs to know which covers are in the tier
+    so it can keep the matching stego rows, and the covers it is selecting
+    against may not be on the machine doing the packing.
+
+    Returned as a set because the caller tests millions of rows against it.
+    """
+    rows = []
+    if not manifest.is_file():
+        raise TierError(
+            f"no manifest at {manifest}. Tier order lives in the manifest, so "
+            "without it a tier cannot be selected."
+        )
+    for line in manifest.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if "tier_order" not in row:
+            raise TierError(
+                f"{manifest} has rows without a tier_order field. Run "
+                "manifest_repair.py to assign it, then rebuild."
+            )
+        rows.append(row)
+
+    rows.sort(key=lambda r: r["tier_order"])
+    orders = [r["tier_order"] for r in rows]
+    if orders != list(range(len(orders))):
+        raise TierError(
+            "tier_order is not a dense 0..n-1 range, so a prefix is not "
+            "well defined. This usually means two manifests were concatenated."
+        )
+    if count > len(rows):
+        raise TierError(
+            f"asked for {count} covers, manifest has {len(rows)}. A tier larger "
+            "than the corpus is not a prefix of anything."
+        )
+    return {r["file"] for r in rows[:count]}
+
+
 def tier_name(count: int) -> str:
     """The published name for a tier size, or a description of an odd one."""
     return {200: "Nano", 1000: "Lite", 10000: "Core", 100000: "Full"}.get(
