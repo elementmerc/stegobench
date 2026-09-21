@@ -69,8 +69,13 @@ anybody touching it.
 
 ```sh
 .venv/bin/python -m unittest discover -s generators -p "test_*.py"
-cargo test --workspace                     # only if you want the Rust side
+.venv/bin/python -m unittest discover -s tools/release -p "test_*.py"
+cargo test --workspace   # only if you want the Rust side
 ```
+
+Those are the two Python suites CI runs, so a green pair here is a green pair
+there. Tests needing something from `requirements-optional.txt` skip rather
+than fail.
 
 ## Reproducing a result
 
