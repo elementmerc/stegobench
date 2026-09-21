@@ -117,12 +117,24 @@ class Report:
     def __init__(self) -> None:
         self.failures: dict[str, list[str]] = collections.defaultdict(list)
         self.notes: dict[str, str] = {}
+        self.skipped: dict[str, str] = {}
 
     def fail(self, check: str, message: str) -> None:
         self.failures[check].append(message)
 
     def note(self, check: str, message: str) -> None:
         self.notes[check] = message
+
+    def skip(self, check: str, why: str) -> None:
+        """A check that was not run at all, and what would run it.
+
+        Omitting the line entirely is the same fault `nothing_checked` exists
+        to prevent, one level up: a check that never ran leaves no trace, so
+        the summary reads as though everything was examined. `packed` is the
+        one that proves it, because it is the check that found two stale
+        covers in an otherwise clean pack.
+        """
+        self.skipped[check] = why
 
     @property
     def ok(self) -> bool:
@@ -474,7 +486,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="check every file rather than a sample")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # Line buffering is so a long run's progress reaches a tail as it happens.
+    # A redirected stdout may not be a real stream, and losing the buffering is
+    # a cosmetic loss where crashing on it would be a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     covers = pathlib.Path(args.covers)
     manifest = covers / "manifest.jsonl"
     if not manifest.is_file():
@@ -489,14 +505,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.release:
         check_packed(pathlib.Path(args.release), rows,
                      10 ** 9 if args.full else args.sample_per_arm, report)
+    else:
+        report.skip("packed", "no --release given, so the packed archives were "
+                              "never opened and a stale pack would not show")
     if args.jpeg_pool:
         check_pool(pathlib.Path(args.jpeg_pool), args.expect, report)
+    else:
+        report.skip("pool", "no --jpeg-pool given, so nothing confirmed the "
+                            "pool the adaptive arms index by POSITION is dense")
     if args.arms:
         arm_root = pathlib.Path(args.arms)
         per_arm = 10 ** 9 if args.full else args.sample_per_arm
         check_pairs(arm_root, per_arm, report)
         check_stale(arm_root, per_arm, report)
         check_provenance(arm_root, rows, report)
+    else:
+        for check in ("pairs", "stale", "provenance"):
+            report.skip(check, "no --arms given, so no stego pair was examined")
 
     order = ["covers", "licences", "digests", "pool", "pairs", "stale",
              "provenance", "packed"]
@@ -508,8 +533,19 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"          {message}")
         elif check in report.notes:
             print(f"  ok    {check:9} {report.notes[check]}")
+        elif check in report.skipped:
+            print(f"  ----  {check:9} NOT RUN: {report.skipped[check]}")
 
     if report.ok:
+        # Named, not counted. "every checked invariant holds" is true of a run
+        # that checked one thing, and the reader acts on the sentence rather
+        # than on which arguments they happened to pass.
+        if report.skipped:
+            print(f"\nevery invariant that ran holds, but {len(report.skipped)} "
+                  f"did NOT run: {', '.join(sorted(report.skipped))}. This is "
+                  f"not a clean bill for the corpus, only for what was looked "
+                  f"at.")
+            return 0
         print("\nevery checked invariant holds"
               + ("" if args.full else "; run --full before publishing"))
         return 0

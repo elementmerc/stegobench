@@ -12,7 +12,9 @@ breakages is one this corpus has actually had.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import pathlib
 import sys
@@ -254,6 +256,25 @@ class EndToEndTests(unittest.TestCase):
 
     def run_main(self, *extra: str) -> int:
         return vr.main(["--covers", str(self.covers), "--expect", "20", *extra])
+
+    def test_a_check_that_did_not_run_is_named_rather_than_omitted(self):
+        """The fault `nothing_checked` prevents, one level up.
+
+        A check skipped because its argument was absent used to leave no line
+        at all, so a run over covers alone printed "every checked invariant
+        holds" and the reader had to reconstruct which of the eight had
+        actually happened. `packed` is the one that proves the point: it is
+        the check that found two stale covers inside an otherwise clean pack.
+        """
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_main(), 0)
+        text = out.getvalue()
+        for check in ("packed", "pool", "pairs", "stale", "provenance"):
+            self.assertIn(f"{check:9} NOT RUN", text.replace("  ----  ", ""),
+                          f"{check} did not run and was not named: {text}")
+        self.assertIn("did NOT run", text)
+        self.assertNotIn("every checked invariant holds", text)
 
     def test_a_sound_corpus_exits_zero(self):
         self.assertEqual(self.run_main("--full"), 0)
