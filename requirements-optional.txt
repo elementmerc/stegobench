@@ -32,11 +32,15 @@ lir==1.8.0
 # nowhere: the record was validated once, by hand, on a machine where the
 # package no longer exists. A check that cannot be re-run is not a check.
 #
-# UNPINNED ON PURPOSE, and it must not stay that way. Baseline Section 5 wants
-# an exact pin, and writing a version here that nobody has installed would be a
-# guess dressed as a pin. Whoever installs it first records the resolved
-# version here, after the 7 day cooldown.
-mlcroissant
+# Pinned 2026-09-21, on the machine that installed it. 1.1.0 was uploaded on
+# 2026-04-16, so it was 158 days old and well past the 7 day cooldown baseline
+# Section 5 asks for. It validated all three tier records the same evening.
+#
+# This line was unpinned on purpose before that, because writing a version
+# nobody had installed would have been a guess dressed as a pin. An earlier
+# draft of this file did exactly that and named a version that has never
+# existed.
+mlcroissant==1.1.0
 
 # The Hansken extraction plugin SDK, used only by `integrations/hansken/`.
 hansken-extraction-plugin==0.10.0

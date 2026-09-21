@@ -44,7 +44,7 @@ dependencies = [
 # record that decides whether the corpus loads for Hugging Face, Kaggle and the
 # ML Commons tooling; `pentimento validate-croissant` runs a structural check
 # without it and defers to it when present.
-publish = ["mlcroissant"]
+publish = ["mlcroissant==1.1.0"]
 test = ["pytest==9.1.1"]
 
 [project.scripts]
