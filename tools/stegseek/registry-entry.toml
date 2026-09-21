@@ -1,0 +1,53 @@
+# Draft registry entry for stegseek. NOT live: this file deliberately does
+# NOT live under plugins/registry/, because Registry::load aborts the whole
+# registry on the first invalid entry (crates/stegobench-core/src/registry.rs)
+# and this entry cannot pass validation yet.
+#
+# Two things are missing and both require the image to actually be built:
+#   1. `image.reference` needs the real `@sha256:...` digest of the built and
+#      pushed stegseek image. Inventing one here would be worse than leaving
+#      the field blank, because a wrong digest looks exactly like a right one
+#      until somebody tries to pull it.
+#   2. `[selftest]` needs real fixtures: a steghide file whose passphrase is a
+#      short wordlist's first entry (must_detect) and a plain file with no
+#      hidden payload (must_clear), generated once the image can actually run.
+#
+# Move this file to plugins/registry/embedders/stegseek.toml once both are
+# filled in, and drop this header.
+
+name = "stegseek"
+kind = "embedder"
+upstream = "https://github.com/RickdeJager/stegseek"
+licence = "GPL-2.0"
+maintainer = "third_party"
+notes = "A steghide passphrase cracker, not an embedder in the usual sense: \
+it takes an existing steghide file and a wordlist and reports whether a \
+passphrase in the list opens it. Classified here rather than as a detector \
+because it shares steghide's format and its accepts/formats, and because \
+this registry has no third kind for 'attacks another tool's output' yet. \
+Its emits.output is verdict (cracked or not), never a score, so it is never \
+scored as a detector against a corpus; it answers a different question."
+
+[image]
+# TODO: replace with the real digest once tools/stegseek/Dockerfile is built
+# and pushed. See the header above for why nothing is written here yet.
+reference = "REPLACE_WITH_stegobench/stegseek@sha256:REAL_DIGEST_AFTER_BUILD"
+size_mb = 60
+bundled = false
+
+[emits]
+output = "verdict"
+higher_means_stego = true
+
+[accepts]
+formats = ["jpeg", "bmp", "wav", "au"]
+
+[cost]
+seconds_per_image = 0.0
+peak_rss_mb = 200
+cores_per_worker = 1
+
+[selftest]
+# TODO: real fixtures once the image can run. Placeholder paths only.
+must_detect = "fixtures/stegseek-crackable.jpg"
+must_clear = "fixtures/clean.jpg"
