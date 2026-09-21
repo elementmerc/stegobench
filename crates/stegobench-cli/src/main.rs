@@ -20,7 +20,7 @@
 //! forever.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command};
@@ -373,10 +373,7 @@ fn cmd_help(topic: Option<&str>) -> Output {
                 "Known topics: {}\n\nExample:\n  stegobench help pairing",
                 help_topics::TOPICS.join(", ")
             );
-            Output::ok(
-                serde_json::json!({ "topics": help_topics::TOPICS }),
-                human,
-            )
+            Output::ok(serde_json::json!({ "topics": help_topics::TOPICS }), human)
         }
         Some(t) => match help_topics::text(t) {
             Some(text) => Output::ok(
@@ -464,6 +461,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn the_command_tree_is_well_formed() {
@@ -574,5 +572,76 @@ mod tests {
         let out = not_yet("score", "needs the plugin host");
         assert_eq!(out.code, exit::ENVIRONMENT_UNFIT);
         assert!(out.human.contains("not built yet"));
+    }
+
+    /// Drives the binary's own code to every exit code the contract in
+    /// `stegobench_core::exit` names, or records plainly why a given code
+    /// cannot be reached yet.
+    ///
+    /// The table in `04-cli-surface.md` and the man page are only as good as
+    /// the binary's agreement with them: a documented code the binary never
+    /// actually returns is worse than no table, because a script or an agent
+    /// trusts the table. Codes 3 (pre-flight refusal) and 4 (plugin failure)
+    /// and 5 (verify mismatch) and 7 (licence refusal) genuinely have NO code
+    /// path yet, because the commands that would produce them (`plan`,
+    /// `score`, and any corpus-licence or provenance check) are not built.
+    /// That is a true statement about this release, not a gap in the test:
+    /// asserting it here means the day one of those codes becomes reachable
+    /// without a test acknowledging it, this test starts failing to mention
+    /// it rather than silently staying quiet about a codepath nobody wrote a
+    /// test for.
+    #[test]
+    fn the_exit_code_contract_is_driven_or_explicitly_not_yet_reachable() {
+        // 0: success.
+        assert_eq!(cmd_schema("result-v1").code, exit::OK);
+
+        // 1: generic failure.
+        assert_eq!(
+            cmd_validate(&PathBuf::from("/definitely/not/here.json")).code,
+            exit::FAILURE
+        );
+
+        // 2: usage error.
+        assert_eq!(cmd_schema("not-a-real-schema").code, exit::USAGE);
+        assert_eq!(cmd_help(Some("not-a-real-topic")).code, exit::USAGE);
+
+        // 3: pre-flight refusal. NOT YET REACHABLE: needs the governor
+        // (`plan`/`score`), neither of which is built. See exit::PREFLIGHT_REFUSED.
+
+        // 4: plugin failure. NOT YET REACHABLE: needs `score` running a real
+        // plugin, which is not built. See exit::PLUGIN_FAILED.
+
+        // 5: verify mismatch. NOT YET REACHABLE: there is no `verify`
+        // subcommand yet (04-cli-surface.md names one; it is not in
+        // Command). See exit::VERIFY_MISMATCH.
+
+        // 6: schema invalid.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("x.json");
+            std::fs::write(&p, r#"{"hello":"world"}"#).unwrap();
+            assert_eq!(cmd_validate(&p).code, exit::SCHEMA_INVALID);
+        }
+
+        // 7: licence refusal. NOT YET REACHABLE: no corpus-licence gate
+        // exists yet. See exit::LICENCE_REFUSED.
+
+        // 8: environment unfit. `not_yet` is the code path Command::Plan and
+        // Command::Score actually use today. `cmd_doctor` reaches the same
+        // code independently when a registered tool is missing or broken,
+        // but is not additionally exercised here: it needs a real registry
+        // directory relative to the process's working directory, which a
+        // unit test cannot assume without constructing one, and doing that
+        // honestly is worth its own test rather than a shortcut in this one.
+        assert_eq!(
+            not_yet("plan", "V10, needs the governor").code,
+            exit::ENVIRONMENT_UNFIT
+        );
+
+        // 130: interrupted. NOT YET REACHABLE from a unit test: this is a
+        // signal-handler exit path (SIGINT/SIGTERM), which needs a real
+        // process and a real signal to drive, not a function call. No
+        // signal handling exists in this binary yet to test in the first
+        // place.
     }
 }
