@@ -449,7 +449,13 @@ impl Entry {
             (Some(_), Some(_)) => {
                 bad.push("declares both an image and a binary; it must be one or the other".into())
             }
-            (None, None) => bad.push("declares neither an image nor a binary".into()),
+            (None, None) => bad.push(
+                "declares neither an image nor a binary; add an [image] block \
+                 (a container reference pinned by digest) or a [binary] block \
+                 (a locally installed executable) so the harness knows how to \
+                 run this tool"
+                    .into(),
+            ),
             _ => {}
         }
 
@@ -458,7 +464,8 @@ impl Entry {
             if !img.reference.contains("@sha256:") {
                 bad.push(format!(
                     "image {:?} is not pinned by digest. A tag can move under \
-                     you, so a result naming one cannot be reproduced",
+                     you, so a result naming one cannot be reproduced; pull the \
+                     image and add its @sha256:... digest to the reference",
                     img.reference
                 ));
             }
@@ -466,7 +473,12 @@ impl Entry {
 
         if let Some(bin) = &self.binary {
             if bin.command.is_empty() {
-                bad.push("binary.command is empty".into());
+                bad.push(
+                    "binary.command is empty; set it to the argv that invokes \
+                     this tool, for example [\"stegcore\", \"analyse\", \
+                     \"--json\"]"
+                        .into(),
+                );
             } else if bin.version_args.is_empty() {
                 bad.push(
                     "binary declares no version_args, so a run could not record \

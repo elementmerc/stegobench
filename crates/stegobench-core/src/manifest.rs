@@ -71,10 +71,7 @@ impl ManifestV1 {
             ));
         }
         if self.sha256.len() != 64 || !self.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            bad.push(format!(
-                "sha256 {:?} is not 64 hex characters",
-                self.sha256
-            ));
+            bad.push(format!("sha256 {:?} is not 64 hex characters", self.sha256));
         } else if self.sha256.bytes().any(|b| b.is_ascii_uppercase()) {
             bad.push(format!(
                 "sha256 {:?} has upper case hex; digests are compared as text \
@@ -90,7 +87,12 @@ impl ManifestV1 {
             ));
         }
         if self.licence_url.trim().is_empty() {
-            bad.push(format!("{} declares no licence_url", self.file));
+            bad.push(format!(
+                "{} declares a licence but no licence_url; add a link to the \
+                 licence text itself, not just its name, so a downstream user \
+                 does not have to guess which version of {:?} applies",
+                self.file, self.licence
+            ));
         }
         if self.width == 0 || self.height == 0 {
             bad.push(format!(

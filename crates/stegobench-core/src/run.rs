@@ -91,10 +91,19 @@ impl RunV1 {
             ));
         }
         if self.run_id.trim().is_empty() {
-            bad.push("run_id is empty".into());
+            bad.push(
+                "run_id is empty; set it to something stable and unique, such as \
+                 the start timestamp plus the arm name, so `watch` and `--resume` \
+                 can find this run again"
+                    .into(),
+            );
         }
         if self.command.is_empty() {
-            bad.push("command is empty; a run must record how it was started".into());
+            bad.push(
+                "command is empty; set it to the argv the run was actually \
+                 launched with, so the run can be re-issued exactly"
+                    .into(),
+            );
         }
         for arm in &self.arms {
             if arm.state == ArmState::Failed && arm.error.is_none() {
@@ -127,7 +136,12 @@ mod tests {
         RunV1 {
             schema: RUN_SCHEMA_ID.into(),
             run_id: "2026-09-21T09:00:00Z-suniward".into(),
-            command: vec!["stegobench".into(), "score".into(), "--corpus".into(), "pentimento-core".into()],
+            command: vec![
+                "stegobench".into(),
+                "score".into(),
+                "--corpus".into(),
+                "pentimento-core".into(),
+            ],
             registry_revision: "sha256:abc123".into(),
             started_utc: "2026-09-21T09:00:00Z".into(),
             finished_utc: None,

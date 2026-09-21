@@ -241,21 +241,35 @@ impl Result1 {
             ));
         }
         if !(0.0..=1.0).contains(&self.metrics.auc) {
-            bad.push(format!("auc {} is outside 0 to 1", self.metrics.auc));
+            bad.push(format!(
+                "auc {} is outside 0 to 1, which is not a valid ROC AUC; check \
+                 the scorer that computed it rather than the document",
+                self.metrics.auc
+            ));
         }
         for (fpr, tpr) in &self.metrics.tpr_at_fpr {
             match fpr.parse::<f64>() {
                 Ok(f) if (0.0..=1.0).contains(&f) => {}
                 _ => bad.push(format!(
-                    "tpr_at_fpr key {fpr:?} is not a rate between 0 and 1"
+                    "tpr_at_fpr key {fpr:?} is not a rate between 0 and 1; keys \
+                     are false-positive rates as decimal fractions, for example \
+                     \"0.01\" for one per cent"
                 )),
             }
             if !(0.0..=1.0).contains(tpr) {
-                bad.push(format!("tpr_at_fpr[{fpr}] = {tpr} is outside 0 to 1"));
+                bad.push(format!(
+                    "tpr_at_fpr[{fpr}] = {tpr} is outside 0 to 1, which is not a \
+                     valid detection rate; check the scorer that computed it"
+                ));
             }
         }
         if self.metrics.n_clean == 0 || self.metrics.n_stego == 0 {
-            bad.push("a measurement needs both clean and stego images".into());
+            bad.push(
+                "a measurement needs both clean and stego images; set n_clean \
+                 and n_stego to the number actually scored on each side, not \
+                 zero on either"
+                    .into(),
+            );
         }
         if let Some(rate) = self.arm.rate {
             let sane = match rate.unit {
