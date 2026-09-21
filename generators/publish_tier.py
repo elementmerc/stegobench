@@ -230,7 +230,9 @@ def make_torrent(shards: list[pathlib.Path], name: str, trackers: list[str],
     torrent = {
         "announce": trackers[0],
         "announce-list": [[t] for t in trackers],
-        "created by": "stegobench publish_tier",
+        # The torrent names the command a recipient would run to rebuild
+        # this, so it has to be the command that actually exists.
+        "created by": "pentimento publish-tier",
         "info": {
             "name": name,
             "piece length": piece_length,
