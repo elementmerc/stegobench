@@ -29,9 +29,15 @@ progress still reaches a terminal.
   generated from the Rust types that actually write these documents.
 - `stegobench validate <file>`: check a document against whichever of the
   three schemas its own `schema` field names; exits 6 on a mismatch.
-- `stegobench list <detectors|embedders|all>`: everything a registry can run,
-  read live from `plugins/registry/`, so it cannot go stale.
-- `stegobench describe <name>`: one tool's full registered manifest.
+- `stegobench list <detectors|embedders|corpora|all>`: everything a registry
+  can run, plus the datasets it knows about, read live from
+  `plugins/registry/`, so it cannot go stale.
+- `stegobench describe <name>`: one tool's full registered manifest, or one
+  corpus's, whichever the name belongs to. A corpus entry records where the
+  dataset lives, what its terms say, who established that and on what date,
+  and whether images derived from it may be republished. Terms nobody has
+  read are marked unverified rather than guessed at, and republication is
+  refused on anything unverified.
 - `stegobench doctor`: checks whether this machine can run what the registry
   claims. With self-tests enabled (the default) it asks each present tool to
   score a known planted signal and a known clean fixture, because a tool that

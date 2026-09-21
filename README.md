@@ -18,7 +18,7 @@ corpus, and this repository is the harness.
 Two halves, at different stages:
 
 - **A Rust command-line tool** (`stegobench`) that reads a registry of
-  detectors and embedders, checks whether this machine can run them, and
+  detectors, embedders and corpora, checks whether this machine can run them, and
   will score a corpus against them. `schema`, `validate`, `list`, `describe`,
   `doctor`, `completions` and `help` are built and tested. `plan` and `score`
   are in the command tree and documented, but not built yet: running either
@@ -94,6 +94,53 @@ everything, or "clean" to everything, would otherwise pass a one-sided check;
 `stegobench help plugins` for the full reasoning, and an existing entry under
 `plugins/registry/` (`steghide.toml` is a short one) for a worked example
 with a container that needs an embed/extract round trip proven too.
+
+## Registering a corpus
+
+A corpus is a TOML file under `plugins/registry/corpora/`, and it is a
+separate shape from a detector's for a plain reason: a corpus is data you
+point at, a plugin is code you run. It has a licence, a download route and a
+cover count; it has no container image, no argv and no self-test.
+
+`stegobench list corpora` and `stegobench describe <id>` read them the same
+way they read a tool, so a user sees one registry.
+
+```toml
+id = "example"
+name = "Example Corpus"
+description = "What it is, for somebody who has never heard of it."
+
+[licence]
+status = "verified"        # or "unverified", or "none-granted"
+spdx = "CC-BY-SA-4.0"
+url = "https://creativecommons.org/licenses/by-sa/4.0/legalcode"
+verified_on = "2026-09-21"
+source = "the deposit's own terms page, read on that date"
+redistribution = "permitted"    # or "forbidden", or "unknown"
+redistribution_reason = "Why, in one sentence. Required in every case."
+attribution_required = true
+share_alike = true
+
+[obtain]
+doi = "10.0000/example"
+
+[properties]
+base_images = 100
+formats = ["png"]
+paired = true
+```
+
+Two rules the file is held to, and both come from real damage. A licence is
+`verified` only with an identifier, a link to the licence text, a date and a
+note saying what was read; anything else is `unverified` or `none-granted`,
+and carrying a licence name beside either of those is refused. Mirrors of
+well-known corpora are labelled MIT, Apache 2.0 and CC0 where the original
+granted none of them, and a guess written into a metadata field is how that
+starts.
+
+**Redistribution is a separate field from the licence**, because it is a
+separate question. A corpus you may use is not always one you may publish,
+and republication is refused outright on terms nobody has read.
 
 ## Building a corpus (the Python half)
 
