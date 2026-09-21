@@ -204,6 +204,60 @@ def add(tar: tarfile.TarFile, name: str, payload: bytes) -> None:
     tar.addfile(info, io.BytesIO(payload))
 
 
+#: The eight bytes every PNG starts with.
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def container_of(payload: bytes) -> tuple:
+    """Everything about a file that the payload should NOT have changed.
+
+    For a JPEG: every marker and its length before the start of scan. That is
+    the quantisation tables, the Huffman tables, the frame header and any
+    application segments. A payload hidden in DCT coefficients lives after the
+    start of scan, so an honest pair agrees on all of it.
+
+    For a PNG: the sequence of chunk types, and the lengths of everything that
+    is not image data. A payload hidden in pixels changes IDAT contents and,
+    through compression, IDAT lengths; it does not add a chunk or move a header.
+
+    Anything else: the empty tuple, meaning no opinion. A format this does not
+    understand must not be silently declared matched OR mismatched, and every
+    format the corpus actually carries is handled above.
+    """
+    if payload[:2] == b"\xff\xd8":
+        markers = []
+        i = 2
+        while i < len(payload) - 1:
+            if payload[i] != 0xFF:
+                break
+            marker = payload[i + 1]
+            if marker == 0xDA:
+                break
+            if marker in (0xD8, 0xD9):
+                i += 2
+                continue
+            length = int.from_bytes(payload[i + 2:i + 4], "big")
+            markers.append((marker, length))
+            i += 2 + length
+        return ("jpeg", tuple(markers))
+
+    if payload[:8] == PNG_MAGIC:
+        chunks = []
+        i = 8
+        while i + 8 <= len(payload):
+            length = int.from_bytes(payload[i:i + 4], "big")
+            kind = payload[i + 4:i + 8]
+            # IDAT length tracks the compressed size, which a payload is
+            # entitled to change. Its presence and position are not.
+            chunks.append((kind, None if kind == b"IDAT" else length))
+            if kind == b"IEND":
+                break
+            i += 12 + length
+        return ("png", tuple(chunks))
+
+    return ()
+
+
 def pack_arm(
     name: str,
     rows: list[dict],
@@ -222,6 +276,7 @@ def pack_arm(
     missing: list[str] = []
     unlicensed: list[str] = []
     mispaired: list[str] = []
+    container_mismatches: list[str] = []
     position = 0
 
     # An arm where some samples are paired against the tool's own writer and
@@ -267,6 +322,32 @@ def pack_arm(
                     position += 1
                     continue
 
+                # THE CONTAINER GATE.
+                #
+                # Twice now a pair has differed in its container rather than in
+                # its payload, and both times everything else passed: the
+                # digests matched, the licences joined, the counts came out
+                # right. outguess wrote the stego half with a different encoder
+                # from the clean half, worth 0.14 of AUC with no payload at
+                # all. Then the JPEG arms wrote the stego half one jpeglib pass
+                # further than the clean half, worth a perfect classifier on
+                # 80,000 images across eight arms.
+                #
+                # A shared writer was checked both times and was true both
+                # times. What was never checked is the only thing that settles
+                # it: that the two files agree byte for byte everywhere except
+                # where the payload lives. So compare the containers, and leave
+                # out any pair that does not match rather than describing it as
+                # a pair.
+                clean_rel = row.get("clean")
+                if clean_rel:
+                    clean_path = arms_root / clean_rel
+                    if clean_path.exists():
+                        if container_of(clean_path.read_bytes()) != container_of(payload):
+                            container_mismatches.append(rel)
+                            position += 1
+                            continue
+
                 sample = dict(row)
                 sample["sha256"] = actual
                 sample["source_png"] = cover_name
@@ -298,6 +379,7 @@ def pack_arm(
         "missing": missing,
         "unlicensed": unlicensed,
         "mispaired": mispaired,
+        "container_mismatches": container_mismatches,
     }
 
 
@@ -448,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     gone = sum(len(i["missing"]) for i in indices)
     bare = sum(len(i["unlicensed"]) for i in indices)
     odd = sum(len(i["mispaired"]) for i in indices)
+    boxed = sum(len(i.get("container_mismatches", [])) for i in indices)
 
     index_path = out / f"pentimento-{slug}-arms-index.json"
     index_path.write_text(json.dumps({
@@ -464,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{len(indices)} arm(s), {total_samples} samples, "
           f"{total_bytes / 1e9:.1f} GB, {time.monotonic() - started:.0f}s")
     print(f"index: {index_path}")
-    if bad or gone or bare or odd:
+    if bad or gone or bare or odd or boxed:
         # Three different failures, reported as three. An earlier version
         # counted the licence gaps as missing files and said "80000 missing
         # file(s)" when every file was present, which sent the diagnosis the
@@ -485,6 +568,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{odd} sample(s) are paired against a different encoder from "
                   f"the rest of their arm, so they measure the encoder rather "
                   f"than the payload and were left out.", file=sys.stderr)
+        if boxed:
+            print(f"{boxed} sample(s) differ from their clean half in the "
+                  f"container rather than in the payload: a marker, a table or "
+                  f"a chunk that no payload should have moved. A detector can "
+                  f"read that difference without doing any steganalysis, so "
+                  f"the pair measures the writer and was left out.",
+                  file=sys.stderr)
         print("None of those were packed. The tier is incomplete; see the "
               "index for the list.", file=sys.stderr)
         return 2

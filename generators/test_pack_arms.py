@@ -270,3 +270,119 @@ class TestMispairedRefusal(TestPackArm):
                                    "stego", "stego_sha256")
         self.assertEqual(index["mispaired"], [])
         self.assertEqual(index["samples"], 2)
+
+
+def jpeg(app0: int = 2, quant: int = 67, payload: bytes = b"\x00" * 32) -> bytes:
+    """A JPEG skeleton with a controllable number of APP0 segments.
+
+    Enough structure for the container check to walk: the markers it reads all
+    carry a length, and the scan it stops at is a real marker.
+    """
+    out = b"\xff\xd8"
+    for _ in range(app0):
+        body = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+        out += b"\xff\xe0" + (len(body) + 2).to_bytes(2, "big") + body
+    qt = b"\x00" * (quant - 2)
+    out += b"\xff\xdb" + quant.to_bytes(2, "big") + qt
+    out += b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00" + payload
+    return out
+
+
+def png(extra_chunk: bytes | None = None, idat: bytes = b"\x00" * 16) -> bytes:
+    """A PNG skeleton: signature, IHDR, IDAT, optionally one more, IEND."""
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (len(body).to_bytes(4, "big") + kind + body
+                + b"\x00\x00\x00\x00")  # CRC is not read by container_of
+    out = pack_arms.PNG_MAGIC + chunk(b"IHDR", b"\x00" * 13) + chunk(b"IDAT", idat)
+    if extra_chunk:
+        out += chunk(extra_chunk, b"\x01\x02")
+    return out + chunk(b"IEND", b"")
+
+
+class TestContainerOf(unittest.TestCase):
+    """The shape comparison, on its own."""
+
+    def test_a_jpeg_payload_does_not_change_the_container(self) -> None:
+        # Different entropy-coded data after the scan, same everything before.
+        self.assertEqual(pack_arms.container_of(jpeg(payload=b"\x11" * 32)),
+                         pack_arms.container_of(jpeg(payload=b"\x22" * 64)))
+
+    def test_an_extra_app0_is_a_different_container(self) -> None:
+        # The exact defect: one more jpeglib write pass, one more JFIF header.
+        self.assertNotEqual(pack_arms.container_of(jpeg(app0=2)),
+                            pack_arms.container_of(jpeg(app0=3)))
+
+    def test_a_different_quantisation_table_is_a_different_container(self) -> None:
+        # A re-encode at another quality, which is the outguess defect.
+        self.assertNotEqual(pack_arms.container_of(jpeg(quant=67)),
+                            pack_arms.container_of(jpeg(quant=132)))
+
+    def test_a_png_payload_may_change_idat_length(self) -> None:
+        # Embedding changes pixels, which changes the compressed size. That is
+        # the payload doing its job and must not read as a container change.
+        self.assertEqual(pack_arms.container_of(png(idat=b"\x00" * 16)),
+                         pack_arms.container_of(png(idat=b"\x00" * 64)))
+
+    def test_an_added_png_chunk_is_a_different_container(self) -> None:
+        self.assertNotEqual(pack_arms.container_of(png()),
+                            pack_arms.container_of(png(extra_chunk=b"tEXt")))
+
+    def test_an_unknown_format_gets_no_opinion(self) -> None:
+        # Not "matched", which would wave it through, and not "mismatched",
+        # which would drop a whole arm the check does not understand.
+        self.assertEqual(pack_arms.container_of(b"not an image at all"), ())
+
+
+class TestContainerGate(TestPackArm):
+    """The gate, in the packer."""
+
+    def _pair(self, stego_bytes: bytes, clean_bytes: bytes) -> dict:
+        row = self._stego("uerd/0050/00000.jpg", stego_bytes)
+        row["source_jpeg"] = "00000.jpg"
+        clean = self.arms / "clean_jpeg/00000.jpg"
+        clean.parent.mkdir(parents=True, exist_ok=True)
+        clean.write_bytes(clean_bytes)
+        row["clean"] = "clean_jpeg/00000.jpg"
+        return row
+
+    def test_a_matched_pair_packs(self) -> None:
+        row = self._pair(jpeg(payload=b"\x11" * 32), jpeg(payload=b"\x00" * 32))
+        index = self.pack([row], {"00000.jpg": "09710.png"})
+        self.assertEqual(index["container_mismatches"], [])
+        self.assertEqual(index["samples"], 1)
+
+    def test_the_app0_defect_is_refused(self) -> None:
+        """The 80,000 image bug, caught at the packer.
+
+        Eight arms shipped with the stego half one jpeglib write further than
+        the clean half. Every other check passed: digests matched, licences
+        joined, counts came out right. This is the one that would have failed.
+        """
+        row = self._pair(jpeg(app0=3), jpeg(app0=2))
+        index = self.pack([row], {"00000.jpg": "09710.png"})
+        self.assertEqual(index["container_mismatches"], ["uerd/0050/00000.jpg"])
+        self.assertEqual(index["samples"], 0)
+
+    def test_the_requantisation_defect_is_refused(self) -> None:
+        row = self._pair(jpeg(quant=132), jpeg(quant=67))
+        index = self.pack([row], {"00000.jpg": "09710.png"})
+        self.assertEqual(index["container_mismatches"], ["uerd/0050/00000.jpg"])
+
+    def test_a_row_with_no_clean_half_is_not_gated(self) -> None:
+        # The clean arms themselves have no `clean` field. Gating them would
+        # refuse the control group.
+        row = self._stego("uerd/0050/00000.jpg", jpeg())
+        row["source_jpeg"] = "00000.jpg"
+        index = self.pack([row], {"00000.jpg": "09710.png"})
+        self.assertEqual(index["container_mismatches"], [])
+        self.assertEqual(index["samples"], 1)
+
+    def test_a_clean_half_that_is_not_on_disk_is_not_gated(self) -> None:
+        # Absence is a different failure with its own category. Reporting it
+        # here would send the diagnosis the wrong way.
+        row = self._stego("uerd/0050/00000.jpg", jpeg())
+        row["source_jpeg"] = "00000.jpg"
+        row["clean"] = "clean_jpeg/nothing-here.jpg"
+        index = self.pack([row], {"00000.jpg": "09710.png"})
+        self.assertEqual(index["container_mismatches"], [])
+        self.assertEqual(index["samples"], 1)
