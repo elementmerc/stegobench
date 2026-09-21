@@ -1,0 +1,89 @@
+# stegobench
+
+> A reproducible benchmark for image and audio steganalysis. Build a labelled
+> corpus, run detectors over identical bytes, and report numbers somebody else
+> can check.
+
+This file is for a model deciding whether and how to call this tool. It
+describes what exists today, not a roadmap; a future version is not promised
+here even where a command is scoped but not yet built, and those are marked
+explicitly below.
+
+## What this is, in one paragraph
+
+`stegobench` runs steganography detectors and embedders as sandboxed plugins
+(Docker containers pinned by digest, or a locally installed binary pinned by
+its SHA-256), scores them against a labelled corpus, and emits a versioned
+JSON document (`result-v1`) that names the exact bytes it was measured on, the
+exact plugin version it ran, and whether anything failed. It does not embed
+or detect anything itself: it is a harness, and the tools it runs, including
+Stegcore, are registered exactly the same way a stranger's tool would be.
+
+## Command vocabulary (what actually exists)
+
+Every subcommand takes `--json`, which puts machine-readable output on stdout
+and leaves human text on stderr, so `stegobench ... --json | jq` works while
+progress still reaches a terminal.
+
+- `stegobench schema <result-v1|run-v1|manifest-v1|all>` — print a JSON Schema
+  generated from the Rust types that actually write these documents.
+- `stegobench validate <file>` — check a document against whichever of the
+  three schemas its own `schema` field names; exits 6 on a mismatch.
+- `stegobench list <detectors|embedders|all>` — everything a registry can run,
+  read live from `plugins/registry/`, so it cannot go stale.
+- `stegobench describe <name>` — one tool's full registered manifest.
+- `stegobench doctor` — checks whether this machine can run what the registry
+  claims. With self-tests enabled (the default) it asks each present tool to
+  score a known planted signal and a known clean fixture, because a tool that
+  is merely installed is not a tool that works.
+- `stegobench completions <bash|zsh|fish|powershell>` — shell completion script.
+- `stegobench help <pairing|splits|licences|plugins>` — the reasoning behind
+  the harness's hard rules, written for a reader who never opens the repo.
+- `stegobench plan` and `stegobench score` — **scoped in the command tree but
+  not yet built.** Both parse today and exit 8 with a message naming what
+  they are waiting on, rather than pretending to run. Do not treat a
+  non-zero exit from either as a bug in your invocation; it is these
+  commands being honest about not existing yet.
+
+## Exit codes (a contract, not incidental)
+
+`0` success · `1` generic failure · `2` usage error · `3` pre-flight refusal ·
+`4` plugin failure · `5` verification mismatch · `6` schema invalid ·
+`7` licence refusal · `8` environment unfit · `130` interrupted.
+
+Codes 3 and 7 mean the tool is capable of the thing and is declining. Do not
+retry a 3 or a 7 unchanged; read the message, which names the reason.
+
+## Where the schemas live
+
+`stegobench schema <name>` is the source of truth; the types themselves are
+in `crates/stegobench-core/src/{result,run,manifest}.rs`. A document you did
+not generate yourself should be checked with `stegobench validate` before you
+trust anything in it, because a result naming a corpus that has since changed
+is exactly the failure `validate`/`verify` exist to catch.
+
+## The rules that are not obvious from the flags
+
+Read via `stegobench help <topic>` rather than restated in full here, because
+the tool itself is the source of truth for its own reasoning:
+
+- `pairing` — why a clean cover and its stego twin must differ in nothing but
+  the payload, and what happens to a result when they do not.
+- `splits` — why a cover and every stego image made from it must land on the
+  same side of a train/test split.
+- `licences` — why every corpus row carries its own licence rather than one
+  for the whole collection.
+- `plugins` — why a detector or embedder is a TOML registry entry pinned by
+  digest or by executable hash, never code wired into the harness.
+
+## What an agent should not do here
+
+- Do not call `plan` or `score` expecting a working run; they are not built.
+  See "Command vocabulary" above.
+- Do not treat a registry entry's `image.reference` as safe to run without a
+  digest. `stegobench` itself refuses to load one that is not: see `plugins`
+  in `stegobench help plugins`.
+- Do not publish anything on a corpus's behalf. There is no publish command
+  exposed to an agent surface in this version, and none should be inferred.
+- Do not invent a schema version or a field. `stegobench validate` is the
+  only source of truth for whether a document is well formed.
