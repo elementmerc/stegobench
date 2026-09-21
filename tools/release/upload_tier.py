@@ -306,12 +306,51 @@ def load_index(packed: pathlib.Path) -> dict[str, str]:
 
     # The metadata a reader needs in order to use or cite the corpus travels
     # with it. A shard set with no datasheet is a pile of tar files.
-    for extra in ("README.md", "LICENCES.md", "DATASHEET.md", "SPLITS.md",
-                  "CITATION.cff", "croissant.json"):
-        path = packed / extra
-        if path.is_file():
-            files[extra] = digest_of(path)
+    #
+    # THIS LIST IS NOT A PREFERENCE. Four of these were missing from it while
+    # the published documentation told people to fetch them by name: the
+    # quickstart runs `curl -O $BASE/SHA256SUMS -O $BASE/load_pentimento.py`
+    # and then `sha256sum -c`, all of which would have answered 404. The
+    # attribution files are worse than an inconvenience: they are how a reader
+    # discharges CC BY for the 5,429 covers that require it, and publishing a
+    # CC BY corpus while withholding the credit list is the one failure this
+    # corpus has no excuse for.
+    #
+    # Anything written into a packed directory that a reader is told about
+    # belongs here. `packaged_extras` is the shared list so the packer and the
+    # publisher cannot disagree about it.
+    for extra in packaged_extras(packed):
+        files[extra.name] = digest_of(extra)
     return files
+
+
+#: Files that ship beside the shards. Names, not a glob, so a stray file in the
+#: packed directory is never published by accident.
+PACKAGED_EXTRAS = (
+    "README.md",
+    "LICENCES.md",
+    "DATASHEET.md",
+    "SPLITS.md",
+    "CITATION.cff",
+    "croissant.json",
+    "licence-summary.json",
+    "ATTRIBUTION.md",
+    "ATTRIBUTION.csv",
+    "load_pentimento.py",
+    "SHA256SUMS-covers",
+    "SHA256SUMS-arms",
+)
+
+#: Written for a destination's own use and meaningless to a downloader. The
+#: Archive reads `ia-metadata.json` as headers on the first PUT and Kaggle
+#: reads `dataset-metadata.json` through its own client; publishing them as
+#: files would just be confusing.
+NOT_PUBLISHED = ("ia-metadata.json", "dataset-metadata.json")
+
+
+def packaged_extras(packed: pathlib.Path) -> list[pathlib.Path]:
+    """The non-shard files in `packed` that belong in the release."""
+    return [packed / name for name in PACKAGED_EXTRAS if (packed / name).is_file()]
 
 
 def verify(packed: pathlib.Path, files: dict[str, str]) -> list[str]:

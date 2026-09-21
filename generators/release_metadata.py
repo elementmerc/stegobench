@@ -815,16 +815,25 @@ def main(argv: list[str] | None = None) -> int:
             p.name: hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(directory.iterdir())
             if p.is_file() and not p.name.endswith(".tar")
-            and p.name not in ("SHA256SUMS", ".upload-budget")
+            and not p.name.startswith("SHA256SUMS")
+            and p.name != ".upload-budget"
         }
 
-    parts = [(rel, cover_index)]
+    # NAMED PER PART, because every destination is flat.
+    #
+    # The Internet Archive item and the HuggingFace repository each hold the
+    # covers and the arms side by side in one namespace. Two files both called
+    # SHA256SUMS land on the same name there, and the second silently replaces
+    # the first, leaving a checksum file that covers 10 shards and claims to
+    # cover 769.
+    parts = [(rel, cover_index, "covers")]
     if args.arms_index and arms is not None:
-        parts.append((pathlib.Path(args.arms_index).parent, arms))
-    for directory, index in parts:
+        parts.append((pathlib.Path(args.arms_index).parent, arms, "arms"))
+    for directory, index, part in parts:
+        name = f"SHA256SUMS-{part}"
         body = sha256sums(index, digests_of(directory))
-        (directory / "SHA256SUMS").write_text(body)
-        print(f"  {directory.name}/SHA256SUMS  {len(body.splitlines())} entries")
+        (directory / name).write_text(body)
+        print(f"  {directory.name}/{name}  {len(body.splitlines())} entries")
 
     print(f"\n{len(written)} file(s) written to {rel}")
     return 0

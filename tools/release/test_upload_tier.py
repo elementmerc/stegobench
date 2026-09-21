@@ -169,3 +169,91 @@ class ArchiveMetadataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublishableSetTests(unittest.TestCase):
+    """What actually leaves the machine.
+
+    Four files were missing from the publishable set while the published
+    documentation told people to fetch them by name. The quickstart ran
+    `curl -O $BASE/SHA256SUMS` and then `sha256sum -c`, and both would have
+    answered 404. The attribution list, which is how a reader discharges CC BY
+    for 5,429 covers, was also being withheld.
+
+    Nothing caught it because the set was a literal tuple and no test compared
+    it against what the packer writes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.packed = pathlib.Path(self.tmp.name)
+        (self.packed / "pentimento-core-index.json").write_text(json.dumps({
+            "tier": "Core", "samples": 2,
+            "shards": [{"shard": "pentimento-core-00000.tar", "samples": 2,
+                        "bytes": 4, "sha256": "a" * 64}],
+        }))
+        (self.packed / "pentimento-core-00000.tar").write_bytes(b"tar!")
+
+    def write(self, *names: str) -> None:
+        for name in names:
+            (self.packed / name).write_text(f"contents of {name}\n")
+
+    def test_everything_the_docs_name_is_published(self):
+        self.write("README.md", "SHA256SUMS-covers", "ATTRIBUTION.md",
+                   "ATTRIBUTION.csv", "load_pentimento.py", "LICENCES.md",
+                   "licence-summary.json")
+        files = upload_tier.load_index(self.packed)
+        for name in ("README.md", "SHA256SUMS-covers", "ATTRIBUTION.md",
+                     "ATTRIBUTION.csv", "load_pentimento.py",
+                     "licence-summary.json"):
+            self.assertIn(name, files, f"{name} would not be uploaded")
+
+    def test_no_non_shard_file_is_silently_left_behind(self):
+        """The assertion that would have caught the original defect.
+
+        Every file the packer writes is either published or named as
+        deliberately withheld. A new file added to the packed directory with
+        no decision about it fails here rather than going missing in silence.
+        """
+        self.write(*upload_tier.PACKAGED_EXTRAS, *upload_tier.NOT_PUBLISHED)
+        files = upload_tier.load_index(self.packed)
+        for path in sorted(self.packed.iterdir()):
+            if path.suffix == ".tar" or path.name.endswith("index.json"):
+                continue
+            decided = (path.name in files
+                       or path.name in upload_tier.NOT_PUBLISHED)
+            self.assertTrue(decided,
+                            f"{path.name} is neither published nor explicitly "
+                            f"withheld, so nobody decided about it")
+
+    def test_the_destination_only_files_stay_home(self):
+        self.write("ia-metadata.json", "dataset-metadata.json")
+        files = upload_tier.load_index(self.packed)
+        self.assertNotIn("ia-metadata.json", files)
+        self.assertNotIn("dataset-metadata.json", files)
+
+    def test_the_two_checksum_files_do_not_share_a_name(self):
+        """Every destination is flat.
+
+        The covers and the arms are packed in separate directories and land in
+        one namespace. Two files both called SHA256SUMS mean the second
+        replaces the first, leaving a checksum file that covers 10 shards and
+        claims to cover 769.
+        """
+        self.assertNotIn("SHA256SUMS", upload_tier.PACKAGED_EXTRAS)
+        checksums = [n for n in upload_tier.PACKAGED_EXTRAS
+                     if n.startswith("SHA256SUMS")]
+        self.assertEqual(len(checksums), len(set(checksums)))
+        self.assertGreaterEqual(len(checksums), 2)
+
+    def test_a_stray_file_is_not_published_by_accident(self):
+        self.write("notes-to-self.txt", "core.dump")
+        files = upload_tier.load_index(self.packed)
+        self.assertNotIn("notes-to-self.txt", files)
+        self.assertNotIn("core.dump", files)
+
+    def test_an_absent_extra_is_not_an_error(self):
+        # Nano has no arms checksum file of its own when packed alone.
+        files = upload_tier.load_index(self.packed)
+        self.assertIn("pentimento-core-00000.tar", files)
