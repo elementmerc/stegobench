@@ -136,7 +136,8 @@ jobs:
         working-directory: ${{ matrix.path }}
         run: npm ci
       - name: Build, which fails on a dead link
-        # `ignoreDeadLinks` is unset in either config, so a link from one page
-        # of a site to another cannot break without failing here.
+        # Pentimento sets no `ignoreDeadLinks` at all. Stegobench excepts only
+        # `/pentimento/`, the sibling site this build cannot see, so a link from
+        # one page of a site to another cannot break without failing here.
         working-directory: ${{ matrix.path }}
         run: npm run build
