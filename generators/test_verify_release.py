@@ -321,3 +321,59 @@ class ProvenanceTests(unittest.TestCase):
         vr.check_provenance(self.arms, self.covers, r)
         self.assertTrue(any("does not agree" in m
                             for m in r.failures["provenance"]))
+
+
+class CouldNotLookTests(unittest.TestCase):
+    """The fault found eight times across this fleet in one day.
+
+    "0 pairs, containers identical" reads as a pass and means the opposite.
+    **Could not look** and **looked and found nothing wrong** render as the
+    same clean line, and the clean line is the one people act on. Every check
+    that counts must refuse a count of zero.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.arms = pathlib.Path(self.tmp.name) / "arms"
+        self.arms.mkdir(parents=True)
+        (self.arms / "manifest.jsonl").write_text("")
+
+    def test_an_empty_arm_manifest_fails_the_pair_check(self):
+        r = Report()
+        vr.check_pairs(self.arms, 10, r)
+        self.assertIn("pairs", r.failures)
+        self.assertTrue(any("cannot look" in m for m in r.failures["pairs"]))
+
+    def test_an_empty_arm_manifest_fails_the_stale_check(self):
+        r = Report()
+        vr.check_stale(self.arms, 10, r)
+        self.assertIn("stale", r.failures)
+
+    def test_an_empty_arm_manifest_fails_the_provenance_check(self):
+        r = Report()
+        vr.check_provenance(self.arms, [], r)
+        self.assertIn("provenance", r.failures)
+
+    def test_an_empty_row_set_fails_the_digest_check(self):
+        r = Report()
+        vr.check_digests([], pathlib.Path(self.tmp.name), None, r)
+        self.assertIn("digests", r.failures)
+
+    def test_a_packed_tier_whose_members_match_nothing_fails(self):
+        import io
+        import tarfile
+        rel = pathlib.Path(self.tmp.name) / "nano"
+        rel.mkdir()
+        tar_path = rel / "pentimento-nano-00000.tar"
+        with tarfile.open(tar_path, "w") as tar:
+            info = tarfile.TarInfo("README.txt")
+            info.size = 3
+            tar.addfile(info, io.BytesIO(b"abc"))
+        (rel / "pentimento-nano-index.json").write_text(json.dumps({
+            "tier": "Nano",
+            "shards": [{"shard": tar_path.name, "first_tier_order": 0,
+                        "last_tier_order": 0}]}))
+        r = Report()
+        vr.check_packed(rel, [cover(0)], 10 ** 9, r)
+        self.assertIn("packed", r.failures)

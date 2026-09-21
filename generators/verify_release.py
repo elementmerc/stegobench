@@ -129,6 +129,24 @@ class Report:
         return not self.failures
 
 
+def nothing_checked(check: str, count: int, report: Report,
+                    what: str) -> bool:
+    """Refuse a check that examined nothing, rather than passing it.
+
+    "0 pairs, containers identical" reads as a pass and means the opposite:
+    that nothing was looked at. **Could not look** and **looked and found
+    nothing wrong** render as the same clean line, and the clean line is the
+    one people act on. This is the single most common fault found across this
+    fleet today, so it is a helper rather than a habit.
+    """
+    if count:
+        return False
+    report.fail(check, f"checked no {what} at all. That is not a pass: it "
+                       f"means this check could not look, and a check that "
+                       f"cannot look must not report clean")
+    return True
+
+
 def load_rows(path: pathlib.Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()
             if line.strip()]
@@ -260,6 +278,9 @@ def check_packed(release: pathlib.Path, rows: list[dict],
                     f"at their tier position, e.g. {stale[:3]}. The tier was "
                     f"packed before the covers changed and nothing in it says "
                     f"so; repack before publishing")
+    if not unreadable and nothing_checked("packed", checked, report,
+                                          "packed members"):
+        return
     if not unreadable and not stale:
         report.note("packed", f"{checked:,} members across {len(tiers)} tier(s) "
                               f"match the manifest at their position")
@@ -305,6 +326,8 @@ def check_digests(rows: list[dict], root: pathlib.Path, sample: int | None,
     if wrong:
         report.fail(check, f"{len(wrong):,} file(s) do not match their recorded "
                            f"digest, e.g. {wrong[:3]}")
+    if nothing_checked(check, len(chosen), report, "files"):
+        return
     if not missing and not wrong:
         report.note(check, f"{len(chosen):,} checked, all present and matching"
                            + ("" if sample is None else f" (sampled)"))
@@ -351,6 +374,8 @@ def check_pairs(arm_root: pathlib.Path, sample_per_arm: int,
                     f"{len(mismatched):,} pair(s) differ in the CONTAINER as "
                     f"well as the payload, e.g. {mismatched[:3]}. A detector "
                     f"reads that difference instead of the payload")
+    if nothing_checked("pairs", checked, report, "pairs"):
+        return
     if not missing and not mismatched:
         report.note("pairs", f"{checked:,} pairs across {len(arms)} arms, "
                              f"containers identical")
@@ -392,6 +417,9 @@ def check_provenance(arm_root: pathlib.Path, rows: list[dict],
                     f"{len(wrong):,} arm row(s) name a cover digest the "
                     f"manifest does not agree with, e.g. {wrong[:3]}. The arm "
                     f"was built from an image that is no longer there")
+    if not unstamped and nothing_checked("provenance", checked, report,
+                                         "arm rows"):
+        return
     if not unstamped and not wrong:
         report.note("provenance", f"{checked:,} rows name the cover they were "
                                   f"built from, by content")
@@ -419,6 +447,8 @@ def check_stale(arm_root: pathlib.Path, sample_per_arm: int,
             checked += 1
             if digest(clean) != row["clean_sha256"]:
                 stale.append(row["clean"])
+    if nothing_checked("stale", checked, report, "clean halves"):
+        return
     if stale:
         report.fail("stale",
                     f"{len(stale):,} clean half/halves no longer match the "
