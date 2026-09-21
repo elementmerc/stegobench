@@ -29,6 +29,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::corpus::CorpusEntry;
+
 /// The size at or below which a tool ships inside the default image.
 ///
 /// Operator's rule, 2026-09-18. It falls in a real gap in the measured data
@@ -609,20 +611,36 @@ impl Entry {
     }
 }
 
+/// The subdirectory holding corpora rather than tools.
+///
+/// Corpora are a different type with different fields (see
+/// [`crate::corpus`]), so the tool walk skips this directory and hands it to
+/// the corpus loader instead. One registry to a user, two schemas underneath,
+/// because a corpus has no image and a detector has no licence URL.
+pub const CORPORA_DIR: &str = "corpora";
+
 /// Everything registered, keyed by name so the order is stable.
 #[derive(Debug, Default)]
 pub struct Registry {
     pub entries: BTreeMap<String, Entry>,
+    /// Registered datasets, keyed by id.
+    pub corpora: BTreeMap<String, CorpusEntry>,
 }
 
 impl Registry {
-    /// Loads every `.toml` under `dir`, recursively.
+    /// Loads every `.toml` under `dir`, recursively, plus the corpora in
+    /// `dir/corpora`.
     ///
     /// An invalid entry fails the load rather than being skipped: a registry
     /// that quietly drops a tool reports a smaller world than it has, and the
-    /// person who added the file is the last to find out.
+    /// person who added the file is the last to find out. Corpora load the
+    /// same way, deliberately, so the behaviour a reader predicts from one
+    /// half holds for the other.
     pub fn load(dir: &Path) -> Result<Self, RegistryError> {
-        let mut reg = Registry::default();
+        let mut reg = Registry {
+            corpora: crate::corpus::load_dir(&dir.join(CORPORA_DIR))?,
+            ..Registry::default()
+        };
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             let read = std::fs::read_dir(&d).map_err(|e| RegistryError::Read {
@@ -632,6 +650,9 @@ impl Registry {
             for item in read.flatten() {
                 let p = item.path();
                 if p.is_dir() {
+                    if p.file_name().is_some_and(|n| n == CORPORA_DIR) {
+                        continue;
+                    }
                     stack.push(p);
                 } else if p.extension().is_some_and(|e| e == "toml") {
                     let text = std::fs::read_to_string(&p).map_err(|e| RegistryError::Read {
@@ -648,8 +669,38 @@ impl Registry {
                             name: p.display().to_string(),
                             problems,
                         })?;
-                    reg.entries.insert(entry.name.clone(), entry);
+                    // Two files claiming one name is a silent coin toss
+                    // otherwise: the walk visits them in filesystem order, so
+                    // which one wins varies between machines and `describe`
+                    // would be reproducible only by luck. A name is also how a
+                    // result identifies what produced it.
+                    if let Some(first) = reg.entries.insert(entry.name.clone(), entry) {
+                        return Err(RegistryError::Invalid {
+                            name: p.display().to_string(),
+                            problems: vec![format!(
+                                "a second tool claims the name {:?}; a name is \
+                                 how `describe` finds an entry and how a result \
+                                 says what produced it, so two files cannot \
+                                 share one",
+                                first.name
+                            )],
+                        });
+                    }
                 }
+            }
+        }
+        // A corpus id and a tool name share one `describe` namespace, so a
+        // collision would make one of them unreachable by the vocabulary the
+        // user is told to use.
+        for id in reg.corpora.keys() {
+            if reg.entries.contains_key(id) {
+                return Err(RegistryError::Invalid {
+                    name: id.clone(),
+                    problems: vec!["is registered both as a tool and as a corpus. \
+                         `describe` takes one name for both, so one of the two \
+                         would be unreachable"
+                        .into()],
+                });
             }
         }
         Ok(reg)
@@ -851,6 +902,102 @@ version_args = ["-v"]"#,
         );
         assert_eq!(e.validate(), Ok(()));
         assert_eq!(e.secret_names(), ["STEGASHIELD_LICENCE"]);
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    const TOOL: &str = r#"
+name = "steghide"
+kind = "embedder"
+licence = "GPL-2.0-only"
+
+[binary]
+command = ["steghide"]
+version_args = ["--version"]
+
+[selftest]
+must_detect = "a.png"
+must_clear = "b.png"
+"#;
+
+    const CORPUS: &str = r#"
+id = "steghide"
+name = "A corpus named like a tool"
+description = "Only exists to collide with one."
+
+[licence]
+status = "unverified"
+note = "a fixture, so nothing was read"
+redistribution = "unknown"
+redistribution_reason = "a fixture"
+
+[obtain]
+url = "https://example.org/x"
+
+[properties]
+base_images = 10
+"#;
+
+    fn registry_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("embedders")).unwrap();
+        std::fs::write(dir.path().join("embedders/steghide.toml"), TOOL).unwrap();
+        std::fs::create_dir(dir.path().join(CORPORA_DIR)).unwrap();
+        dir
+    }
+
+    /// A corpus file is a different schema, so the tool walk must not try to
+    /// parse it. If it did, adding the first corpus would break every command
+    /// that loads the registry.
+    #[test]
+    fn corpora_are_loaded_as_corpora_and_not_parsed_as_tools() {
+        let dir = registry_dir();
+        std::fs::write(
+            dir.path().join(CORPORA_DIR).join("c.toml"),
+            CORPUS.replace("steghide", "example-corpus"),
+        )
+        .unwrap();
+        let reg = Registry::load(dir.path()).expect("loads");
+        assert_eq!(reg.entries.len(), 1);
+        assert_eq!(reg.corpora.len(), 1);
+        assert!(reg.corpora.contains_key("example-corpus"));
+    }
+
+    /// One `describe` namespace, so one name cannot mean two things.
+    #[test]
+    fn a_corpus_id_colliding_with_a_tool_name_is_refused() {
+        let dir = registry_dir();
+        std::fs::write(dir.path().join(CORPORA_DIR).join("c.toml"), CORPUS).unwrap();
+        let err = Registry::load(dir.path()).expect_err("the collision is refused");
+        assert!(
+            err.to_string().contains("both as a tool and as a corpus"),
+            "got: {err}"
+        );
+    }
+
+    /// Filesystem order decided the winner before this, so two entries sharing
+    /// a name resolved differently on different machines.
+    #[test]
+    fn two_tool_files_claiming_one_name_are_refused_rather_than_racing() {
+        let dir = registry_dir();
+        std::fs::write(dir.path().join("embedders/copy.toml"), TOOL).unwrap();
+        let err = Registry::load(dir.path()).expect_err("the duplicate is refused");
+        assert!(
+            err.to_string().contains("second tool claims the name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_registry_with_no_corpora_directory_still_loads_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("steghide.toml"), TOOL).unwrap();
+        let reg = Registry::load(dir.path()).expect("loads");
+        assert_eq!(reg.entries.len(), 1);
+        assert!(reg.corpora.is_empty());
     }
 }
 
