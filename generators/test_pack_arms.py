@@ -398,3 +398,103 @@ class TestContainerGate(TestPackArm):
         index = self.pack([row], {"00000.jpg": "09710.png"})
         self.assertEqual(index["container_mismatches"], [])
         self.assertEqual(index["samples"], 1)
+
+
+class TestRecordCompleteness(TestPackArm):
+    """Fields that were on 30 of 39 arms, and a credit line the licence asks for."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The shared fixture has no credit line, and these tests are about
+        # what happens to one.
+        self.licences["09710.png"]["attribution"] = (
+            '"File:09710.jpg", by A. Photographer, CC BY-SA 4.0 '
+            "(https://creativecommons.org/licenses/by-sa/4.0/), "
+            "via Wikimedia Commons, https://example.invalid/1, cropped")
+
+    def _jpeg_pair(self, arm_tool: str = "uerd") -> dict:
+        row = self._stego("uerd/0050/00000.jpg", jpeg(payload=b"\x11" * 32))
+        row["source_jpeg"] = "00000.jpg"
+        row["tool"] = arm_tool
+        clean = self.arms / "clean_jpeg/00000.jpg"
+        clean.parent.mkdir(parents=True, exist_ok=True)
+        clean.write_bytes(jpeg(payload=b"\x00" * 32))
+        row["clean"] = "clean_jpeg/00000.jpg"
+        return row
+
+    def test_the_rate_unit_is_stated_on_every_arm(self):
+        """The same four digits mean three different things.
+
+        `hugo-0050` is 0.05 bits per pixel, `steghide-0050` is 5% of reported
+        capacity, `juniward-0050` is 0.05 bits per non-zero AC coefficient.
+        Only the adaptive arms carried the unit, so a reader comparing on the
+        number in the name was comparing incompatible quantities.
+        """
+        for tool, expected in (("steghide", "capacity"),
+                               ("hugo", "bits per pixel"),
+                               ("juniward", "AC coefficient")):
+            self.setUp()
+            index = self.pack([self._jpeg_pair(tool)], {"00000.jpg": "09710.png"})
+            self.assertEqual(index["samples"], 1)
+            sample = self._sample("pentimento-core-uerd-0050-00000.tar",
+                                  "000000.json")
+            self.assertIn(expected, sample["rate_unit"], tool)
+            self.assertIn(sample["domain"], ("spatial", "jpeg-dct", "container"))
+
+    def test_a_rate_unit_already_on_the_row_is_not_overwritten(self):
+        row = self._jpeg_pair("uerd")
+        row["rate_unit"] = "something the builder knew better"
+        self.pack([row], {"00000.jpg": "09710.png"})
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        self.assertEqual(sample["rate_unit"], "something the builder knew better")
+
+    def test_pairing_records_what_was_verified(self):
+        """An absent field was ambiguous between checked and never looked at.
+
+        That ambiguity is what let two container defects through. The field is
+        written by the packer, after the container comparison, so it says what
+        was verified rather than what the builder intended.
+        """
+        index = self.pack([self._jpeg_pair()], {"00000.jpg": "09710.png"})
+        self.assertEqual(index["container_mismatches"], [])
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        self.assertEqual(sample["pairing"], "container-verified")
+
+    def test_a_sample_with_no_clean_half_says_so(self):
+        row = self._stego("uerd/0050/00000.jpg", jpeg())
+        row["source_jpeg"] = "00000.jpg"
+        self.pack([row], {"00000.jpg": "09710.png"})
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        self.assertEqual(sample["pairing"], "no-clean-half")
+
+    def test_the_credit_line_says_the_image_was_modified(self):
+        """CC BY asks for it, and everything here is a derivative twice over.
+
+        Sections 3(a)(1)(B) and 4(c) ask for an indication of modification
+        whenever a derivative is published. The cover is a crop; the stego
+        image is that crop with a payload in it. A credit line reproducing the
+        photographer's name and mentioning neither describes a photograph this
+        corpus does not contain.
+        """
+        self.pack([self._jpeg_pair()], {"00000.jpg": "09710.png"})
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        line = sample["cover_licence"]["attribution"]
+        self.assertIn("modified to carry a hidden payload", line)
+        # The cover's own ", cropped" is absorbed rather than repeated.
+        self.assertEqual(line.count("cropped"), 1)
+
+    def test_a_clean_arm_states_its_own_modification(self):
+        row = self._jpeg_pair()
+        self.pack([row], {"00000.jpg": "09710.png"}, name="clean-jpeg")
+        sample = self._sample("pentimento-core-clean-jpeg-00000.tar", "000000.json")
+        line = sample["cover_licence"]["attribution"]
+        self.assertIn("control half of a pair", line)
+        self.assertNotIn("hidden payload", line)
+
+    def test_a_cover_with_no_credit_line_does_not_gain_a_dangling_clause(self):
+        # CC0 covers carry no attribution string. Appending ", cropped, then
+        # modified..." to nothing produces a line that starts with a comma.
+        self.licences["09710.png"] = {"licence": "CC0", "attribution": None}
+        self.pack([self._jpeg_pair()], {"00000.jpg": "09710.png"})
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        self.assertIsNone(sample["cover_licence"]["attribution"])

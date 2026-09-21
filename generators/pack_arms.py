@@ -207,6 +207,61 @@ def add(tar: tarfile.TarFile, name: str, payload: bytes) -> None:
 #: The eight bytes every PNG starts with.
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
+#: THE SAME FOUR DIGITS MEAN THREE DIFFERENT THINGS.
+#:
+#: `hugo-0050` is 0.05 bits per pixel. `steghide-0050` is 5% of the capacity
+#: steghide reports for that cover. `juniward-0050` is 0.05 bits per non-zero
+#: AC coefficient. A reader comparing arms on the number in the name is
+#: comparing three incompatible quantities, and only the adaptive arms said so
+#: in their records.
+RATE_UNITS = {
+    "hugo": "bits per pixel",
+    "wow": "bits per pixel",
+    "suniward": "bits per pixel",
+    "hill": "bits per pixel",
+    "mipod": "bits per pixel",
+    "juniward": "bits per non-zero AC coefficient",
+    "uerd": "bits per non-zero AC coefficient",
+    "steghide": "fraction of the capacity steghide reports",
+    "outguess": "fraction of the capacity outguess reports",
+    "append_after_eoi": "not a rate: a fixed trailer",
+}
+
+#: Where the payload lives, which decides which detectors can see it at all.
+DOMAINS = {
+    "hugo": "spatial", "wow": "spatial", "suniward": "spatial",
+    "hill": "spatial", "mipod": "spatial",
+    "juniward": "jpeg-dct", "uerd": "jpeg-dct",
+    "steghide": "jpeg-dct", "outguess": "jpeg-dct",
+    "append_after_eoi": "container",
+}
+
+#: What was done to the cover to make this file. The credit line has to say so:
+#: CC BY asks for an indication of modification whenever a derivative is
+#: published, and every image in this corpus is a derivative twice over, once
+#: by the crop and once by the payload.
+STEGO_MODIFICATION = "cropped, then modified to carry a hidden payload"
+CLEAN_MODIFICATION = "cropped, and re-encoded as the control half of a pair"
+
+
+def restate(cover: dict, arm: str) -> dict:
+    """The cover's licence fields, with this derivative's own modification.
+
+    The cover row's credit line describes a crop. This file is that crop with
+    something further done to it, and a reader holding only this shard has no
+    other way to learn that.
+    """
+    out = dict(cover)
+    line = out.get("attribution")
+    if line:
+        modification = (CLEAN_MODIFICATION if arm.startswith("clean")
+                        else STEGO_MODIFICATION)
+        # The cover line already ends with its own ", cropped".
+        if line.endswith(", cropped"):
+            line = line[: -len(", cropped")]
+        out["attribution"] = f"{line}, {modification}"
+    return out
+
 
 def container_of(payload: bytes) -> tuple:
     """Everything about a file that the payload should NOT have changed.
@@ -367,7 +422,22 @@ def pack_arm(
                 sample["sha256"] = actual
                 sample["source_png"] = cover_name
                 sample["licence_join"] = how
-                sample["cover_licence"] = cover
+                sample["cover_licence"] = restate(cover, name)
+
+                # RECORDED, NOT ASSUMED. The reviewer's point was that an
+                # absent `pairing` field is ambiguous between "checked and
+                # matched" and "nobody looked", and that ambiguity is exactly
+                # what hid two container defects. Every sample that reaches
+                # this line has had its container compared with its clean
+                # half, so the field says what was verified rather than what
+                # the builder intended.
+                sample["pairing"] = (
+                    "container-verified" if clean_rel and (arms_root / clean_rel).exists()
+                    else "no-clean-half")
+                sample.setdefault("domain", DOMAINS.get(
+                    str(row.get("tool", "")), "unknown"))
+                sample.setdefault("rate_unit", RATE_UNITS.get(
+                    str(row.get("tool", "")), "unstated"))
 
                 key = f"{position:06d}"
                 add(tar, f"{key}{pathlib.PurePosixPath(rel).suffix}", payload)

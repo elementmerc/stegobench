@@ -169,7 +169,7 @@ def capture_class(row: dict) -> tuple[str, str]:
     return "unknown", "no capture hardware recorded"
 
 
-def attribution_for(row: dict) -> tuple[str | None, bool]:
+def attribution_for(row: dict, modification: str = "cropped") -> tuple[str | None, bool]:
     """A credit line a downstream user can paste, and whether they must.
 
     Follows the order Creative Commons itself recommends: title, creator,
@@ -177,6 +177,21 @@ def attribution_for(row: dict) -> tuple[str | None, bool]:
     explicitly rather than quietly omitting it, because a user who cannot tell
     the difference between "no attribution needed" and "we lost the name" will
     assume the first.
+
+    TWO THINGS THE FIRST VERSION LEFT OUT, both of which the licence asks for
+    by name.
+
+    The licence URI. CC BY 4.0 section 3(a)(1)(A)(iv) asks for a link to the
+    licence, and earlier versions ask the same in section 4(c). Naming the
+    licence without linking it leaves the reader to find the right one of
+    seven, which is the work the credit line exists to save them.
+
+    A statement that the work was modified. Sections 3(a)(1)(B) and 4(c) ask
+    for it whenever you publish a derivative, and EVERYTHING HERE IS A
+    DERIVATIVE. Not only the stego images: every cover in this corpus is a
+    512 pixel square crop, converted to greyscale, re-encoded as PNG. A credit
+    line that reproduces the photographer's name and says nothing about any of
+    that describes a photograph the corpus does not contain.
     """
     licence = (row.get("licence") or "").strip()
     required = licence in ATTRIBUTION_REQUIRED
@@ -197,9 +212,12 @@ def attribution_for(row: dict) -> tuple[str | None, bool]:
     if artist_part:
         parts.append(f"by {artist_part}")
     if licence:
-        parts.append(licence)
+        url = LICENCE_URLS.get(licence)
+        parts.append(f"{licence} ({url})" if url else licence)
     if source:
         parts.append(f"via Wikimedia Commons, {source}")
+    if modification:
+        parts.append(modification)
     return (", ".join(parts) if parts else None), required
 
 
