@@ -158,7 +158,7 @@ def main() -> int:
 
     (out / "manifest.jsonl").write_text(
         "".join(json.dumps(m) + "\n" for m in manifest)
-    )
+    , encoding="utf-8")
     print(f"wrote {len(manifest)} pairs across {len(RATES)} payload rates at {args.size}px, placement={args.placement}, method={args.method}")
     for rate in RATES:
         ch = [m["samples_changed"] for m in manifest if m["rate"] == rate]

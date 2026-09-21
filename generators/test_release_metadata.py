@@ -207,7 +207,7 @@ class CroissantTests(unittest.TestCase):
             self.skipTest("mlcroissant is not installed")
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "croissant.json"
-            path.write_text(json.dumps(self.record(), indent=2))
+            path.write_text(json.dumps(self.record(), indent=2), encoding="utf-8")
             mlcroissant.Dataset(jsonld=str(path))
 
 
@@ -219,7 +219,7 @@ class LoaderTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.dir = pathlib.Path(self.tmp.name)
         self.script = self.dir / "load_pentimento.py"
-        self.script.write_text(release_metadata.loader())
+        self.script.write_text(release_metadata.loader(), encoding="utf-8")
 
     def shard(self, name: str, *, samples: int = 3, truncate: bool = False) -> pathlib.Path:
         path = self.dir / name
@@ -278,13 +278,13 @@ class EndToEndTests(unittest.TestCase):
             "tier": "Core", "samples": 2,
             "shards": [{"shard": "pentimento-core-00000.tar", "samples": 2,
                         "bytes": 1024, "sha256": "a" * 64}],
-        }))
+        }), encoding="utf-8")
         (self.rel / "licence-summary.json").write_text(json.dumps({
             "total": 2, "licences": {"CC BY 4.0": 1, "CC0": 1},
             "licence_urls": {"CC BY 4.0": "https://creativecommons.org/licenses/by/4.0/"},
             "attribution_required": 1, "attribution_required_pct": 50.0,
             "capture_class": {"camera": 2},
-        }))
+        }), encoding="utf-8")
         self.arms_index = self.arms / "pentimento-core-arms-index.json"
         self.arms_index.write_text(json.dumps({
             "tier": "Core", "part": "arms", "total_samples": 2, "total_bytes": 2048,
@@ -292,11 +292,11 @@ class EndToEndTests(unittest.TestCase):
                       "missing": [], "digest_mismatches": [], "mispaired": [],
                       "shards": [{"shard": "pentimento-core-wow-0200-00000.tar",
                                   "samples": 2, "bytes": 2048, "sha256": "c" * 64}]}],
-        }))
+        }), encoding="utf-8")
         self.manifest = pathlib.Path(self.tmp.name) / "manifest.jsonl"
         self.manifest.write_text(
             json.dumps(row("00000.png")) + "\n"
-            + json.dumps(row("00001.png", required=False, licence="CC0")) + "\n")
+            + json.dumps(row("00001.png", required=False, licence="CC0")) + "\n", encoding="utf-8")
 
     def run_main(self, *extra: str) -> int:
         return release_metadata.main([
@@ -315,7 +315,7 @@ class EndToEndTests(unittest.TestCase):
 
     def test_the_checksum_file_covers_the_paperwork_written_beside_it(self):
         self.run_main("--covers-manifest", str(self.manifest))
-        body = (self.rel / "SHA256SUMS-covers").read_text()
+        body = (self.rel / "SHA256SUMS-covers").read_text(encoding="utf-8")
         self.assertIn("README.md", body)
         self.assertIn("pentimento-core-00000.tar", body)
         # It cannot contain its own digest, and claiming to would be worse
@@ -324,9 +324,9 @@ class EndToEndTests(unittest.TestCase):
 
     def test_running_twice_produces_identical_checksums(self):
         self.run_main("--covers-manifest", str(self.manifest))
-        first = (self.rel / "SHA256SUMS-covers").read_text()
+        first = (self.rel / "SHA256SUMS-covers").read_text(encoding="utf-8")
         self.run_main("--covers-manifest", str(self.manifest))
-        self.assertEqual(first, (self.rel / "SHA256SUMS-covers").read_text())
+        self.assertEqual(first, (self.rel / "SHA256SUMS-covers").read_text(encoding="utf-8"))
 
     def test_without_a_manifest_it_says_so_rather_than_writing_an_empty_list(self):
         self.assertEqual(self.run_main(), 0)
@@ -348,10 +348,10 @@ class EndToEndTests(unittest.TestCase):
             "tier": "Nano", "samples": 2,
             "shards": [{"shard": "pentimento-nano-00000.tar", "samples": 2,
                         "bytes": 1024, "sha256": "a" * 64}],
-        }))
+        }), encoding="utf-8")
         self.assertEqual(self.run_main(), 0)
-        self.assertIn("# Pentimento Nano", (self.rel / "README.md").read_text())
-        self.assertIn("Pentimento Nano", (self.rel / "CITATION.cff").read_text())
+        self.assertIn("# Pentimento Nano", (self.rel / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("Pentimento Nano", (self.rel / "CITATION.cff").read_text(encoding="utf-8"))
 
     def test_a_small_tier_credits_only_its_own_photographers(self):
         """Nano must not ship Core's credit list.
@@ -361,16 +361,16 @@ class EndToEndTests(unittest.TestCase):
         photographer notices.
         """
         rows = [dict(row(f"{i:05d}.png"), tier_order=i) for i in range(4)]
-        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         for path in self.rel.glob("pentimento-*-index.json"):
             path.unlink()
         (self.rel / "pentimento-nano-index.json").write_text(json.dumps({
             "tier": "Nano", "samples": 2,
             "shards": [{"shard": "pentimento-nano-00000.tar", "samples": 2,
                         "bytes": 1024, "sha256": "a" * 64}],
-        }))
+        }), encoding="utf-8")
         self.assertEqual(self.run_main("--covers-manifest", str(self.manifest)), 0)
-        body = (self.rel / "ATTRIBUTION.md").read_text()
+        body = (self.rel / "ATTRIBUTION.md").read_text(encoding="utf-8")
         self.assertIn("00000.png", body)
         self.assertIn("00001.png", body)
         self.assertNotIn("00002.png", body)
@@ -380,9 +380,9 @@ class EndToEndTests(unittest.TestCase):
         # Both match pentimento-*-index.json, and the arms one has no "samples"
         # key, so picking it would produce a README claiming zero covers.
         (self.rel / "pentimento-core-arms-index.json").write_text(
-            json.dumps({"tier": "Core", "part": "arms", "arms": []}))
+            json.dumps({"tier": "Core", "part": "arms", "arms": []}), encoding="utf-8")
         self.assertEqual(self.run_main(), 0)
-        self.assertIn("2 permissively licensed", (self.rel / "README.md").read_text())
+        self.assertIn("2 permissively licensed", (self.rel / "README.md").read_text(encoding="utf-8"))
 
     def test_the_split_guide_names_both_fields_that_hold_the_cover(self):
         # The cover shards call it `file` and the arm shards call it

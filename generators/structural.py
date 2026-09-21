@@ -70,7 +70,7 @@ def main() -> int:
 
     (out / "manifest.jsonl").write_text(
         "".join(json.dumps(m) + "\n" for m in manifest)
-    )
+    , encoding="utf-8")
     print(f"wrote {len(manifest)} pairs, {args.payload_bytes} bytes appended after IEND")
     return 0
 

@@ -106,7 +106,7 @@ def bare_png(path: pathlib.Path) -> bytes:
 
 def audit(root: pathlib.Path, manifest_path: pathlib.Path, size: int) -> dict:
     rows = {r["file"]: r for r in (
-        json.loads(l) for l in manifest_path.read_text().splitlines() if l.strip()
+        json.loads(l) for l in manifest_path.read_text(encoding="utf-8").splitlines() if l.strip()
     )}
     findings = {
         "carries_metadata": [], "trailing_data": [], "wrong_geometry": [],
@@ -153,7 +153,7 @@ def audit(root: pathlib.Path, manifest_path: pathlib.Path, size: int) -> dict:
 def repair(root: pathlib.Path, manifest_path: pathlib.Path,
            dedup_db: pathlib.Path | None) -> int:
     """Rewrite every cover from its pixels, then rebuild manifest and store."""
-    lines = [l for l in manifest_path.read_text().splitlines() if l.strip()]
+    lines = [l for l in manifest_path.read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = [json.loads(l) for l in lines]
     changed = 0
 
@@ -173,7 +173,7 @@ def repair(root: pathlib.Path, manifest_path: pathlib.Path,
         row["container"] = "pixels only, ancillary chunks stripped"
         changed += 1
 
-    manifest_path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    manifest_path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     print(f"rewrote {changed} of {len(rows)} covers and their manifest rows")
 
     if dedup_db and changed:

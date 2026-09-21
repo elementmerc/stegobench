@@ -69,7 +69,7 @@ class BackfillError(RuntimeError):
 def load_jsonl(path: pathlib.Path) -> list[dict]:
     if not path.is_file():
         raise BackfillError(f"no manifest at {path}")
-    return [json.loads(line) for line in path.read_text().splitlines()
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 
@@ -143,13 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rows = load_jsonl(manifest_path)
         candidates = load_jsonl(candidates_dir / "manifest.jsonl")
-        doomed = json.loads(pathlib.Path(args.unpublishable).read_text())
+        doomed = json.loads(pathlib.Path(args.unpublishable).read_text(encoding="utf-8"))
     except (BackfillError, OSError, json.JSONDecodeError) as e:
         print(f"cannot start: {e}", file=sys.stderr)
         return 1
 
     if args.candidate_rejects:
-        rejects = json.loads(pathlib.Path(args.candidate_rejects).read_text())
+        rejects = json.loads(pathlib.Path(args.candidate_rejects).read_text(encoding="utf-8"))
         unusable = {c["file"] for c in rejects.get("covers", [])}
         print(f"candidates: {len(candidates):,}, of which {len(unusable)} are "
               f"themselves unpublishable")
@@ -237,11 +237,11 @@ def main(argv: list[str] | None = None) -> int:
 
     part = manifest_path.with_suffix(".jsonl.part")
     part.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
-                            for r in ordered))
+                            for r in ordered), encoding="utf-8")
     part.replace(manifest_path)
 
     log = covers / "backfill.json"
-    log.write_text(json.dumps({"swaps": swaps}, indent=2) + "\n")
+    log.write_text(json.dumps({"swaps": swaps}, indent=2) + "\n", encoding="utf-8")
     print(f"\nwritten: {manifest_path}\nwritten: {log}")
     print("\nThe arms for these covers are now stale. Rebuild them, then "
           "repack.")

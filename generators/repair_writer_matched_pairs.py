@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(f"tools that rewrite the container: {', '.join(sorted(rewriting))}")
 
-    rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()]
     affected = [r for r in rows
                 if r.get("tool") in rewriting
                 and r.get("pairing") != "writer-matched"]

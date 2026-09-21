@@ -185,7 +185,7 @@ def licence_summary(manifest: pathlib.Path, count: int | None = None) -> dict:
     attribution_required = 0
     capture: collections.Counter = collections.Counter()
     total = 0
-    rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()]
     rows.sort(key=lambda r: r.get("tier_order", 0))
     if count is not None:
         rows = rows[:count]
@@ -311,7 +311,7 @@ def cmd_prepare(args) -> int:
     if not index_files:
         print(f"no packed index under {packed}. Run pack_tier.py first.", file=sys.stderr)
         return 1
-    index = json.loads(index_files[0].read_text())
+    index = json.loads(index_files[0].read_text(encoding="utf-8"))
     tier = index["tier"]
     summary = licence_summary(manifest, index["samples"])
 
@@ -346,7 +346,7 @@ def cmd_prepare(args) -> int:
         f"carries a ready-made credit line."
     )
 
-    (packed / "LICENCES.md").write_text(licences_markdown(summary, tier))
+    (packed / "LICENCES.md").write_text(licences_markdown(summary, tier), encoding="utf-8")
 
     # Internet Archive. licenseurl is a single field on a mixed corpus, so it
     # carries the strictest obligation and the description says where the truth
@@ -362,7 +362,7 @@ def cmd_prepare(args) -> int:
                     "dataset", "computer vision"],
         "creator": "Daniel Iwugo",
     }
-    (packed / "ia-metadata.json").write_text(json.dumps(ia_meta, indent=2) + "\n")
+    (packed / "ia-metadata.json").write_text(json.dumps(ia_meta, indent=2) + "\n", encoding="utf-8")
 
     kaggle_meta = {
         "title": f"Pentimento {tier} steganalysis covers",
@@ -371,9 +371,9 @@ def cmd_prepare(args) -> int:
         "subtitle": f"{summary['total']:,} permissively licensed 512x512 covers",
         "description": blurb,
     }
-    (packed / "dataset-metadata.json").write_text(json.dumps(kaggle_meta, indent=2) + "\n")
+    (packed / "dataset-metadata.json").write_text(json.dumps(kaggle_meta, indent=2) + "\n", encoding="utf-8")
 
-    (packed / "licence-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (packed / "licence-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     print(f"tier {tier}: {summary['total']:,} covers, "
           f"{len(index['shards'])} shard(s), {total_bytes / 1e9:.2f} GB")
@@ -395,7 +395,7 @@ def cmd_torrent(args) -> int:
     if not index_files:
         print(f"no packed index under {packed}", file=sys.stderr)
         return 1
-    index = json.loads(index_files[0].read_text())
+    index = json.loads(index_files[0].read_text(encoding="utf-8"))
     tier = index["tier"]
     identifier = f"pentimento-{tier.lower()}-v1"
 

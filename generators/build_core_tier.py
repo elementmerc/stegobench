@@ -117,7 +117,7 @@ def run_job(job: dict, log_dir: pathlib.Path, timeout: int) -> dict:
         code = proc.returncode
     except subprocess.TimeoutExpired:
         code = -1
-        log.write_text(log.read_text() + f"\nTIMED OUT after {timeout}s\n")
+        log.write_text(log.read_text(encoding="utf-8") + f"\nTIMED OUT after {timeout}s\n", encoding="utf-8")
     return {"name": job["name"], "returncode": code,
             "seconds": round(time.monotonic() - started, 1), "log": str(log)}
 
@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     jobs = plan_jobs(args.count, out, covers, manifest, jpeg_covers)
 
     state_path = out / "build-state.json"
-    state = json.loads(state_path.read_text()) if state_path.is_file() else {"done": {}}
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {"done": {}}
     pending = [j for j in jobs if j["name"] not in state["done"]]
 
     total_cpu = sum(j["est_seconds"] for j in pending)
@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                       + ("" if ok else f"  exit {result['returncode']}, see {result['log']}"))
                 if ok:
                     state["done"][result["name"]] = result
-                    state_path.write_text(json.dumps(state, indent=2) + "\n")
+                    state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
     elapsed = time.monotonic() - started
     print(f"\n{len(state['done'])}/{len(jobs)} arms complete, "

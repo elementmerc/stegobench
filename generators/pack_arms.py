@@ -112,7 +112,7 @@ class PackError(RuntimeError):
 def load_cover_licences(manifest: pathlib.Path) -> dict[str, dict]:
     """The licence half of every cover row, keyed by filename."""
     out: dict[str, dict] = {}
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
@@ -136,7 +136,7 @@ def load_jpeg_cover_map(manifest: pathlib.Path) -> dict[str, str]:
     would silently attribute half the arm to the wrong photographer.
     """
     out: dict[str, str] = {}
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
@@ -182,7 +182,7 @@ def group_rows(manifest: pathlib.Path) -> dict[str, list[dict]]:
     the same positions.
     """
     groups: dict[str, list[dict]] = collections.defaultdict(list)
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
@@ -627,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
         "note": "Each sample JSON carries the arm row joined to its cover's "
                 "licence under `cover_licence`. A stego image is a derivative "
                 "of its cover and inherits that cover's terms.",
-    }, indent=2, sort_keys=True) + "\n")
+    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     print(f"\n{len(indices)} arm(s), {total_samples} samples, "
           f"{total_bytes / 1e9:.1f} GB, {time.monotonic() - started:.0f}s")

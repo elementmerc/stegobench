@@ -74,11 +74,11 @@ class MergeTests(unittest.TestCase):
 
     def shard(self, n: int, rows: list[dict]) -> None:
         (self.out / f"manifest.shard-{n:02d}.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def rows(self) -> list[dict]:
         return [json.loads(l) for l
-                in (self.out / "manifest.jsonl").read_text().splitlines()
+                in (self.out / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
                 if l.strip()]
 
     def test_the_shards_are_folded_into_one_manifest(self):
@@ -103,7 +103,7 @@ class MergeTests(unittest.TestCase):
 
     def test_an_existing_manifest_is_kept_rather_than_overwritten(self):
         (self.out / "manifest.jsonl").write_text(
-            json.dumps({"stego": "old"}) + "\n")
+            json.dumps({"stego": "old"}) + "\n", encoding="utf-8")
         self.shard(0, [{"stego": "new"}])
         merge_shards(self.out)
         self.assertEqual({r["stego"] for r in self.rows()}, {"old", "new"})

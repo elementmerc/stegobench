@@ -42,7 +42,7 @@ COVER_ROWS = [
 
 def write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
 class TestJpegCoverMap(unittest.TestCase):

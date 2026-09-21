@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and not failed and manifest.is_file():
         fresh = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                  for p in sorted(clean_dir.glob("*.jpg"))}
-        rows = [json.loads(line) for line in manifest.read_text().splitlines()
+        rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
                 if line.strip()]
         touched = 0
         for row in rows:
@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         # Written beside and renamed, so an interrupted run cannot leave a
         # manifest that is half one corpus and half another.
         part = manifest.with_suffix(".jsonl.part")
-        part.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+        part.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
         part.replace(manifest)
         print(f"manifest: {touched:,} row(s) repointed at the repaired clean half")
 

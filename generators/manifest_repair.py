@@ -272,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no manifest at {path}", file=sys.stderr)
         return 2
 
-    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
     print(f"{len(rows)} rows")
 
     # Existing tier_order values are authoritative and never reassigned, so a
@@ -353,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out = pathlib.Path(args.out) if args.out else path
     tmp = out.with_suffix(out.suffix + f".repair-{os.getpid()}")
-    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     tmp.replace(out)
     print(f"\nwritten: {out}")
     return 0

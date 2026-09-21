@@ -66,7 +66,7 @@ def cover_id(name: str) -> str:
 def best_records(path: pathlib.Path) -> list[dict]:
     """One record per file: the one with the most detector fields filled."""
     best: dict[str, dict] = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
@@ -196,7 +196,7 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                 },
             }
             name = f"{corpus_name}-{embedder}-{parts[1] if len(parts) > 1 else '0000'}-{subject}.json"
-            (out_dir / name).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+            (out_dir / name).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             written += 1
     print(f"{corpus_name}: {written} result-v1 document(s) in {out_dir}")
     return 0

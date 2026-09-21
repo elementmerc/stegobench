@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rows = {}
-    for line in manifest_path.read_text().splitlines():
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
             rows[row["file"]] = row
@@ -179,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         "layout": "webdataset",
         "note": "samples are keyed by tier_order, so a smaller tier is a prefix "
                 "of a larger one and shard N is identical across tiers",
-    }, indent=2) + "\n")
+    }, indent=2) + "\n", encoding="utf-8")
 
     print(f"\n{len(index)} shard(s), {sum(s['bytes'] for s in index) / 1e9:.2f} GB, "
           f"{time.monotonic() - started:.0f}s")

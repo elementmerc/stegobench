@@ -157,14 +157,14 @@ def main(argv: list[str] | None = None) -> int:
     if not manifest.is_file():
         print(f"no manifest at {manifest}", file=sys.stderr)
         return 2
-    rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()]
     if args.limit:
         rows = rows[: args.limit]
 
     out_path = pathlib.Path(args.out) if args.out else corpus / "scores.jsonl"
     scored: dict[str, dict] = {}
     if out_path.exists():
-        for line in out_path.read_text().splitlines():
+        for line in out_path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 record = json.loads(line)
                 scored[record["file"]] = record

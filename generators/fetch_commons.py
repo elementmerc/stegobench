@@ -521,7 +521,7 @@ def main() -> int:
     iso_quota = ShareQuota("iso band", args.max_iso_share)
     seen_ids = set()
     if manifest_path.exists():
-        rows = [json.loads(l) for l in manifest_path.read_text().splitlines() if l.strip()]
+        rows = [json.loads(l) for l in manifest_path.read_text(encoding="utf-8").splitlines() if l.strip()]
         seen_ids = {r["pageid"] for r in rows}
         caps.resume_from(rows)
         iso_quota.resume_from(r.get("iso_band") for r in rows)

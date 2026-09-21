@@ -63,7 +63,7 @@ def main(argv=None):
         print("This corpus is licence restricted and is not shipped.", file=sys.stderr)
         return 2
 
-    rows = [json.loads(line) for line in args.scores.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in args.scores.read_text(encoding="utf-8").splitlines() if line.strip()]
     clean = [r for r in rows if r["label"] == "clean"]
     arms: dict[tuple, list] = collections.defaultdict(list)
     for r in rows:

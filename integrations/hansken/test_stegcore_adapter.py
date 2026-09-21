@@ -167,7 +167,7 @@ class TestCalibrationRecord:
         """
         if not CALIBRATION_SOURCE.exists():
             pytest.skip(f"{CALIBRATION_SOURCE} is not on this machine")
-        recorded = json.loads(CALIBRATION_SOURCE.read_text())["combined_4pct"]
+        recorded = json.loads(CALIBRATION_SOURCE.read_text(encoding="utf-8"))["combined_4pct"]
         assert CALIBRATION["thresholds"] == {
             "Sample Pair Analysis": recorded["spa"],
             "RS Analysis": recorded["rs"],

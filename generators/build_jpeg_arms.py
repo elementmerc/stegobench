@@ -122,11 +122,11 @@ def merge_shards(out: pathlib.Path) -> int:
     manifest = out / "manifest.jsonl"
     rows = []
     if manifest.exists():
-        rows += [json.loads(l) for l in manifest.read_text().splitlines()
+        rows += [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines()
                  if l.strip()]
     before = len(rows)
     for path in shards:
-        rows += [json.loads(l) for l in path.read_text().splitlines()
+        rows += [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
                  if l.strip()]
 
     # A stego path appearing twice means two shards built the same pair, which
@@ -144,7 +144,7 @@ def merge_shards(out: pathlib.Path) -> int:
     ordered = sorted(seen.values(), key=lambda r: r["stego"])
     part = manifest.with_suffix(".jsonl.part")
     part.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
-                            for r in ordered))
+                            for r in ordered), encoding="utf-8")
     part.replace(manifest)
     for path in shards:
         path.unlink()
@@ -231,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in shard_manifests(out) + [out / "manifest.jsonl"]:
         if path.exists():
             done |= {json.loads(l)["stego"]
-                     for l in path.read_text().splitlines() if l.strip()}
+                     for l in path.read_text(encoding="utf-8").splitlines() if l.strip()}
     if done:
         print(f"resuming: {len(done)} pairs already built")
     if args.shards > 1:

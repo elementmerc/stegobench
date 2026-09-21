@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = out / "manifest.jsonl"
     done = set()
     if manifest.exists():
-        done = {json.loads(l)["stego"] for l in manifest.read_text().splitlines()
+        done = {json.loads(l)["stego"] for l in manifest.read_text(encoding="utf-8").splitlines()
                 if l.strip()}
         print(f"resuming: {len(done)} pairs already built")
 

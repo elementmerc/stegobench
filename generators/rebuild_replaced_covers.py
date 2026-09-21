@@ -83,7 +83,7 @@ def positions(swap_files: list[pathlib.Path]) -> set[int]:
     found: set[int] = set()
     for path in swap_files:
         try:
-            log = json.loads(path.read_text())
+            log = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise RebuildError(f"cannot read {path}: {e}") from e
         swaps = log.get("swaps")
@@ -112,7 +112,7 @@ def confirm_replaced(covers: pathlib.Path, found: set[int]) -> list[str]:
     if not manifest.is_file():
         raise RebuildError(f"no cover manifest at {manifest}")
     by_order = {}
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
             by_order[row["tier_order"]] = row
@@ -156,17 +156,17 @@ def row_is_doomed(row: dict, stems: set[str]) -> bool:
 def strip_manifest(path: pathlib.Path, stems: set[str],
                    dry_run: bool) -> tuple[int, int]:
     """Remove the doomed rows. Returns (kept, dropped)."""
-    rows = [json.loads(line) for line in path.read_text().splitlines()
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()]
     keep = [r for r in rows if not row_is_doomed(r, stems)]
     dropped = len(rows) - len(keep)
     if dropped and not dry_run:
         backup = path.with_suffix(".jsonl.pre-rebuild")
         if not backup.exists():
-            backup.write_text(path.read_text())
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         part = path.with_suffix(".jsonl.part")
         part.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
-                                for r in keep))
+                                for r in keep), encoding="utf-8")
         part.replace(path)
     return len(keep), dropped
 

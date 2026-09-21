@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     if not source.is_file():
         print(f"no manifest at {source}", file=sys.stderr)
         return 2
-    rows = [json.loads(l) for l in source.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in source.read_text(encoding="utf-8").splitlines() if l.strip()]
     if not rows:
         print(f"{source} is empty", file=sys.stderr)
         return 1
@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     done = set()
     if manifest_path.exists():
         done = {json.loads(l)["pageid"]
-                for l in manifest_path.read_text().splitlines() if l.strip()}
+                for l in manifest_path.read_text(encoding="utf-8").splitlines() if l.strip()}
         print(f"resuming: {len(done)} of {len(rows)} already rebuilt")
 
     try:

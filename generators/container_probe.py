@@ -160,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
 
     (out / "probe.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in records)
-    )
+    , encoding="utf-8")
 
     print(f"\n{'variant':<12} {'carrier':<6} {'n':>4}  identical  mean shift")
     print("-" * 52)

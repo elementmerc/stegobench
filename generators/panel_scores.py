@@ -224,7 +224,7 @@ def stegexpose_dir(image: str, directory: pathlib.Path, scratch: pathlib.Path,
     if not csv.is_file():
         return {}
     scores: dict[str, float] = {}
-    lines = [l for l in csv.read_text().splitlines() if l.strip()]
+    lines = [l for l in csv.read_text(encoding="utf-8").splitlines() if l.strip()]
     for line in lines[1:]:
         parts = line.split(",")
         if len(parts) < 8:
@@ -320,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     if not manifest.is_file():
         print(f"no manifest at {manifest}", file=sys.stderr)
         return 2
-    rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()]
     # Round 1 era manifests predate the arm field. Naming them after the corpus
     # keeps them scorable rather than crashing on a KeyError, and the name still
     # says where the number came from.
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     scored: dict[str, dict] = {}
     if out_path.exists():
         empty = 0
-        for line in out_path.read_text().splitlines():
+        for line in out_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rec = json.loads(line)

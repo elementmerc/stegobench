@@ -263,7 +263,7 @@ def cross_check(manifest: pathlib.Path, limit: int = 0,
     if not manifest.is_file():
         print(f"no manifest at {manifest}", file=sys.stderr)
         return 1
-    rows = [json.loads(line) for line in manifest.read_text().splitlines()
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
             if line.strip()]
     if limit:
         rows = rows[:limit]
@@ -330,7 +330,7 @@ def cross_check(manifest: pathlib.Path, limit: int = 0,
         # is the evidence; which rows we currently consider wrong is a
         # conclusion, and a later run with better rules should be able to
         # re-reach it without asking Commons again.
-        report.write_text(json.dumps(by_title, indent=2, sort_keys=True) + "\n")
+        report.write_text(json.dumps(by_title, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"\nwritten: {report}")
     return 0
 
@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no manifest at {manifest}", file=sys.stderr)
         return 1
 
-    rows = [json.loads(line) for line in manifest.read_text().splitlines()
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
             if line.strip()]
     targets = [r for r in rows if r.get("licence") == args.licence]
     if args.limit:
@@ -413,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         out = manifest.with_suffix(".pd-audited.jsonl")
         augmented = {r["file"]: r for r in targets}
         out.write_text("".join(
-            json.dumps(augmented.get(r["file"], r)) + "\n" for r in rows))
+            json.dumps(augmented.get(r["file"], r)) + "\n" for r in rows), encoding="utf-8")
         print(f"\nwritten: {out}")
     else:
         print("\nnothing written. Pass --write for the augmented manifest.")

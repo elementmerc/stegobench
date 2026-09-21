@@ -112,7 +112,7 @@ class EndToEndTests(unittest.TestCase):
                 row["replaces"] = {"reason": "us-only"}
             cover_rows.append(row)
         (self.covers / "manifest.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in cover_rows))
+            "".join(json.dumps(r) + "\n" for r in cover_rows), encoding="utf-8")
 
         self.rows = []
         for n in range(5):
@@ -131,17 +131,17 @@ class EndToEndTests(unittest.TestCase):
 
         self.swaps = root / "backfill.json"
         self.swaps.write_text(json.dumps(
-            {"swaps": [{"position": 2, "file": "00002.png"}]}))
+            {"swaps": [{"position": 2, "file": "00002.png"}]}), encoding="utf-8")
 
     def write(self, rows: list[dict]) -> None:
-        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def run_main(self, *extra: str) -> int:
         return ssd.main(["--arms", str(self.arms), "--covers", str(self.covers),
                          "--swaps", str(self.swaps), *extra])
 
     def read(self) -> list[dict]:
-        return [json.loads(l) for l in self.manifest.read_text().splitlines()
+        return [json.loads(l) for l in self.manifest.read_text(encoding="utf-8").splitlines()
                 if l.strip()]
 
     def test_a_consistent_corpus_is_stamped(self):
@@ -151,9 +151,9 @@ class EndToEndTests(unittest.TestCase):
                              self.digests[row["source_png"]])
 
     def test_a_dry_run_writes_nothing(self):
-        before = self.manifest.read_text()
+        before = self.manifest.read_text(encoding="utf-8")
         self.assertEqual(self.run_main("--dry-run"), 0)
-        self.assertEqual(before, self.manifest.read_text())
+        self.assertEqual(before, self.manifest.read_text(encoding="utf-8"))
 
     def test_the_original_is_backed_up(self):
         self.run_main()
@@ -186,9 +186,9 @@ class EndToEndTests(unittest.TestCase):
 
     def test_running_twice_changes_nothing_the_second_time(self):
         self.assertEqual(self.run_main(), 0)
-        after = self.manifest.read_text()
+        after = self.manifest.read_text(encoding="utf-8")
         self.assertEqual(self.run_main(), 0)
-        self.assertEqual(after, self.manifest.read_text())
+        self.assertEqual(after, self.manifest.read_text(encoding="utf-8"))
 
     def test_a_missing_cover_manifest_exits_one(self):
         (self.covers / "manifest.jsonl").unlink()

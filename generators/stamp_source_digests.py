@@ -88,7 +88,7 @@ def cover_digests(covers: pathlib.Path) -> dict[str, str]:
     if not manifest.is_file():
         raise StampError(f"no cover manifest at {manifest}")
     out = {}
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
             out[row["file"]] = row["sha256"]
@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     loaded = {}
     problems: dict[str, list[str]] = collections.defaultdict(list)
     for path in manifests:
-        rows = [json.loads(line) for line in path.read_text().splitlines()
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
                 if line.strip()]
         loaded[path] = rows
         name = str(path.relative_to(arms))
@@ -262,10 +262,10 @@ def main(argv: list[str] | None = None) -> int:
         if written and not args.dry_run:
             backup = path.with_suffix(".jsonl.pre-stamp")
             if not backup.exists():
-                backup.write_text(path.read_text())
+                backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
             part = path.with_suffix(".jsonl.part")
             part.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
-                                    for r in rows))
+                                    for r in rows), encoding="utf-8")
             part.replace(path)
 
     if args.dry_run:

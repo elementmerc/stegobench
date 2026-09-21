@@ -179,7 +179,7 @@ class MainTests(unittest.TestCase):
         self.path = pathlib.Path(self.tmp.name) / "croissant.json"
 
     def write(self, doc: dict) -> None:
-        self.path.write_text(json.dumps(doc))
+        self.path.write_text(json.dumps(doc), encoding="utf-8")
 
     def test_a_sound_record_exits_zero(self):
         self.write(sound_record())
@@ -192,7 +192,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(vc.main([str(self.path)]), 1)
 
     def test_unreadable_json_exits_one_rather_than_raising(self):
-        self.path.write_text("{not json")
+        self.path.write_text("{not json", encoding="utf-8")
         self.assertEqual(vc.main([str(self.path)]), 1)
 
     def test_require_reference_fails_when_the_validator_is_absent(self):

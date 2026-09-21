@@ -160,7 +160,7 @@ def nothing_checked(check: str, count: int, report: Report,
 
 
 def load_rows(path: pathlib.Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines()
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 
@@ -252,7 +252,7 @@ def check_packed(release: pathlib.Path, rows: list[dict],
 
     stale, unreadable, checked, tiers = [], [], 0, []
     for index_path in indexes:
-        index = json.loads(index_path.read_text())
+        index = json.loads(index_path.read_text(encoding="utf-8"))
         tier = index.get("tier", index_path.parent.name)
         tiers.append(tier)
         for shard in index.get("shards", []):

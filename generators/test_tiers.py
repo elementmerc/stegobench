@@ -43,7 +43,7 @@ class CoverNameTests(unittest.TestCase):
 
     def write(self, rows: list[dict]) -> pathlib.Path:
         self.manifest.write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         return self.manifest
 
     def shuffled_corpus(self, n: int) -> pathlib.Path:
@@ -100,7 +100,7 @@ class CoverNameTests(unittest.TestCase):
     def test_blank_lines_are_tolerated(self):
         self.manifest.write_text(
             json.dumps({"file": "a.png", "tier_order": 0}) + "\n\n"
-            + json.dumps({"file": "b.png", "tier_order": 1}) + "\n")
+            + json.dumps({"file": "b.png", "tier_order": 1}) + "\n", encoding="utf-8")
         self.assertEqual(tier_cover_names(self.manifest, 1), {"a.png"})
 
     def test_it_agrees_with_the_cover_selector_it_mirrors(self):

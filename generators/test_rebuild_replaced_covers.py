@@ -35,7 +35,7 @@ class PositionTests(unittest.TestCase):
     def log(self, name: str, spots: list[int]) -> pathlib.Path:
         path = self.root / name
         path.write_text(json.dumps(
-            {"swaps": [{"position": n, "file": f"{n:05d}.png"} for n in spots]}))
+            {"swaps": [{"position": n, "file": f"{n:05d}.png"} for n in spots]}), encoding="utf-8")
         return path
 
     def test_rounds_are_unioned_not_replaced(self):
@@ -45,13 +45,13 @@ class PositionTests(unittest.TestCase):
 
     def test_an_empty_log_is_refused(self):
         path = self.root / "empty.json"
-        path.write_text(json.dumps({"swaps": []}))
+        path.write_text(json.dumps({"swaps": []}), encoding="utf-8")
         with self.assertRaises(RebuildError):
             positions([path])
 
     def test_a_swap_with_no_position_is_refused(self):
         path = self.root / "bad.json"
-        path.write_text(json.dumps({"swaps": [{"file": "00001.png"}]}))
+        path.write_text(json.dumps({"swaps": [{"file": "00001.png"}]}), encoding="utf-8")
         with self.assertRaises(RebuildError):
             positions([path])
 
@@ -136,7 +136,7 @@ class EndToEndTests(unittest.TestCase):
         for i in range(5):
             (self.arms / "clean_grey" / f"{i:05d}.png").write_bytes(b"clean")
         self.manifest = self.arms / "manifest.jsonl"
-        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
         # A cover manifest where 2 and 4 carry `replaces`.
         cover_rows = []
@@ -146,12 +146,12 @@ class EndToEndTests(unittest.TestCase):
                 row["replaces"] = {"pageid": 100 + i, "reason": "us-only"}
             cover_rows.append(row)
         (self.covers / "manifest.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in cover_rows))
+            "".join(json.dumps(r) + "\n" for r in cover_rows), encoding="utf-8")
 
         self.swaps = root / "backfill.json"
         self.swaps.write_text(json.dumps({"swaps": [
             {"position": 2, "file": "00002.png"},
-            {"position": 4, "file": "00004.png"}]}))
+            {"position": 4, "file": "00004.png"}]}), encoding="utf-8")
 
     def run_main(self, *extra: str) -> int:
         return rrc.main(["--arms", str(self.arms),
@@ -175,7 +175,7 @@ class EndToEndTests(unittest.TestCase):
         """If the rows stayed, the builder's resume set would skip the rebuild
         and report success having rebuilt nothing."""
         self.run_main()
-        rows = [json.loads(l) for l in self.manifest.read_text().splitlines()
+        rows = [json.loads(l) for l in self.manifest.read_text(encoding="utf-8").splitlines()
                 if l.strip()]
         self.assertEqual(len(rows), 6)
         self.assertFalse(any("00002" in r["stego"] or "00004" in r["stego"]
@@ -185,31 +185,31 @@ class EndToEndTests(unittest.TestCase):
         self.run_main()
         backup = self.manifest.with_suffix(".jsonl.pre-rebuild")
         self.assertTrue(backup.is_file())
-        self.assertEqual(len(backup.read_text().splitlines()), 10)
+        self.assertEqual(len(backup.read_text(encoding="utf-8").splitlines()), 10)
 
     def test_a_dry_run_changes_nothing(self):
-        before = self.manifest.read_text()
+        before = self.manifest.read_text(encoding="utf-8")
         self.assertEqual(self.run_main("--dry-run"), 0)
-        self.assertEqual(before, self.manifest.read_text())
+        self.assertEqual(before, self.manifest.read_text(encoding="utf-8"))
         self.assertTrue((self.arms / "hugo/0050/00002.png").is_file())
 
     def test_running_twice_is_safe(self):
         self.assertEqual(self.run_main(), 0)
-        after_first = self.manifest.read_text()
+        after_first = self.manifest.read_text(encoding="utf-8")
         self.assertEqual(self.run_main(), 0)
-        self.assertEqual(after_first, self.manifest.read_text())
+        self.assertEqual(after_first, self.manifest.read_text(encoding="utf-8"))
 
     def test_a_stale_swap_log_is_refused_before_anything_is_deleted(self):
         """A log naming a cover the manifest does not record as replaced means
         the two disagree, and acting on it throws away sound arms."""
         self.swaps.write_text(json.dumps({"swaps": [
-            {"position": 1, "file": "00001.png"}]}))
+            {"position": 1, "file": "00001.png"}]}), encoding="utf-8")
         self.assertEqual(self.run_main(), 1)
         self.assertTrue((self.arms / "hugo/0050/00001.png").is_file())
 
     def test_a_position_outside_the_corpus_is_refused(self):
         self.swaps.write_text(json.dumps({"swaps": [
-            {"position": 99, "file": "00099.png"}]}))
+            {"position": 99, "file": "00099.png"}]}), encoding="utf-8")
         self.assertEqual(self.run_main(), 1)
 
 

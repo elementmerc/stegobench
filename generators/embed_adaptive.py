@@ -139,7 +139,7 @@ def main() -> int:
 
     (out / "manifest.jsonl").write_text(
         "".join(json.dumps(m) + "\n" for m in manifest)
-    )
+    , encoding="utf-8")
     print(f"{args.scheme}: wrote {len(manifest)} pairs across {len(RATES)} rates")
     for rate in RATES:
         ch = [m["samples_changed"] for m in manifest if m["rate"] == rate]

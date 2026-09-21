@@ -39,7 +39,7 @@ def modules() -> set[str]:
 
 def documented() -> set[str]:
     """Every module named in a table row, as `` `name.py` ``."""
-    return set(re.findall(r"^\|\s*`([A-Za-z0-9_]+\.py)`", README.read_text(),
+    return set(re.findall(r"^\|\s*`([A-Za-z0-9_]+\.py)`", README.read_text(encoding="utf-8"),
                           re.MULTILINE))
 
 
@@ -71,7 +71,7 @@ class ReadmeTests(unittest.TestCase):
     def test_the_count_in_the_opening_line_is_the_real_count(self):
         n = len(modules())
         self.assertIn(n, WORDS, f"{n} modules; add the word to WORDS")
-        first = README.read_text().splitlines()[2]
+        first = README.read_text(encoding="utf-8").splitlines()[2]
         self.assertTrue(
             first.startswith(f"{WORDS[n]} programs"),
             f"README.md opens with {first!r} but there are {n} modules")

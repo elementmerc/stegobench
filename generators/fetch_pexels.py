@@ -161,7 +161,7 @@ def main() -> int:
     # ones it did, and should not re-spend API calls on them either.
     seen_ids = set()
     if manifest_path.exists():
-        for line in manifest_path.read_text().splitlines():
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 seen_ids.add(json.loads(line)["pexels_id"])
         print(f"resuming: {len(seen_ids)} covers already fetched")

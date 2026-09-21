@@ -17,7 +17,7 @@ from analyse_panel import arm_of, cover_id, load, main, roc_auc
 
 def write(tmp_path, rows):
     path = tmp_path / "panel.jsonl"
-    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     return path
 
 
@@ -38,12 +38,12 @@ class TestLoadKeepsTheMostCompleteRecord:
 
     def test_blank_lines_are_skipped(self, tmp_path):
         path = tmp_path / "p.jsonl"
-        path.write_text('{"file": "a.jpg", "spa": 1}\n\n   \n{"file": "b.jpg", "spa": 2}\n')
+        path.write_text('{"file": "a.jpg", "spa": 1}\n\n   \n{"file": "b.jpg", "spa": 2}\n', encoding="utf-8")
         assert set(load(path)) == {"a.jpg", "b.jpg"}
 
     def test_an_empty_file_loads_to_nothing(self, tmp_path):
         path = tmp_path / "p.jsonl"
-        path.write_text("")
+        path.write_text("", encoding="utf-8")
         assert load(path) == {}
 
 

@@ -50,7 +50,7 @@ DETECTORS = ("aletheia_spa", "aletheia_rs", "stegexpose")
 def load(path: pathlib.Path) -> dict[str, dict]:
     """One record per file, keeping the most complete."""
     best: dict[str, dict] = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)

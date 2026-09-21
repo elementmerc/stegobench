@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.reconfigure(line_buffering=True)
     path = pathlib.Path(args.record)
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         print(f"cannot read {path}: {e}", file=sys.stderr)
         return 1

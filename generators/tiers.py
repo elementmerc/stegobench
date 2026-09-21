@@ -62,7 +62,7 @@ def covers_in_tier_order(manifest: pathlib.Path, covers_dir: pathlib.Path,
         )
 
     rows = []
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
@@ -117,7 +117,7 @@ def tier_cover_names(manifest: pathlib.Path, count: int) -> set[str]:
             f"no manifest at {manifest}. Tier order lives in the manifest, so "
             "without it a tier cannot be selected."
         )
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)

@@ -205,14 +205,14 @@ def main(argv: list[str] | None = None) -> int:
     if not source.is_file():
         print(f"no manifest at {source}", file=sys.stderr)
         return 1
-    rows = [json.loads(line) for line in source.read_text().splitlines()
+    rows = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
     page_licences: dict[str, list[str]] = {}
     if args.page_licences:
         path = pathlib.Path(args.page_licences)
         if path.is_file():
-            page_licences = json.loads(path.read_text())
+            page_licences = json.loads(path.read_text(encoding="utf-8"))
         else:
             print(f"note: no page licences at {path}, so the share-alike group "
                   f"cannot be found", file=sys.stderr)
@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         pathlib.Path(args.out).write_text(
             json.dumps({"total": total,
                         "by_reason": {k: len(v) for k, v in sorted(groups.items())},
-                        "covers": flat}, indent=2) + "\n")
+                        "covers": flat}, indent=2) + "\n", encoding="utf-8")
         print(f"\nwritten: {args.out}")
     return 0
 

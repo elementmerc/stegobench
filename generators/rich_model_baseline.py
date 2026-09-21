@@ -174,7 +174,7 @@ def _extract_one(image: str, extractor: str, images: pathlib.Path,
             f"{extractor} produced {out_file.name} but no .label file beside it, "
             "so features cannot be matched to images. Delete the .fea and re-run."
         )
-    names = [l.strip() for l in label_file.read_text().splitlines() if l.strip()]
+    names = [l.strip() for l in label_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     features = np.loadtxt(out_file, dtype=np.float64)
     if features.ndim == 1:
         features = features.reshape(1, -1)
@@ -276,10 +276,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no manifest at {manifest}", file=sys.stderr)
         return 2
 
-    rows = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = [r for r in rows if r["arm"] == args.arm]
     if not rows:
-        arms = sorted({json.loads(l)["arm"] for l in manifest.read_text().splitlines() if l.strip()})
+        arms = sorted({json.loads(l)["arm"] for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()})
         print(f"no arm {args.arm!r}. Available:\n  " + "\n  ".join(arms), file=sys.stderr)
         return 2
 
@@ -364,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out = pathlib.Path(args.out) if args.out else work / f"result-{args.arm.replace('/', '-')}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=2) + "\n")
+    out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     print()
     for k in ("auc", "tpr_at_1pct_fpr", "tpr_at_10pct_fpr", "accuracy", "oob_error"):

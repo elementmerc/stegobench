@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no manifest at {source}", file=sys.stderr)
         return 1
 
-    rows = [json.loads(l) for l in source.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in source.read_text(encoding="utf-8").splitlines() if l.strip()]
     subject = [r for r in rows if r.get("tool") == args.tool]
     if not subject:
         print(f"no {args.tool} rows in {source}", file=sys.stderr)
@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = out / "manifest.jsonl"
     done = set()
     if manifest.is_file():
-        done = {json.loads(l)["stego"] for l in manifest.read_text().splitlines()
+        done = {json.loads(l)["stego"] for l in manifest.read_text(encoding="utf-8").splitlines()
                 if l.strip()}
         print(f"resuming: {len(done)} already built")
 

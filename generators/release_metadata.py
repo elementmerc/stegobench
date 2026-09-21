@@ -62,7 +62,7 @@ NOT_COMPARABLE = (
 
 
 def load(path: pathlib.Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def split_arms(arms: dict | None) -> tuple[int, int, int, int]:
@@ -816,7 +816,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no covers manifest at {manifest}", file=sys.stderr)
             return 1
         rows = [json.loads(line) for line in
-                manifest.read_text().splitlines() if line.strip()]
+                manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
         # The manifest covers the whole corpus, so a smaller tier has to be cut
         # down to its own covers. Shipping Core's 5,429 credit lines with a
         # 200 cover Nano would name photographers whose work is not in the
@@ -838,7 +838,7 @@ def main(argv: list[str] | None = None) -> int:
               "54% of these covers require one.", file=sys.stderr)
 
     for name, body in written.items():
-        (rel / name).write_text(body)
+        (rel / name).write_text(body, encoding="utf-8")
         print(f"  {name}  {len(body):>7} bytes")
 
     # Last, because it hashes the files written above. Anything that changes
@@ -865,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
     for directory, index, part in parts:
         name = f"SHA256SUMS-{part}"
         body = sha256sums(index, digests_of(directory))
-        (directory / name).write_text(body)
+        (directory / name).write_text(body, encoding="utf-8")
         print(f"  {directory.name}/{name}  {len(body.splitlines())} entries")
 
     print(f"\n{len(written)} file(s) written to {rel}")

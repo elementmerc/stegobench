@@ -91,17 +91,17 @@ class SharedBudgetTests(unittest.TestCase):
     def test_a_stale_reservation_does_not_stall_the_next_run(self):
         # A killed run can leave a reservation far in the future. Obeying it
         # would park the next upload for as long as it says.
-        self.path.write_text(f"{time.time() + 86_400:.6f}\n")
+        self.path.write_text(f"{time.time() + 86_400:.6f}\n", encoding="utf-8")
         budget = SharedBudget(self.path, 1_000_000)
         started = time.monotonic()
         budget.reserve(1000)
         self.assertLess(time.monotonic() - started, 5.0)
 
     def test_a_corrupt_budget_file_is_treated_as_empty(self):
-        self.path.write_text("not a number at all\n")
+        self.path.write_text("not a number at all\n", encoding="utf-8")
         budget = SharedBudget(self.path, 1_000_000)
         budget.reserve(1000)  # must not raise
-        self.assertTrue(float(self.path.read_text().strip()) > 0)
+        self.assertTrue(float(self.path.read_text(encoding="utf-8").strip()) > 0)
 
     def test_no_budget_file_still_limits_this_process(self):
         budget = SharedBudget(None, 40_000)
@@ -149,7 +149,7 @@ class ArchiveMetadataTests(unittest.TestCase):
             "title": "Pentimento Core",
             "licenseurl": "https://creativecommons.org/licenses/by/4.0/",
             "subject": ["steganalysis", "dataset"],
-        }))
+        }), encoding="utf-8")
         headers = upload_tier._ia_headers(self.packed)
         # Without this the endpoint has no bucket to write into and answers 404.
         self.assertEqual(headers["x-amz-auto-make-bucket"], "1")
@@ -192,12 +192,12 @@ class PublishableSetTests(unittest.TestCase):
             "tier": "Core", "samples": 2,
             "shards": [{"shard": "pentimento-core-00000.tar", "samples": 2,
                         "bytes": 4, "sha256": "a" * 64}],
-        }))
+        }), encoding="utf-8")
         (self.packed / "pentimento-core-00000.tar").write_bytes(b"tar!")
 
     def write(self, *names: str) -> None:
         for name in names:
-            (self.packed / name).write_text(f"contents of {name}\n")
+            (self.packed / name).write_text(f"contents of {name}\n", encoding="utf-8")
 
     def test_everything_the_docs_name_is_published(self):
         self.write("README.md", "SHA256SUMS-covers", "ATTRIBUTION.md",

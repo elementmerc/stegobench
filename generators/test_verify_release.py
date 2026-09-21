@@ -153,7 +153,7 @@ class PackedTierTests(unittest.TestCase):
             "tier": "Nano", "samples": len(payloads),
             "shards": [{"shard": tar_path.name, "samples": len(payloads),
                         "first_tier_order": 0,
-                        "last_tier_order": len(payloads) - 1}]}))
+                        "last_tier_order": len(payloads) - 1}]}), encoding="utf-8")
 
     def test_a_pack_matching_the_manifest_passes(self):
         r = Report()
@@ -252,7 +252,7 @@ class EndToEndTests(unittest.TestCase):
             (self.covers / f"{n:05d}.png").write_bytes(payload)
             rows.append(cover(n, sha256=hashlib.sha256(payload).hexdigest()))
         (self.covers / "manifest.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def run_main(self, *extra: str) -> int:
         return vr.main(["--covers", str(self.covers), "--expect", "20", *extra])
@@ -289,12 +289,12 @@ class EndToEndTests(unittest.TestCase):
 
     def test_all_failing_checks_are_reported_not_just_the_first(self):
         rows = [json.loads(l) for l
-                in (self.covers / "manifest.jsonl").read_text().splitlines()
+                in (self.covers / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
                 if l.strip()]
         rows[2]["tier_order"] = 99          # covers
         rows[3]["licence"] = "CC BY-SA 4.0"  # licences
         (self.covers / "manifest.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         report = Report()
         check_covers(rows, 20, report)
         check_licences(rows, report)
@@ -317,7 +317,7 @@ class ProvenanceTests(unittest.TestCase):
 
     def write(self, rows):
         (self.arms / "manifest.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def test_stamped_rows_that_agree_pass(self):
         self.write([{"stego": "a", "source_png": "00001.png",
@@ -360,13 +360,13 @@ class DctProvenanceTests(unittest.TestCase):
         (self.arms / "jpeg-tools").mkdir(parents=True)
         (self.arms / "jpeg-tools" / "manifest.jsonl").write_text(json.dumps({
             "clean": "clean/00001.jpg", "source_png": "00001.png",
-            "source_sha256": "digest1", "stego": "s/00001.jpg"}) + "\n")
+            "source_sha256": "digest1", "stego": "s/00001.jpg"}) + "\n", encoding="utf-8")
         self.covers = [cover(n, sha256=f"digest{n}") for n in range(3)]
         (self.arms / "adaptive").mkdir()
 
     def write(self, rows):
         (self.arms / "adaptive" / "manifest.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def test_a_dct_row_is_resolved_through_the_pool_and_passes(self):
         self.write([{"stego": "a", "source_jpeg": "clean_uerd/00001.jpg",
@@ -411,7 +411,7 @@ class CouldNotLookTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.arms = pathlib.Path(self.tmp.name) / "arms"
         self.arms.mkdir(parents=True)
-        (self.arms / "manifest.jsonl").write_text("")
+        (self.arms / "manifest.jsonl").write_text("", encoding="utf-8")
 
     def test_an_empty_arm_manifest_fails_the_pair_check(self):
         r = Report()
@@ -447,7 +447,7 @@ class CouldNotLookTests(unittest.TestCase):
         (rel / "pentimento-nano-index.json").write_text(json.dumps({
             "tier": "Nano",
             "shards": [{"shard": tar_path.name, "first_tier_order": 0,
-                        "last_tier_order": 0}]}))
+                        "last_tier_order": 0}]}), encoding="utf-8")
         r = Report()
         vr.check_packed(rel, [cover(0)], 10 ** 9, r)
         self.assertIn("packed", r.failures)

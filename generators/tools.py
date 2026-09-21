@@ -376,7 +376,7 @@ class StegcoreEmbedder(Embedder):
             # any local user through /proc/<pid>/cmdline while the process runs.
             # A sweep runs this hundreds of thousands of times, so take the file.
             secret = tmp / "passphrase.txt"
-            secret.write_text(password or "stegobench")
+            secret.write_text(password or "stegobench", encoding="utf-8")
             stego.parent.mkdir(parents=True, exist_ok=True)
             result = run([
                 self.binary, "embed", str(cover), str(message),

@@ -116,7 +116,7 @@ def main() -> int:
 
     (out / "manifest.jsonl").write_text(
         "".join(json.dumps(m) + "\n" for m in manifest)
-    )
+    , encoding="utf-8")
     per_size = {}
     for m in manifest:
         per_size.setdefault(m["size"], []).append(m["samples_changed"])

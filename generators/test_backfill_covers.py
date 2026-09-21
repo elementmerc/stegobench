@@ -117,12 +117,12 @@ class EndToEndTests(unittest.TestCase):
         self.doomed.write_text(json.dumps({"covers": [
             {"file": "00003.png", "reason": "us-only", "tier_order": 3},
             {"file": "00007.png", "reason": "share-alike", "tier_order": 7},
-        ]}))
+        ]}), encoding="utf-8")
         self.rejects = root / "candidate-rejects.json"
-        self.rejects.write_text(json.dumps({"covers": []}))
+        self.rejects.write_text(json.dumps({"covers": []}), encoding="utf-8")
 
     def write(self, path: pathlib.Path, rows: list[dict]) -> None:
-        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def run_main(self, *extra: str) -> int:
         return backfill_covers.main([
@@ -135,7 +135,7 @@ class EndToEndTests(unittest.TestCase):
 
     def manifest(self) -> list[dict]:
         return [json.loads(line) for line
-                in (self.covers / "manifest.jsonl").read_text().splitlines()
+                in (self.covers / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()]
 
     def test_the_ordering_stays_dense_and_the_count_stays_the_same(self):
@@ -162,14 +162,14 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn(b"replacement", (self.covers / "00003.png").read_bytes())
 
     def test_a_dry_run_writes_nothing(self):
-        before = (self.covers / "manifest.jsonl").read_text()
+        before = (self.covers / "manifest.jsonl").read_text(encoding="utf-8")
         self.assertEqual(self.run_main("--dry-run"), 0)
-        self.assertEqual(before, (self.covers / "manifest.jsonl").read_text())
+        self.assertEqual(before, (self.covers / "manifest.jsonl").read_text(encoding="utf-8"))
         self.assertIn(b"original", (self.covers / "00003.png").read_bytes())
 
     def test_the_swaps_are_logged(self):
         self.run_main()
-        log = json.loads((self.covers / "backfill.json").read_text())
+        log = json.loads((self.covers / "backfill.json").read_text(encoding="utf-8"))
         self.assertEqual(len(log["swaps"]), 2)
         self.assertEqual(log["swaps"][0]["reason"], "us-only")
 
@@ -183,15 +183,15 @@ class EndToEndTests(unittest.TestCase):
 
     def test_a_cover_named_for_replacement_that_does_not_exist_is_refused(self):
         self.doomed.write_text(json.dumps({"covers": [
-            {"file": "99999.png", "reason": "us-only", "tier_order": 99999}]}))
+            {"file": "99999.png", "reason": "us-only", "tier_order": 99999}]}), encoding="utf-8")
         self.assertEqual(self.run_main(), 1)
 
     def test_not_enough_clean_candidates_is_refused_before_anything_is_written(self):
         self.rejects.write_text(json.dumps({"covers": [
-            {"file": c["file"]} for c in self.cands[:4]]}))
-        before = (self.covers / "manifest.jsonl").read_text()
+            {"file": c["file"]} for c in self.cands[:4]]}), encoding="utf-8")
+        before = (self.covers / "manifest.jsonl").read_text(encoding="utf-8")
         self.assertEqual(self.run_main(), 1)
-        self.assertEqual(before, (self.covers / "manifest.jsonl").read_text())
+        self.assertEqual(before, (self.covers / "manifest.jsonl").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
