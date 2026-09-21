@@ -145,11 +145,16 @@ def run(cmd: list[str], what: str) -> None:
     print(f"  ({time.monotonic() - started:.0f}s)")
 
 
-def check_every_sample_is_licensed(out: pathlib.Path) -> int:
-    """No shard ships a derivative whose credit line we cannot produce."""
+def check_every_sample_is_licensed(out: pathlib.Path, slug: str) -> int:
+    """No shard ships a derivative whose credit line we cannot produce.
+
+    The SLUG IS A PARAMETER, not "core". pack_arms.py names its index after the tier it packed,
+    so hardcoding one tier's name here worked only for as long as the packer could pack only one
+    tier. It reads as a constant and behaves as an assumption about a flag somewhere else.
+    """
     import tarfile
 
-    index = json.loads((out / "pentimento-core-arms-index.json")
+    index = json.loads((out / f"pentimento-{slug}-arms-index.json")
                        .read_text(encoding="utf-8"))
     for arm in index["arms"]:
         for field in ("missing", "digest_mismatches", "unlicensed"):
@@ -218,7 +223,11 @@ def main(argv: list[str] | None = None) -> int:
              "--count", str(TIER_SIZES[0])],
             "pack the arm into shards")
 
-        checked = check_every_sample_is_licensed(packed)
+        # ONE SOURCE FOR WHICH TIER THIS IS. The build, the pack and the check all read
+        # TIER_SIZES[0], so they cannot disagree about which tier the harness just produced.
+        # They disagreed before: the pack defaulted to Core and the check looked for Core's
+        # index, while the build made Nano.
+        checked = check_every_sample_is_licensed(packed, tier_name(TIER_SIZES[0]).lower())
         print(f"\n{checked} packed sample(s), every one with a cover licence "
               f"and a named cover")
         return 0
