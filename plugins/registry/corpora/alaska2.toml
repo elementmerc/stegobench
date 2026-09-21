@@ -1,0 +1,60 @@
+# ALASKA2: usable, and not republishable. The two are different questions.
+#
+# This entry exists to be refused by the publish gate, which is the point of
+# recording it at all. Scoring a detector over ALASKA2 is use, and nothing in
+# its terms prevents that. Publishing stego images made from it is a derived
+# work, and its licence forbids exactly that.
+id = "alaska2"
+name = "ALASKA2"
+description = """
+The cover set from the ALASKA2 steganalysis competition: JPEG images from \
+several dozen cameras, widely used as a benchmark for JPEG domain \
+steganalysis. Distributed through the competition, which is obtained by \
+accepting its rules rather than by a plain download.\
+"""
+
+[licence]
+status = "verified"
+spdx = "CC-BY-NC-ND-4.0"
+url = "https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode"
+verified_on = "2026-09-15"
+source = "the ALASKA organisers' own terms page, read for the cover source licensing survey"
+redistribution = "forbidden"
+redistribution_reason = """
+No-derivatives, which is decisive here: the organisers' text forbids \
+distributing material built on the dataset, and a stego image is built on it. \
+The non-commercial term would also collide with a commercial tier even if the \
+no-derivatives term did not.\
+"""
+attribution_required = true
+share_alike = false
+note = """
+The organisers' page names CC BY-NC-ND without a version number, so the 4.0 \
+here is the identifier for the licence text linked above rather than a version \
+quoted from them. It does not change the answer: the no-derivatives term is \
+present in every version and is what decides this entry.
+
+Mirrors of ALASKA2 are labelled CC0 public domain. Those labels are wrong and \
+their uploaders had no standing to grant them. Read the organisers' own terms \
+before relying on anything a mirror says.\
+"""
+
+[obtain]
+url = "https://www.kaggle.com/c/alaska2-image-steganalysis/data"
+instructions = """
+Through the competition page, after accepting the competition rules. There is \
+no unauthenticated download, and automating around the acceptance step is not \
+an option this tool offers.\
+"""
+requires_acceptance = true
+
+[properties]
+formats = ["jpg"]
+paired = false
+size_note = """
+No count is recorded here. The figures in circulation come from papers and \
+mirrors rather than from the organisers' own page, and nobody working on this \
+registry has read a count from the source; a sample of a few thousand images \
+is what has been used here. A planner therefore has no number to work from, \
+which is the correct state until somebody reads one.\
+"""

@@ -1,0 +1,52 @@
+# BOSSbase 1.01: the other kind of "cannot republish".
+#
+# ALASKA2 cannot be republished because its licence forbids it. BOSSbase cannot
+# be republished because there is no licence at all: the organisers claimed the
+# rights, required assent before download, and the licence file itself is on a
+# host that no longer answers. Those are different states and the registry says
+# which is which, because "forbidden by a term we read" and "no grant exists"
+# need different work to resolve.
+id = "bossbase"
+name = "BOSSbase 1.01"
+description = """
+10,000 greyscale 512x512 images developed from camera RAW for the 2010 Break \
+Our Steganographic System contest, and the most cited cover set in spatial \
+domain steganalysis. The version most deep learning work actually uses is a \
+recipe rather than a file: resized to 256x256 with Matlab imresize at default \
+settings, which no paper pins to a Matlab version, so two groups reporting on \
+BOSSbase 256 may be reporting on different bytes.\
+"""
+
+[licence]
+status = "none-granted"
+redistribution = "forbidden"
+redistribution_reason = """
+There is nothing to redistribute under. The organisers stated that they hold \
+the rights to the contest contents and that use requires a licence usage \
+agreement, so a republication would need a grant that has never been issued.\
+"""
+note = """
+The licence file was hosted with the contest site and neither it nor an \
+archived copy has been found. Two things would move this entry: a copy of the \
+original licence text, or an answer from the laboratory that ran the contest. \
+Until one of those arrives the status is that no grant exists, not that the \
+terms are permissive.
+
+Mirrors of BOSSbase carry MIT, Apache 2.0 and CC0 labels across a dozen \
+re-uploads. None traces to a grant from the rights holders. Those labels are \
+the reason this schema separates what was read from what was assumed.\
+"""
+
+[obtain]
+instructions = """
+No maintained source. The original distribution required assent before \
+download and its host is gone; the copies in circulation are re-uploads whose \
+licence labels are wrong. This entry records where the question stands rather \
+than offering a route.\
+"""
+requires_acceptance = true
+
+[properties]
+base_images = 10000
+formats = ["pgm"]
+paired = false

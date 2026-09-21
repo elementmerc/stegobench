@@ -1,0 +1,72 @@
+# REVEAL: the Netherlands Forensic Institute's end-user steganography corpus.
+#
+# THE REGISTRY POINTS AT IT. IT NEVER CARRIES IT.
+#
+# Nothing here is a copy of REVEAL, and nothing in this repository fetches it
+# on its own. An entry records where a dataset lives, what its terms say and
+# who established that, which is the whole job: shipping somebody else's
+# dataset is redistribution whatever directory it sits in.
+id = "reveal"
+name = "REVEAL"
+description = """
+100,006 base images from more than 50 imaging methods, camera originals and AI \
+generated, put through more than 50 real end-user steganography tools at \
+payload rates down to 0.00001 bits per pixel. Paired by construction, and it \
+embeds any one image with a single tool so a result cannot be an artefact of \
+the picture. PNG, JPEG, BMP and GIF only, and its tool snapshot is frozen at \
+July 2023.\
+"""
+citation = "Kombrink, van Lierop, Stolwijk, Worring, Vrijdag and Geradts, Forensic Science International: Digital Investigation 55 (2025), article 302006"
+
+[licence]
+status = "verified"
+spdx = "CC-BY-SA-4.0"
+url = "https://creativecommons.org/licenses/by-sa/4.0/legalcode"
+verified_on = "2026-09-16"
+source = "the dataset's own terms in the DANS deposit 10.17026/PT/DITX0A, read on that date"
+redistribution = "permitted"
+redistribution_reason = """
+The deposit states that both commercial and academic use are allowed, that \
+attribution is required, and that derived works must carry the same or a \
+compatible licence. A stego image made from these covers is a derived work, so \
+it may be published under CC BY-SA and under nothing more permissive.\
+"""
+attribution_required = true
+share_alike = true
+note = """
+Two things a reader should weigh. The deposit's own sentence names \
+"CC-BY-SA" without a version number; the 4.0 here comes from the paper and \
+from this project's licence survey of 2026-09-15. Every CC BY-SA version \
+carries the attribution and share-alike obligations recorded above, so the \
+version does not change what may be done, only which licence text a \
+republication must name. Second, the REVEAL source code is GPL-3.0 and the \
+dataset is not; the two licences are separate and the code's terms do not \
+govern the images.\
+"""
+
+[obtain]
+doi = "10.17026/PT/DITX0A"
+url = "https://github.com/NetherlandsForensicInstitute/REVEAL"
+instructions = """
+The images are at the DOI, which resolves to the DANS Physical and Technical \
+Sciences Data Station. The GitHub repository holds the code and the tool \
+inventory, not the images. The steganography tools themselves are not \
+included in either and have to be found separately; the authors flag one as \
+especially hard to find and say plainly that the set is sensitive to software \
+versioning.\
+"""
+requires_acceptance = false
+
+# NO [integrity] BLOCK, AND THAT IS THE HONEST STATE.
+#
+# No per-file digest or manifest for REVEAL has been read by anyone here, so
+# there is nothing to record. An empty or invented digest would be worse than
+# none: it reads as a corpus that can be verified and verifies nothing.
+
+[properties]
+base_images = 100006
+# No total_images. The paper says the three sets together come to more than
+# 300,000 images, which is a lower bound rather than a count, and writing the
+# bound into a number field would hand a planner a precision nobody measured.
+formats = ["png", "jpg", "bmp", "gif"]
+paired = true
