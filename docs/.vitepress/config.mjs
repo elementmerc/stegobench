@@ -6,9 +6,9 @@
 // explanation of pairing discipline to reach them, and a citation that pointed at a benchmark
 // harness rather than at the dataset being cited.
 //
-// Built under the same standing rule as the rest of the house: a project with readers who are
-// not its author ships built documentation. npm lives in this directory and nowhere else;
-// nothing here reaches the Python generators or the Rust crates.
+// A project with readers who are not its author ships built documentation rather than loose
+// markdown. npm lives in this directory and nowhere else; nothing here reaches the Python
+// generators or the Rust crates.
 //
 // `ignoreDeadLinks` is NOT set, so the build fails on any broken internal link. It used to carry
 // an exception for `/pentimento/`, a sibling site this build could not see. That site now lives in
@@ -16,9 +16,9 @@
 // the exception is gone and nothing here is unchecked.
 
 const BASE = process.env.DOCS_BASE || '/stegobench/'
-// og:image has to be absolute: a social card served from a relative path is fetched by a crawler
-// with no page context, so it simply does not resolve and the preview silently falls back to
-// nothing.
+// Kept for whoever adds the social card: og:image has to be ABSOLUTE. A card served from a
+// relative path is fetched by a crawler with no page context, so it does not resolve and the
+// preview silently falls back to nothing.
 const SITE = process.env.DOCS_SITE || 'https://elementmerc.github.io'
 
 export default {
@@ -49,8 +49,10 @@ export default {
       content: 'A reproducible benchmark for image steganalysis, and Pentimento, '
         + 'a corpus with its licences attached.',
     }],
-    ['meta', { property: 'og:image', content: `${SITE}${BASE}social-card.png` }],
-    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    // No `og:image` until `public/social-card.png` exists. Pointing the tag at a file nobody
+    // drew gives every share a blank preview, which is worse than having no tag. Add the tag
+    // and the file in one commit.
+    ['meta', { name: 'twitter:card', content: 'summary' }],
   ],
 
   themeConfig: {
@@ -60,9 +62,8 @@ export default {
       { text: 'Guide', link: '/guide/what-it-is', activeMatch: '/guide/' },
       { text: 'Pentimento, the corpus', link: 'https://github.com/elementmerc/pentimento' },
       {
-        // NOT a version number. Baseline section 16 keeps unreleased versions out of public
-        // artefacts, and naming one in the nav of a published site is a promise about something
-        // that does not exist yet.
+        // Deliberately NOT a version number. Naming an unreleased version in the nav of a
+        // published site is a promise about something that does not exist yet.
         text: 'Project',
         items: [
           { text: 'Licence (AGPL-3.0-or-later)', link: 'https://github.com/elementmerc/stegobench/blob/dev/LICENSE' },

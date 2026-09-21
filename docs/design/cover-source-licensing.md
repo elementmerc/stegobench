@@ -108,7 +108,7 @@ from Pexels, Flickr and the Unsplash Dataset without needing to parse each one.
 | **LAION** | Images were never LAION's to license | "The images are under their copyright" |
 | **MIRFLICKR** | Mixed CC including ND. A stego image is a modification, and ND bars distributing one | Per-image licence metadata ships, so a BY/BY-SA-only subset is mechanically possible |
 | **IStego100K** | No licence of any kind in the repository | Citation request only |
-| **StegoAppDB** | No terms ever published, and the host is gone | — |
+| **StegoAppDB** | No terms ever published, and the host is gone | n/a |
 | **LSSD** | Derivative of six upstream corpora including ALASKA and StegoAppDB, inheriting the worst terms of each | Citation obligation only |
 | **UCID**, **USC-SIPI** | No grant. USC-SIPI says outright it cannot give one | "USC-SIPI does not hold the copyright status on many of the images ... we are not in a position to grant such permission" |
 
@@ -174,7 +174,7 @@ Two other entrants worth knowing. **StegBench** (August 2026) claims 525,000
 images across six tools and has **shipped no images at all**; its repository
 holds a README and nothing else. And the name is a problem: "StegBench" now
 refers to that paper, to a 2021 MIT-licensed tool, and to a gated LLM
-covert-channel corpus. "stegobench" is one letter away from a collision with a
+covert-channel corpus. "Stegobench" is one letter away from a collision with a
 paper five weeks old.
 
 ## The second differentiator: these corpora are recipes, not artefacts

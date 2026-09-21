@@ -3,10 +3,9 @@
 #
 # THE REPOSITORY HAD NO CI AT ALL UNTIL THIS FILE
 #
-# Everything here was verified by running it on the build box, which is one
-# Linux machine with one Python and one set of wheels. The corpus documentation
-# says anybody can rebuild the corpus; nothing had ever checked that claim
-# anywhere but here.
+# Everything here was verified on one Linux machine with one Python and one set
+# of wheels. The corpus documentation says anybody can rebuild the corpus, and
+# nothing had ever checked that claim on any other platform.
 #
 # The generators are the part that has to be portable, because they are what a
 # reader runs. So they get the three operating systems, and the Rust workspace
@@ -56,9 +55,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Unit tests
-        # The generators' tests run on the standard library's own runner,
-        # because the build box's virtual environment has no pytest and a suite
-        # that only runs on the laptop is a suite that stops running.
+        # The generators' tests run on the standard library's own runner, so
+        # they need nothing beyond `requirements.txt`. A suite that only runs
+        # where one extra package happens to be installed is a suite that
+        # quietly stops running.
         run: python -m unittest discover -s generators -p "test_*.py" -v
       - name: Release tooling tests
         # The shared bandwidth budget is timing sensitive and uses flock, so it

@@ -10,13 +10,13 @@ than hiding.
 **The name is deliberate in a second way.** The obvious name was taken. "StegBench"
 now refers to an August 2026 MDPI dataset paper claiming 525,000 images and
 shipping none, a 2021 MIT-licensed tool at `DAI-Lab/stegbench`, and a gated LLM
-covert-channel corpus. `stegobench` is one letter from the first of those, and a
+covert-channel corpus. "Stegobench" is one letter from the first of those, and a
 reviewer searching the name would find a same-year dataset paper making adjacent
 claims. So:
 
-- **stegobench** stays the *toolkit*: the maintained multi-tool Docker image and
-  the generators, which is what the portfolio entry scoped on 2026-05-22. A name
-  collision matters far less for a container than for a dataset citation.
+- **Stegobench** stays the *toolkit*: the maintained multi-tool Docker image and
+  the generators. A name collision matters far less for a container than for a
+  dataset citation.
 - **Pentimento** is the *corpus*.
 
 ## What it is for
@@ -28,8 +28,7 @@ payload, as **separate labelled arms rather than a blend**.
 Nobody holds that position. REVEAL (Netherlands Forensic Institute, 2025) covers
 51 real tools superbly and excludes adaptive schemes on purpose. Everything with
 good adaptive coverage is JPEG-only, derived from BOSSbase, and licensed so
-restrictively it cannot be redistributed. See `reveal.md` and
-`cover-source-licensing.md`.
+restrictively it cannot be redistributed. See `cover-source-licensing.md`.
 
 ### The two claims, in the order they should be made
 
@@ -123,8 +122,8 @@ Excluding share-alike costs roughly 60% of every photograph Commons holds.
 
 **Ruled 2026-09-16: permissive only.** CC0, public domain and plain CC BY. No
 share-alike, deliberately, so that anyone can use this corpus without first
-working out what obligation it puts them under. The operator's reasoning was
-adoption rather than scale, and the arithmetic supports it: Commons holds
+working out what obligation it puts them under. The reasoning is adoption
+rather than scale, and the arithmetic supports it: Commons holds
 147,766,476 files, which puts the permissive photograph pool near 25 million, so
 the 10,000 cover target is 0.04% of what is available and even a 100,000 cover
 corpus is under 0.4%. The pool never binds. Share-alike would have bought
@@ -207,20 +206,21 @@ refused, which two independent noise sources will not do, and ordinary
 photographs are unaffected: a resave and a brightness shift are still caught at 0
 bits, an 8 pixel crop with resize at 2.
 
-## Resource budget on the build box
+## Sizing a build
 
-Measured 2026-09-16, not estimated.
+Measured, not estimated.
 
 | | |
 |---|---|
 | Throughput, one core | 0.22 s/image (HILL) to 1.25 s/image (MiPOD); mean 0.82 |
 | Peak resident per worker | 246 MB, or 546 MB for MiPOD, at 512px |
-| build box | 16 cores, 28 GB, and a resident language model holds close to 20 GB of it |
 
-**Three workers, not more.** CPU is idle (load 0.15) and memory is the binding
-constraint: the local model must not be pushed into swap, which is the exact
-failure holst's resource ledger exists to prevent. Three workers peak around
-1.6 GB, roughly 15% of what is free.
+**Memory is the binding constraint, not CPU.** At 512px the embedders sit idle
+on the processor and spend their time allocating, so the worker count is set by
+free memory rather than by core count. Three workers peak around 1.6 GB
+together; pick a number that leaves the machine room to breathe rather than one
+that fills it, because a worker pushed into swap is slower than not having
+started it.
 
 At three workers the whole v1 corpus is about **40 hours of work**, which fits a
 four-day window with deliberate slack. The long pole is cover acquisition and
@@ -244,4 +244,4 @@ Before Pentimento exists, REVEAL is the best available calibration target and
 costs nothing licensing-wise, because running a detector over a corpus is use
 rather than redistribution. It has over 50 real tools, payload rates four orders
 of magnitude below where the field's grids stop, and over 200 image sizes against
-Stegcore's 512x512-only calibration history. Details in `reveal.md`.
+a 512x512-only calibration history.

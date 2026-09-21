@@ -25,7 +25,7 @@ Measured on outguess, against a clean half written by a different library:
 
 | Payload | AUC, mismatched clean half | AUC, writer-matched clean half |
 |---|---|---|
-| 0.03% of capacity | 0.360 | — |
+| 0.03% of capacity | 0.360 | n/a |
 | 5% | 0.361 | 0.500 |
 | 20% | 0.362 | 0.502 |
 | 50% | 0.360 | 0.497 |

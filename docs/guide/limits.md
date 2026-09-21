@@ -15,8 +15,8 @@ difference makes detection slightly harder than reality.
 ## A tool's own capacity report is not always usable
 
 Some tools answer a capacity query by shelling out and parsing prose, and some
-of them get it wrong. outguess has been seen to report 2⁶¹−1 bytes of capacity
-in a 28 KB file, and to underflow to 2⁶⁴−1 at one quality setting while
+of them get it wrong. outguess has been seen to report 2^61 - 1 bytes of
+capacity in a 28 KB file, and to underflow to 2^64 - 1 at one quality setting while
 answering correctly at another.
 
 The builders refuse a figure larger than the file rather than trusting it, so

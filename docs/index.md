@@ -23,8 +23,8 @@ features:
     details: Several detectors compute an estimate, compare it to a threshold and print a sentence. You cannot draw a curve from sentences, so where a tool discards its number the harness calls the same function and keeps it.
   - title: Controls you can run against your own result
     details: Arms that carry no meaningful payload, so an effect you measure can be checked against one that cannot exist.
-  - title: Rebuildable byte for byte
-    details: Every generator is seeded, every file carries a sha256, and every sample records how many pixels or coefficients actually changed.
+  - title: Verifiable byte for byte
+    details: Every generator is seeded, so the same covers give the same arms. Every file carries a sha256 and every sample records how many pixels or coefficients actually changed, so a corpus can be checked rather than taken on trust.
 ---
 
 ## Start here

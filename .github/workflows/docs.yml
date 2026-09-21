@@ -26,7 +26,7 @@
 #
 # GitHub Pages is not available for a private repository on a free plan.
 # Enabling it returns, verbatim: "Your current plan does not support GitHub
-# Pages for this repository." So while stegobench is private this workflow can
+# Pages for this repository." So while Stegobench is private this workflow can
 # only fail, and a red check that everybody learns to ignore costs more than it
 # reports.
 #
@@ -114,10 +114,10 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
 
-      # A build whose output reaches no consequence is a failure shape this
-      # house has hit before: senbonzakura's docs were built and link-checked
-      # on every push for the life of the project while eleven README links
-      # returned 404, because nothing ever fetched the published site.
+      # A build whose output reaches no consequence is a failure shape worth
+      # guarding against: a site can be built and link-checked on every push
+      # for the life of a project while its published README links return 404,
+      # because nothing ever fetches the published site. This does.
       - name: Both sites' entry points resolve once published
         run: |
           set -uo pipefail

@@ -8,6 +8,20 @@ them, for two reasons that have nothing to do with the science. The corpora are
 not redistributable, and the pairing discipline is described rather than
 enforced. This is an attempt at both halves.
 
+**What you need:** Python 3.14. The Rust crates want the toolchain pinned in
+`rust-toolchain.toml`, and you do not need them to build or score a corpus.
+
+```sh
+git clone https://github.com/elementmerc/stegobench
+cd stegobench
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Full documentation, including a quickstart and the limitations worth reading
+before you quote a number: **[docs/](docs/index.md)**, or the built site once
+it is published.
+
 ## What is here
 
 | Piece | What it does |
@@ -39,15 +53,9 @@ and discards it, the harness calls the same function and keeps the number.
 
 ## Installing
 
-Python 3.14 and, for the Rust crates, the toolchain pinned in
-`rust-toolchain.toml`. Everything below runs from a clean checkout.
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
+The clone and the two commands at the top of this file are the whole install.
 That is enough to build a corpus, embed every arm and score it.
+
 `requirements-optional.txt` holds four things that are each needed for exactly
 one purpose and are each large or awkward to install: Aletheia for the
 reference detector and the SRM features, matplotlib for charts, `lir` for the
@@ -60,8 +68,8 @@ benchmark whose dependency set floats is a benchmark whose numbers move without
 anybody touching it.
 
 ```sh
-.venv/bin/python -m pytest                 # python
-cargo test --workspace                     # rust
+.venv/bin/python -m unittest discover -s generators -p "test_*.py"
+cargo test --workspace                     # only if you want the Rust side
 ```
 
 ## Reproducing a result
@@ -84,19 +92,24 @@ a default scores against whatever answers on it.
 
 ## Pentimento
 
-The cover corpus this was built to produce. See `docs/design/pentimento.md` for what it
-is and `docs/design/distribution.md` for how it is packaged and published, including
-the thing it is important to say first: **it is a JPEG-decompressed spatial
-corpus and is not comparable to BOSSbase.**
+The corpus this was built to produce. It has
+[its own repository](https://github.com/elementmerc/pentimento), because a
+citation should point at the dataset rather than at the tool that made it.
 
-`docs/design/cover-source-licensing.md` records why almost every existing steganalysis
-corpus cannot be redistributed, which is the reason this one exists.
+`docs/design/pentimento.md` covers what it is and `docs/design/distribution.md`
+how it is packaged and published, including the thing to say first: **it is a
+JPEG-decompressed spatial corpus and is not comparable to BOSSbase.**
+
+`docs/design/cover-source-licensing.md` records why almost every existing
+steganalysis corpus cannot be redistributed, which is the reason this one
+exists, and `docs/design/matched-pairs.md` records the defect class that broke
+two arms before a structural check caught it.
 
 ## Status
 
-The harness is working and in use. The first corpus tier is complete: 29 arms,
-344,348 pairs, built in a single 22 hour run with every arm resumable and every
-file checksummed.
+The harness is working and in use. The first corpus tier is complete: 35 stego
+arms and 4 clean ones, 344,348 pairs, built in a single 22 hour run with every
+arm resumable and every file checksummed.
 
 What that does and does not mean is worth being exact about. The generators,
 the pairing discipline and the scoring are exercised on real corpora and the

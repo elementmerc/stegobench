@@ -112,10 +112,9 @@ So, concretely:
 
 ### How it is implemented, and what each field guarantees
 
-These were described here before they existed. A hostile review on 2026-09-18
-found the manifest carried neither field, so the whole guarantee above was
-unbacked prose. Both are now written by `generators/manifest_repair.py`, and the
-fetcher emits `split` directly.
+Both fields were described here before they existed, so the guarantee above was
+prose with nothing behind it. Both are now written by
+`generators/manifest_repair.py`, and the fetcher emits `split` directly.
 
 | Field | Derived from | What it survives |
 |---|---|---|
@@ -157,8 +156,8 @@ is why they are being done together rather than in sequence.
 ## Hosting
 
 Targets, and the rule that picks them for version 1: **free, effectively
-unlimited, and needing no application or approval**, because the report is owed
-at the end of September and an approval queue is not a plan.
+unlimited, and needing no application or approval**, because an approval queue
+is not a plan you can schedule around.
 
 | Destination | Version 1 | Capacity | Why |
 |---|---|---|---|
@@ -169,8 +168,8 @@ at the end of September and an approval queue is not a plan.
 | **AWS Open Data Registry** | later | free hosting | How iNaturalist itself is hosted, and the natural home for the full tier. Requires an application |
 | **HuggingFace** | later | best-effort free, grants available | The free public tier is "best-effort", not unlimited. Storage grants exist for high-impact open work through `datasets@huggingface.co`, and that is worth applying for **once there is a corpus and download numbers to point at**, not before |
 
-The operator's instruction on this was explicit: version 1 goes only to the free,
-unlimited, no-approval destinations. The others are targets, not blockers.
+Version 1 goes only to the free, unlimited, no-approval destinations. The
+others are targets, not blockers.
 
 ### One release process, not five upload scripts
 

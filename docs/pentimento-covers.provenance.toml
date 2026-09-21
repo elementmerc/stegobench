@@ -1,18 +1,16 @@
 # Provenance for the Pentimento cover corpus.
 #
-# The fleet rule (operator, 2026-07-25): bulk data skipped from a backup must
-# carry a record of how to get it again, because an exclusion with no recovery
-# note is a bet nobody wrote down.
+# Bulk data that is too large to back up has to carry a record of how to get it
+# again, because an exclusion with no recovery note is a bet nobody wrote down.
 #
-# This one carries more than the rule asks for, because the corpus is intended
-# for publication and the licence position is the thing that decides whether
-# that is lawful. ALASKA2 and BOSSbase are both use-only for exactly this
-# reason (DEFERRED.md D14 and D15), and the whole point of building our own was
-# to have one that is not.
+# This one carries more than that, because the corpus is meant for publication
+# and the licence position is what decides whether publishing it is lawful.
+# ALASKA2 and BOSSbase are both use-only for exactly that reason, and having a
+# corpus that is not is the whole point of building this one. See
+# `design/cover-source-licensing.md`.
 #
-# The canonical copy lives beside the data at
-# `~/pentimento/covers/commons.provenance.toml` on the build machine. This copy
-# is in the repository so the record survives the disk.
+# A copy of this file lives beside the image data. This one is in the
+# repository so the record survives the disk.
 
 [source]
 url = "https://commons.wikimedia.org/w/api.php"
