@@ -19,11 +19,15 @@ became MIT in the mirrors this corpus exists to correct.
 
 WHAT IT WRITES
 --------------
-README.md        the entry point, with the non-comparability warning first
-CITATION.cff     GitHub and Zenodo both read this to render a citation
-croissant.json   ML Commons metadata, which Kaggle and HuggingFace index
-DATASHEET.md     Gebru et al., the questions a reviewer will ask anyway
-SPLITS.md        how to split without leaking a cover across the boundary
+README.md          the entry point, with the non-comparability warning first
+CITATION.cff       GitHub and Zenodo both read this to render a citation
+croissant.json     ML Commons metadata, which Kaggle and HuggingFace index
+DATASHEET.md       Gebru et al., the questions a reviewer will ask anyway
+SPLITS.md          how to split without leaking a cover across the boundary
+SHA256SUMS         so `sha256sum -c` works without parsing an index
+ATTRIBUTION.md     the credit lines for the 54% that require one
+ATTRIBUTION.csv    the same, joinable
+load_pentimento.py a reader that runs with nothing installed
 
 Usage::
 
@@ -34,7 +38,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime
+import hashlib
+import io
 import json
 import pathlib
 import sys
@@ -378,10 +385,199 @@ without its split rule is not comparable to anything.
 """
 
 
+def sha256sums(index: dict, extra: dict[str, str]) -> str:
+    """A `sha256sum -c` file for one part of the release.
+
+    The shard digests are taken from the pack index rather than recomputed. The
+    index is what the packer verified as it wrote, so re-hashing 45 GB here
+    would not be an independent check, it would be the same arithmetic run
+    twice at considerable cost. Checking a DOWNLOAD against this file is the
+    independent check, and it is the reader who performs it.
+
+    `extra` carries the small hand-readable files, which are hashed directly
+    because they are written in this same run and are a few kilobytes each.
+    """
+    lines = []
+    for shard in index.get("shards", []):
+        lines.append(f"{shard['sha256']}  {shard['shard']}")
+    for arm in index.get("arms", []):
+        for shard in arm.get("shards", []):
+            lines.append(f"{shard['sha256']}  {shard['shard']}")
+    # Sorted by name so two runs produce byte-identical output regardless of
+    # the order the arms happen to appear in the index.
+    lines.sort(key=lambda line: line.split("  ", 1)[1])
+    lines.extend(f"{digest}  {name}" for name, digest in sorted(extra.items()))
+    return "\n".join(lines) + "\n"
+
+
+def attribution(rows: list[dict]) -> str:
+    """The credit lines for every cover that requires one, in one place.
+
+    The obligation is real and it is the reader's: 54% of these covers are
+    CC BY. Every row already carries a ready-made `attribution` string, but a
+    reader discharging the licence should not have to open 10,000 JSON records
+    inside tar shards to collect them. Deriving the list costs nothing and is
+    the difference between a licence that can be complied with and one that
+    technically could be.
+    """
+    required = sorted(
+        (r for r in rows if r.get("attribution_required")),
+        key=lambda r: r["file"],
+    )
+    by_licence: dict[str, int] = {}
+    for r in required:
+        by_licence[r.get("licence", "unknown")] = by_licence.get(r.get("licence", "unknown"), 0) + 1
+
+    out = [
+        "# Attribution",
+        "",
+        f"**{len(required):,} of {len(rows):,} covers require attribution.** Every credit "
+        "line below is reproduced from the image's own manifest row, which remains "
+        "authoritative if the two ever disagree.",
+        "",
+        "Stego images are derivatives and inherit their cover's terms, so crediting the "
+        "cover credits every image derived from it. If you used one arm rather than the "
+        "whole corpus, each sample record names its cover under `source_png`, and you "
+        "need only the lines for the covers you actually used.",
+        "",
+        "`ATTRIBUTION.csv` beside this file carries the same list in a form you can join "
+        "against.",
+        "",
+        "## What is here",
+        "",
+        "| Licence | Covers |",
+        "|---|---|",
+    ]
+    for licence, count in sorted(by_licence.items(), key=lambda kv: -kv[1]):
+        out.append(f"| {licence} | {count:,} |")
+    out += ["", "## Credits", ""]
+    for r in required:
+        out.append(f"- `{r['file']}` {r.get('attribution', '')}")
+    return "\n".join(out) + "\n"
+
+
+def attribution_csv(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["file", "licence", "licence_url", "artist", "title",
+                     "source", "attribution"])
+    for r in sorted((r for r in rows if r.get("attribution_required")),
+                    key=lambda r: r["file"]):
+        writer.writerow([
+            r.get("file", ""), r.get("licence", ""), r.get("licence_url", ""),
+            r.get("artist", ""), r.get("title", ""), r.get("descriptionurl", ""),
+            r.get("attribution", ""),
+        ])
+    return buf.getvalue()
+
+
+def loader() -> str:
+    """A reader that works with nothing installed, and one that scales.
+
+    The documentation said "any loader that reads WebDataset works unchanged",
+    which is true and is not a starting point. Somebody who has just downloaded
+    45 GB wants a file they can run.
+    """
+    return '''#!/usr/bin/env python3
+"""Read Pentimento shards, with or without the webdataset package.
+
+Two ways in. The first needs nothing beyond the standard library and is enough
+to look at the corpus; the second is what you would train on.
+
+    python load_pentimento.py pentimento-core-00000.tar
+
+Shards are ordinary tar files. Each sample is an image and a JSON record that
+share a basename, so a sample is whatever group of members has the same stem.
+"""
+from __future__ import annotations
+
+import io
+import json
+import sys
+import tarfile
+from collections.abc import Iterator
+
+
+def samples(shard: str) -> Iterator[tuple[str, bytes, dict]]:
+    """Yield (key, image bytes, record) from one shard. Standard library only.
+
+    Streams rather than extracting, so a 1.3 GB shard costs one sample of
+    memory rather than 1.3 GB of disk. Members of a sample are adjacent in the
+    tar because the packer writes them that way, but this does not rely on it.
+    """
+    pending: dict[str, dict] = {}
+    with tarfile.open(shard, "r|*") as tar:          # "r|*" is the streaming form
+        for member in tar:
+            if not member.isfile():
+                continue
+            key, _, suffix = member.name.rpartition(".")
+            handle = tar.extractfile(member)
+            if handle is None:
+                continue
+            payload = handle.read()
+            slot = pending.setdefault(key, {})
+            if suffix == "json":
+                slot["record"] = json.loads(payload)
+            else:
+                slot["image"] = payload
+            if "record" in slot and "image" in slot:
+                yield key, slot["image"], slot["record"]
+                del pending[key]
+    if pending:
+        raise ValueError(
+            f"{len(pending)} incomplete sample(s) in {shard}, first: "
+            f"{sorted(pending)[0]}. A truncated download is the usual cause; "
+            f"check the shard against SHA256SUMS."
+        )
+
+
+def as_webdataset(pattern: str):
+    """The training path. Needs `pip install webdataset`.
+
+    `pattern` is a brace expression over shards, for example
+    "pentimento-core-{00000..00009}.tar".
+
+    Split by cover before you do this, not after. A cover and its stego
+    versions are near-identical, so a random split puts a photograph on both
+    sides of the boundary and the model learns the photograph. Every record
+    carries `source_png`; partition on that. SPLITS.md has the rule.
+    """
+    import webdataset as wds
+
+    return (
+        wds.WebDataset(pattern)
+        .decode("pil")
+        .to_tuple("png;jpg;jpeg", "json")
+    )
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    count = 0
+    for key, image, record in samples(argv[1]):
+        if count == 0:
+            print(f"first sample: {key}")
+            print(f"  bytes      {len(image):,}")
+            print(f"  licence    {record.get('licence') or record.get('cover_licence')}")
+            print(f"  cover      {record.get('source_png', 'this IS a cover')}")
+        count += 1
+    print(f"{count:,} samples in {argv[1]}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+'''
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--release", required=True, help="the packed cover release directory")
     ap.add_argument("--arms-index", default=None, help="the packed arms index JSON")
+    ap.add_argument("--covers-manifest", default=None,
+                    help="manifest.jsonl for the covers, which carries the credit lines")
     ap.add_argument("--version", default="1.0.0")
     args = ap.parse_args(argv)
 
@@ -414,10 +610,43 @@ def main(argv: list[str] | None = None) -> int:
             indent=2, sort_keys=True) + "\n",
         "DATASHEET.md": datasheet(cover_index, licences, arms),
         "SPLITS.md": splits(),
+        "load_pentimento.py": loader(),
     }
+
+    if args.covers_manifest:
+        manifest = pathlib.Path(args.covers_manifest)
+        if not manifest.exists():
+            print(f"no covers manifest at {manifest}", file=sys.stderr)
+            return 1
+        rows = [json.loads(line) for line in
+                manifest.read_text().splitlines() if line.strip()]
+        written["ATTRIBUTION.md"] = attribution(rows)
+        written["ATTRIBUTION.csv"] = attribution_csv(rows)
+    else:
+        print("note: no --covers-manifest, so no attribution list is written. "
+              "54% of these covers require one.", file=sys.stderr)
+
     for name, body in written.items():
         (rel / name).write_text(body)
-        print(f"  {name}  {len(body):>6} bytes")
+        print(f"  {name}  {len(body):>7} bytes")
+
+    # Last, because it hashes the files written above. Anything that changes
+    # after this point invalidates it, which is why nothing does.
+    def digests_of(directory: pathlib.Path) -> dict[str, str]:
+        return {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(directory.iterdir())
+            if p.is_file() and not p.name.endswith(".tar")
+            and p.name not in ("SHA256SUMS", ".upload-budget")
+        }
+
+    parts = [(rel, cover_index)]
+    if args.arms_index and arms is not None:
+        parts.append((pathlib.Path(args.arms_index).parent, arms))
+    for directory, index in parts:
+        body = sha256sums(index, digests_of(directory))
+        (directory / "SHA256SUMS").write_text(body)
+        print(f"  {directory.name}/SHA256SUMS  {len(body.splitlines())} entries")
 
     print(f"\n{len(written)} file(s) written to {rel}")
     return 0
