@@ -217,8 +217,27 @@ def main(argv: list[str] | None = None) -> int:
         if not jpeg_pool:
             print(f"no JPEGs under {args.jpeg_covers}", file=sys.stderr)
             return 2
+        # The pool is indexed POSITIONALLY: index i is the i-th name in sorted
+        # order. That equals cover i only while the pool is dense. A single
+        # missing JPEG shifts every cover after it down one position, so pair N
+        # gets built from cover N+1's coefficients. Every digest still matches,
+        # every count is still right, and half the arm is silently mispaired
+        # against a clean half it never came from. Refuse instead.
+        if len(jpeg_pool) < len(chosen):
+            print(f"{len(jpeg_pool):,} JPEG covers for {len(chosen):,} covers. "
+                  f"The pool is indexed by position, so a short pool pairs "
+                  f"every cover after the gap with the wrong coefficients.",
+                  file=sys.stderr)
+            return 2
         jpeg_pool = jpeg_pool[: len(chosen)]
-        print(f"{len(jpeg_pool)} JPEG covers for the DCT arms")
+        for i, path in enumerate(jpeg_pool):
+            if path.stem != f"{i:05d}":
+                print(f"JPEG cover pool is not dense: position {i} is "
+                      f"{path.name}, not {i:05d}.jpg. Rebuild the pool before "
+                      f"building any arm from it.", file=sys.stderr)
+                return 2
+        print(f"{len(jpeg_pool)} JPEG covers for the DCT arms, dense and "
+              f"aligned with tier order")
 
     manifest = out / "manifest.jsonl"
     done = set()
