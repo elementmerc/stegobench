@@ -1,4 +1,4 @@
-# stegseek (RickdeJager) — a steghide passphrase cracker, several thousand
+# stegseek (RickdeJager), a steghide passphrase cracker, several thousand
 # times faster than stegbrute/stegcracker because it builds a dictionary
 # lookup rather than shelling out to steghide once per candidate word.
 # The most requested missing tool per the v0.1 shortlist (item V12): the

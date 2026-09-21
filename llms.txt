@@ -25,21 +25,21 @@ Every subcommand takes `--json`, which puts machine-readable output on stdout
 and leaves human text on stderr, so `stegobench ... --json | jq` works while
 progress still reaches a terminal.
 
-- `stegobench schema <result-v1|run-v1|manifest-v1|all>` — print a JSON Schema
+- `stegobench schema <result-v1|run-v1|manifest-v1|all>`: print a JSON Schema
   generated from the Rust types that actually write these documents.
-- `stegobench validate <file>` — check a document against whichever of the
+- `stegobench validate <file>`: check a document against whichever of the
   three schemas its own `schema` field names; exits 6 on a mismatch.
-- `stegobench list <detectors|embedders|all>` — everything a registry can run,
+- `stegobench list <detectors|embedders|all>`: everything a registry can run,
   read live from `plugins/registry/`, so it cannot go stale.
-- `stegobench describe <name>` — one tool's full registered manifest.
-- `stegobench doctor` — checks whether this machine can run what the registry
+- `stegobench describe <name>`: one tool's full registered manifest.
+- `stegobench doctor`: checks whether this machine can run what the registry
   claims. With self-tests enabled (the default) it asks each present tool to
   score a known planted signal and a known clean fixture, because a tool that
   is merely installed is not a tool that works.
-- `stegobench completions <bash|zsh|fish|powershell>` — shell completion script.
-- `stegobench help <pairing|splits|licences|plugins>` — the reasoning behind
+- `stegobench completions <bash|zsh|fish|powershell>`: shell completion script.
+- `stegobench help <pairing|splits|licences|plugins>`: the reasoning behind
   the harness's hard rules, written for a reader who never opens the repo.
-- `stegobench plan` and `stegobench score` — **scoped in the command tree but
+- `stegobench plan` and `stegobench score`: **scoped in the command tree but
   not yet built.** Both parse today and exit 8 with a message naming what
   they are waiting on, rather than pretending to run. Do not treat a
   non-zero exit from either as a bug in your invocation; it is these
@@ -67,13 +67,13 @@ is exactly the failure `validate`/`verify` exist to catch.
 Read via `stegobench help <topic>` rather than restated in full here, because
 the tool itself is the source of truth for its own reasoning:
 
-- `pairing` — why a clean cover and its stego twin must differ in nothing but
+- `pairing`: why a clean cover and its stego twin must differ in nothing but
   the payload, and what happens to a result when they do not.
-- `splits` — why a cover and every stego image made from it must land on the
+- `splits`: why a cover and every stego image made from it must land on the
   same side of a train/test split.
-- `licences` — why every corpus row carries its own licence rather than one
+- `licences`: why every corpus row carries its own licence rather than one
   for the whole collection.
-- `plugins` — why a detector or embedder is a TOML registry entry pinned by
+- `plugins`: why a detector or embedder is a TOML registry entry pinned by
   digest or by executable hash, never code wired into the harness.
 
 ## What an agent should not do here
