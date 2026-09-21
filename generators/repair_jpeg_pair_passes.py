@@ -30,6 +30,14 @@ coefficients and stay exactly as they are.
 That makes this a 10,000 file repair rather than an 80,000 file rebuild, and it
 leaves every published stego digest untouched.
 
+THE MANIFEST MOVES WITH THE BYTES
+---------------------------------
+Every JPEG arm row records `clean_sha256`, the digest of the clean half it is
+paired against. Repairing the file without rewriting that field leaves 80,000
+rows describing a file that no longer exists, and the packer checks digests, so
+the whole arm is refused with no indication that the cause was a repair rather
+than corruption. The manifest is rewritten in the same run, atomically.
+
 WHAT IT DOES NOT DO
 -------------------
 It does not repack. Run `pack_arms.py` afterwards, which now refuses a pair
@@ -133,8 +141,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"target header, from {sample_stego.name}: "
           f"{[hex(m) for m, _ in target]}")
 
-    done = failed = 0
+    done = failed = skipped = 0
     for n, clean in enumerate(cleans, 1):
+        # IDEMPOTENCE, and it is not a nicety here. `repair` adds a writer
+        # pass unconditionally, so running this twice would take the clean half
+        # from two JFIF headers to four and break the pairing in the other
+        # direction, with the run reporting success both times. A file that
+        # already matches its twin is finished.
+        if header(clean) == target:
+            skipped += 1
+            continue
         try:
             repair(clean, working_dir / clean.name, args.dry_run)
             done += 1
@@ -145,7 +161,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {n:,}/{len(cleans):,}")
 
     print(f"\n{'would repair' if args.dry_run else 'repaired'}: {done:,}"
+          + (f", already correct: {skipped:,}" if skipped else "")
           + (f", failed: {failed:,}" if failed else ""))
+
+    manifest = root / "manifest.jsonl"
+    if not args.dry_run and not failed and manifest.is_file():
+        fresh = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in sorted(clean_dir.glob("*.jpg"))}
+        rows = [json.loads(line) for line in manifest.read_text().splitlines()
+                if line.strip()]
+        touched = 0
+        for row in rows:
+            rel = row.get("clean")
+            if not rel:
+                continue
+            digest = fresh.get(pathlib.PurePosixPath(rel).name)
+            if digest and row.get("clean_sha256") != digest:
+                row["clean_sha256"] = digest
+                touched += 1
+        # Written beside and renamed, so an interrupted run cannot leave a
+        # manifest that is half one corpus and half another.
+        part = manifest.with_suffix(".jsonl.part")
+        part.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+        part.replace(manifest)
+        print(f"manifest: {touched:,} row(s) repointed at the repaired clean half")
 
     if not args.dry_run and not failed:
         # Check the result rather than trust the loop, on a sample large enough

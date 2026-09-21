@@ -288,12 +288,15 @@ def jpeg(app0: int = 2, quant: int = 67, payload: bytes = b"\x00" * 32) -> bytes
     return out
 
 
-def png(extra_chunk: bytes | None = None, idat: bytes = b"\x00" * 16) -> bytes:
-    """A PNG skeleton: signature, IHDR, IDAT, optionally one more, IEND."""
+def png(extra_chunk: bytes | None = None, idat: bytes = b"\x00" * 16,
+        idat_parts: int = 1) -> bytes:
+    """A PNG skeleton: signature, IHDR, one or more IDAT, optionally one more, IEND."""
     def chunk(kind: bytes, body: bytes) -> bytes:
         return (len(body).to_bytes(4, "big") + kind + body
                 + b"\x00\x00\x00\x00")  # CRC is not read by container_of
-    out = pack_arms.PNG_MAGIC + chunk(b"IHDR", b"\x00" * 13) + chunk(b"IDAT", idat)
+    out = pack_arms.PNG_MAGIC + chunk(b"IHDR", b"\x00" * 13)
+    for _ in range(idat_parts):
+        out += chunk(b"IDAT", idat)
     if extra_chunk:
         out += chunk(extra_chunk, b"\x01\x02")
     return out + chunk(b"IEND", b"")
@@ -322,6 +325,15 @@ class TestContainerOf(unittest.TestCase):
         # the payload doing its job and must not read as a container change.
         self.assertEqual(pack_arms.container_of(png(idat=b"\x00" * 16)),
                          pack_arms.container_of(png(idat=b"\x00" * 64)))
+
+    def test_splitting_the_image_data_is_not_a_different_container(self) -> None:
+        """Pillow splits IDAT at 64 KiB, so a bigger payload adds a chunk.
+
+        Treating that as a container change flagged 1,863 sound pairs, and the
+        tell was that the count tracked the payload rate rather than the arm.
+        """
+        self.assertEqual(pack_arms.container_of(png(idat_parts=1)),
+                         pack_arms.container_of(png(idat_parts=3)))
 
     def test_an_added_png_chunk_is_a_different_container(self) -> None:
         self.assertNotEqual(pack_arms.container_of(png()),

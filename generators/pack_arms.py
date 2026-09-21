@@ -218,7 +218,16 @@ def container_of(payload: bytes) -> tuple:
 
     For a PNG: the sequence of chunk types, and the lengths of everything that
     is not image data. A payload hidden in pixels changes IDAT contents and,
-    through compression, IDAT lengths; it does not add a chunk or move a header.
+    through compression, IDAT lengths; it does not move a header.
+
+    A RUN OF IDAT CHUNKS COUNTS AS ONE. Pillow splits image data at 64 KiB, so
+    a cover whose pixels compress to 60,179 bytes ships one IDAT and its stego
+    twin at 67,817 ships two. Counting them separately flagged 1,863 perfectly
+    good pairs, and the giveaway was the shape of it: the count rose with the
+    payload rate, 18 at 0.05 bpp and 218 at 0.4. That is the payload making the
+    data less compressible, which is what a payload does, not the writer
+    leaving a mark. The number of IDAT chunks is a function of the compressed
+    length, and the compressed length is already excluded on purpose.
 
     Anything else: the empty tuple, meaning no opinion. A format this does not
     understand must not be silently declared matched OR mismatched, and every
@@ -248,8 +257,14 @@ def container_of(payload: bytes) -> tuple:
             length = int.from_bytes(payload[i:i + 4], "big")
             kind = payload[i + 4:i + 8]
             # IDAT length tracks the compressed size, which a payload is
-            # entitled to change. Its presence and position are not.
-            chunks.append((kind, None if kind == b"IDAT" else length))
+            # entitled to change, and so does the number of IDATs. A run of
+            # them collapses to one entry; where the image data sits relative
+            # to every other chunk still has to match.
+            if kind == b"IDAT":
+                if not chunks or chunks[-1][0] != b"IDAT":
+                    chunks.append((kind, None))
+            else:
+                chunks.append((kind, length))
             if kind == b"IEND":
                 break
             i += 12 + length
