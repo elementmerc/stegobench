@@ -121,18 +121,48 @@ def write_png(array: np.ndarray, dest: pathlib.Path) -> None:
 
 
 def jpeg_passthrough(source: pathlib.Path, dest: pathlib.Path) -> None:
-    """The clean half of a JPEG arm: same coefficients, same writer as the stego.
+    """One read and one write, nothing changed.
 
-    Read and written straight back with nothing changed, so the only difference
-    from its stego twin is the coefficients the scheme touched. Skipping this and
-    using the Pillow-written original would put a different encoder on each side
-    of the pair, which is the confound that voided round 3's outguess arms.
+    Used twice, and the second use is the point. See `jpeg_clean_pair`.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     im = jpeglib.read_dct(str(source))
     part = _scratch(dest, ".jpg.part")
     im.write_dct(str(part))
     part.replace(dest)
+
+
+def jpeg_clean_pair(source: pathlib.Path, working: pathlib.Path,
+                    dest: pathlib.Path) -> None:
+    """The clean half of a JPEG arm, written the same number of times as its twin.
+
+    SAME WRITER IS NOT ENOUGH. SAME NUMBER OF PASSES IS THE REQUIREMENT.
+
+    The stego half is produced by reading `working` and writing it back with
+    modified coefficients, so it has been through one more `jpeglib` write than
+    `working` has. jpeglib prepends a JFIF APP0 segment on every write, so a
+    clean half written once and a stego half written twice differ by a marker
+    that has nothing to do with the payload:
+
+        clean  FFE0 FFE0           FFDB FFDB FFC0 ...
+        stego  FFE0 FFE0 FFE0      FFDB FFDB FFC0 ...
+                         ^^^^ the whole arm, separable on this alone
+
+    That is not a statistical confound of the kind that shifts an AUC. It is a
+    perfect classifier: `len(app0) == 3` labels every stego image correctly
+    without looking at a single coefficient. It shipped across eight arms and
+    80,000 images before a review caught it, and it is the same mistake as the
+    outguess pairing bug one layer down.
+
+    So `working` takes the first pass and is what the schemes read their
+    coefficients from; `dest` takes a second pass and is what ships. Both sides
+    of every pair have then been read once and written once from `working`.
+    Coefficients are untouched by a DCT-domain round trip, so the extra pass
+    costs nothing but the marker it exists to match.
+    """
+    if not working.is_file():
+        jpeg_passthrough(source, working)
+    jpeg_passthrough(working, dest)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,13 +291,20 @@ def main(argv: list[str] | None = None) -> int:
         jpeg_schemes = [s for s in schemes if s in JPEG_SCHEMES]
         if jpeg_schemes and jpeg_pool:
             jclean_dir = out / "clean_jpeg"
+            # The first pass. Not shipped: it is the coefficient source both
+            # halves are written from, so that neither half has been through a
+            # writer the other has not. See `jpeg_clean_pair`.
+            jworking_dir = out / "clean_jpeg_pass1"
             for index, src in enumerate(jpeg_pool):
                 stem = f"{index:05d}"
                 clean = jclean_dir / f"{stem}.jpg"
-                if not clean.is_file():
-                    jpeg_passthrough(src, clean)
+                working = jworking_dir / f"{stem}.jpg"
+                # Both, because a resume that finds only one of them has to
+                # rebuild the other rather than read a file that is not there.
+                if not (working.is_file() and clean.is_file()):
+                    jpeg_clean_pair(src, working, clean)
                 try:
-                    im = jpeglib.read_dct(str(clean))
+                    im = jpeglib.read_dct(str(working))
                     y0 = im.Y.copy()
                     qt = im.qt[0]
                 except Exception as e:  # noqa: BLE001
