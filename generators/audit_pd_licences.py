@@ -245,7 +245,8 @@ def family(template: str) -> str:
     return "other"
 
 
-def cross_check(manifest: pathlib.Path, limit: int = 0) -> int:
+def cross_check(manifest: pathlib.Path, limit: int = 0,
+                report: pathlib.Path | None = None) -> int:
     """Compare every recorded licence with what its Commons page states.
 
     The corpus's claim is that its licences are traceable. This is the check
@@ -316,6 +317,14 @@ def cross_check(manifest: pathlib.Path, limit: int = 0) -> int:
 
     if not disagreements and not silent:
         print("\nEvery recorded licence matches a licence its page states.")
+
+    if report:
+        # Written for every row, not only the disagreements. What a page states
+        # is the evidence; which rows we currently consider wrong is a
+        # conclusion, and a later run with better rules should be able to
+        # re-reach it without asking Commons again.
+        report.write_text(json.dumps(by_title, indent=2, sort_keys=True) + "\n")
+        print(f"\nwritten: {report}")
     return 0
 
 
@@ -328,6 +337,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="write the augmented manifest beside the original")
     ap.add_argument("--limit", type=int, default=0,
                     help="audit only the first n, for a dry run")
+    ap.add_argument("--report", default=None,
+                    help="with --cross-check: write what each page states, so "
+                         "the evidence outlives this run")
     ap.add_argument("--cross-check", action="store_true",
                     help="check EVERY row's recorded licence against the "
                          "licence templates on its Commons page, and report "
@@ -335,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.cross_check:
-        return cross_check(pathlib.Path(args.manifest), args.limit)
+        return cross_check(pathlib.Path(args.manifest), args.limit,
+                           pathlib.Path(args.report) if args.report else None)
 
     sys.stdout.reconfigure(line_buffering=True)
     manifest = pathlib.Path(args.manifest)

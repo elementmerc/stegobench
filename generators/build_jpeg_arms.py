@@ -58,7 +58,6 @@ import hashlib
 import io
 import json
 import pathlib
-import random
 import sys
 
 from tiers import TierError, covers_in_tier_order, tier_name
@@ -67,6 +66,7 @@ import time
 from PIL import Image
 
 from embedders import EmbedError
+from payloads import payload_bytes as deterministic_payload
 from tools import OutguessEmbedder, SteghideEmbedder
 
 # Appended after the end-of-image marker. Chosen to be obviously non-image and
@@ -139,11 +139,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(chosen)} covers, tier order 0..{len(chosen) - 1} "
           f"[{tier_name(len(chosen))}], from {manifest}")
 
-    # Cover SELECTION is no longer random, but the payloads still are, and they
-    # still have to be reproducible. Seeded here rather than where the covers
-    # used to be chosen, because the two jobs are separate and conflating them
-    # is what let one edit silently remove the other.
-    rng = random.Random(args.seed)
+    # Payloads are DERIVED per image rather than drawn from a shared stream.
+    # A single seeded generator was reproducible only if the run never skipped
+    # anything, and this loop skips on resume and on every cover a tool
+    # refuses, of which outguess refuses 1,884. See payloads.py.
 
     # Outguess re-encodes; it must do so at the quality both halves share.
     embedders = [SteghideEmbedder(), OutguessEmbedder(quality=args.quality)]
@@ -236,7 +235,8 @@ def main(argv: list[str] | None = None) -> int:
                     if payload_bytes > room:
                         counts["skipped"] += 1
                         continue
-                    payload = rng.randbytes(payload_bytes)
+                    payload = deterministic_payload(
+                        args.seed, stem, tool_id, rate, payload_bytes)
                     result = embedder.embed(clean, payload, stego)
                 except EmbedError as e:
                     counts["failed"] += 1
