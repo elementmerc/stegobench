@@ -25,7 +25,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import verify_release as vr  # noqa: E402
 from verify_release import (  # noqa: E402
-    Report, check_covers, check_licences, check_packed, check_pool,
+    Report, check_covers, check_licences, check_packed, check_packed_arms,
+    check_pool,
 )
 
 
@@ -179,6 +180,97 @@ class PackedTierTests(unittest.TestCase):
         r = Report()
         check_packed(self.release.parent / "empty", self.rows, 10, r)
         self.assertIn("packed", r.failures)
+
+
+class PackedArmTests(unittest.TestCase):
+    """The same risk, on the half of the release nothing used to open.
+
+    A FRESH arm pack is sound by construction: `pack_arms` hashes every file as
+    it reads it and leaves out anything that disagrees. What that guarantee
+    cannot see is an arm pack left in place by a later rebuild. Its shard
+    digests are right, its index agrees with itself, its counts come out, and
+    it holds the previous corpus.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.build(packed=b"stego v2", built=b"stego v2")
+
+    def build(self, packed: bytes, built: bytes) -> None:
+        """One arm, one sample. The pack holds `packed`; the arm holds `built`."""
+        import tarfile
+
+        group = self.root / "arms" / "adaptive"
+        (group / "wow" / "0200").mkdir(parents=True, exist_ok=True)
+        (group / "clean_grey").mkdir(parents=True, exist_ok=True)
+        (group / "wow" / "0200" / "00001.png").write_bytes(built)
+        (group / "clean_grey" / "00001.png").write_bytes(b"clean")
+        (group / "manifest.jsonl").write_text(json.dumps({
+            "arm": "wow/0200", "tool": "wow", "rate": 0.2,
+            "clean": "clean_grey/00001.png",
+            "clean_sha256": hashlib.sha256(b"clean").hexdigest(),
+            "stego": "wow/0200/00001.png",
+            "stego_sha256": hashlib.sha256(built).hexdigest(),
+            "source_png": "08848.png", "source_sha256": "a" * 64,
+        }) + "\n", encoding="utf-8")
+
+        tier = self.root / "release" / "nano-arms"
+        tier.mkdir(parents=True, exist_ok=True)
+        shard = tier / "pentimento-nano-wow-0200-00000.tar"
+        with tarfile.open(shard, "w", format=tarfile.PAX_FORMAT) as tar:
+            for name, blob in (
+                ("000000.png", packed),
+                ("000000.json", json.dumps({
+                    "arm": "wow/0200", "stego": "wow/0200/00001.png",
+                    "stego_sha256": hashlib.sha256(packed).hexdigest(),
+                    "sha256": hashlib.sha256(packed).hexdigest(),
+                }, sort_keys=True).encode()),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(blob)
+                tar.addfile(info, io.BytesIO(blob))
+
+        blob = shard.read_bytes()
+        # The arm is named the way `arm_key` names it, tool and rate, because
+        # that is what the packer writes into the index.
+        (tier / "pentimento-nano-arms-index.json").write_text(json.dumps({
+            "tier": "nano",
+            "arms": [{"arm": "wow-0200", "samples": 1, "shards": [{
+                "shard": shard.name, "samples": 1, "bytes": len(blob),
+                # Self-consistent, exactly as a stale pack's index is.
+                "sha256": hashlib.sha256(blob).hexdigest()}]}],
+        }), encoding="utf-8")
+
+    def check(self) -> Report:
+        r = Report()
+        check_packed_arms(self.root / "release", self.root / "arms", 10 ** 9, r)
+        return r
+
+    def test_a_pack_matching_the_arms_passes(self):
+        r = self.check()
+        self.assertTrue(r.ok, r.failures)
+        self.assertIn("packed-arms", r.notes)
+
+    def test_a_pack_left_behind_by_a_rebuild_is_caught(self):
+        self.build(packed=b"stego v1", built=b"stego v2")
+        r = self.check()
+        self.assertTrue(any("before the arms changed" in m
+                            for m in r.failures["packed-arms"]), r.failures)
+
+    def test_an_arm_that_is_no_longer_built_is_caught(self):
+        """A pack can also outlive the arm entirely, when a rebuild drops a
+        rate or renames a tool. Nothing in the pack notices its own removal."""
+        (self.root / "arms" / "adaptive" / "manifest.jsonl").write_text(
+            "", encoding="utf-8")
+        r = self.check()
+        self.assertIn("packed-arms", r.failures)
+
+    def test_a_release_with_no_packed_arms_is_caught_rather_than_skipped(self):
+        r = Report()
+        check_packed_arms(self.root / "nothing", self.root / "arms", 10, r)
+        self.assertIn("packed-arms", r.failures)
 
 
 class PoolTests(unittest.TestCase):

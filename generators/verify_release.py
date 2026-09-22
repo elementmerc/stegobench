@@ -50,6 +50,19 @@ THE CHECKS, AND WHY EACH ONE IS HERE
     holds the old images, its own index agrees with itself, its shard digests
     are correct, and nothing anywhere says the corpus moved underneath it.
 
+`packed-arms`
+    The same question for the packed ARMS, which `packed` deliberately leaves
+    alone. A fresh arm pack is sound by construction, because `pack_arms`
+    hashes every file as it reads it, so what this catches is an OLD arm pack
+    left in place by a rebuild: correct shard digests, an index that agrees
+    with itself, right counts, previous corpus. Needs `--arms` as well as
+    `--release`, because the arms as built are what it compares against.
+
+`figures`
+    The numbers in the published prose match the corpus that shipped. The
+    manifest being right does not make the README right: they are checked by
+    different things, and for one release they disagreed by 24 covers.
+
 `pool`
     The JPEG cover pool is dense, because `build_adaptive_arms.py` indexes it
     positionally and one gap mispairs every cover after it.
@@ -245,6 +258,10 @@ def check_packed(release: pathlib.Path, rows: list[dict],
 
     by_order = {r["tier_order"]: r for r in rows}
     indexes = sorted(release.rglob("pentimento-*-index.json"))
+    # The cover tiers only. An arm index keys its members by position within
+    # the arm rather than by `tier_order`, so the cover manifest cannot say
+    # anything about one; the arms are checked against the arms as built, in
+    # `check_packed_arms`.
     indexes = [p for p in indexes if "arms" not in p.name]
     if not indexes:
         report.fail("packed", f"no packed cover tier under {release}")
@@ -296,6 +313,140 @@ def check_packed(release: pathlib.Path, rows: list[dict],
     if not unreadable and not stale:
         report.note("packed", f"{checked:,} members across {len(tiers)} tier(s) "
                               f"match the manifest at their position")
+
+
+def arm_truth(arm_root: pathlib.Path) -> dict[str, dict[str, str]]:
+    """What each arm holds TODAY, grouped exactly as the packer groups it.
+
+    Derived by calling `pack_arms`' own grouping rather than by restating it,
+    because an independent reimplementation of which rows become which arm is
+    a second thing that can drift, and a checker that drifts into agreeing with
+    the pack it is checking is the fault this file keeps finding elsewhere.
+
+    Returns ``{arm: {relative path: digest}}``.
+    """
+    from pack_arms import clean_arms, group_rows
+
+    truth: dict[str, dict[str, str]] = {}
+    for manifest in sorted(arm_root.glob("*/manifest.jsonl")):
+        group = manifest.parent.name
+        by_arm = group_rows(manifest)
+        every_row = [r for rows in by_arm.values() for r in rows]
+        by_arm.update(clean_arms(every_row, group))
+        for arm, rows in by_arm.items():
+            if not rows:
+                continue
+            path_field = "stego" if "stego" in rows[0] else "file"
+            digest_field = ("stego_sha256" if path_field == "stego"
+                            else "sha256")
+            held = truth.setdefault(arm, {})
+            for row in rows:
+                rel, digest_value = row.get(path_field), row.get(digest_field)
+                if rel and digest_value:
+                    held[rel] = digest_value
+    return truth
+
+
+def check_packed_arms(release: pathlib.Path, arm_root: pathlib.Path,
+                      sample: int, report: Report) -> None:
+    """Do the packed ARMS still hold the arms that were built?
+
+    `check_packed` deliberately skips any index whose name contains "arms", so
+    until now only the cover tiers were ever compared with anything outside
+    themselves. A FRESH arm pack is sound by construction, because `pack_arms`
+    hashes every file as it reads it and leaves out anything that disagrees.
+    The gap is an OLD arm pack left in place: its shard digests are correct,
+    its index agrees with itself, every count comes out right, and it holds
+    the previous corpus. Nothing in the release says so.
+
+    So the packed bytes are compared against the arm manifests as they stand
+    now. Each member carries the row it was packed from, which names its path
+    within the built arm, and that path is what the current manifest is asked
+    about. A rebuild changes the digest and a repack is required; a pack left
+    behind by a rebuild fails here instead of shipping.
+    """
+    import tarfile
+
+    indexes = sorted(release.rglob("pentimento-*-arms-index.json"))
+    if not indexes:
+        report.fail("packed-arms", f"no packed arms index under {release}")
+        return
+
+    truth = arm_truth(arm_root)
+    if not truth:
+        report.fail("packed-arms", f"no arm manifests under {arm_root}, so the "
+                                   f"packs have nothing to be checked against")
+        return
+
+    stale, unreadable, unknown, checked, tiers = [], [], [], 0, []
+    for index_path in indexes:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        tiers.append(index.get("tier", index_path.parent.name))
+        for arm_index in index.get("arms", []):
+            arm = arm_index["arm"]
+            held = truth.get(arm)
+            if held is None:
+                unknown.append(f"{arm} is packed but no longer built")
+                continue
+            for shard in arm_index.get("shards", []):
+                tar_path = index_path.parent / shard["shard"]
+                if not tar_path.is_file():
+                    unreadable.append(tar_path.name)
+                    continue
+                with tarfile.open(tar_path) as tar:
+                    names = tar.getnames()
+                    stems = sorted({n.rsplit(".", 1)[0] for n in names})
+                    for stem in _pick(stems, sample):
+                        sidecar = tar.extractfile(f"{stem}.json")
+                        payload_name = next(
+                            (n for n in names
+                             if n.startswith(f"{stem}.")
+                             and not n.endswith(".json")), None)
+                        if sidecar is None or payload_name is None:
+                            unreadable.append(f"{tar_path.name}:{stem}")
+                            continue
+                        row = json.loads(sidecar.read())
+                        rel = row.get("stego") or row.get("file")
+                        want = held.get(rel or "")
+                        if want is None:
+                            unknown.append(f"{arm}:{rel}")
+                            continue
+                        fh = tar.extractfile(payload_name)
+                        if fh is None:
+                            unreadable.append(f"{tar_path.name}:{payload_name}")
+                            continue
+                        checked += 1
+                        if hashlib.sha256(fh.read()).hexdigest() != want:
+                            stale.append(f"{arm}:{rel}")
+
+    if unreadable:
+        report.fail("packed-arms",
+                    f"{len(unreadable)} packed shard(s) or member(s) could not "
+                    f"be read, e.g. {unreadable[:3]}")
+    if unknown:
+        report.fail("packed-arms",
+                    f"{len(unknown):,} packed sample(s) name something the "
+                    f"built arms no longer hold, e.g. {unknown[:3]}. The pack "
+                    f"predates a rebuild; repack before publishing")
+    if stale:
+        report.fail("packed-arms",
+                    f"{len(stale):,} packed arm sample(s) differ from the arm "
+                    f"that was built, e.g. {stale[:3]}. The pack was made "
+                    f"before the arms changed and nothing in it says so; "
+                    f"repack before publishing")
+    if unreadable or unknown or stale:
+        return
+    if nothing_checked("packed-arms", checked, report, "packed arm samples"):
+        return
+    report.note("packed-arms",
+                f"{checked:,} arm sample(s) across {len(tiers)} tier(s) match "
+                f"the arms as built")
+
+
+def _pick(items: list[str], sample: int) -> list[str]:
+    if len(items) <= sample:
+        return items
+    return sorted(random.Random(20260921).sample(items, sample))
 
 
 def _positions(first: int, last: int, sample: int) -> list[int]:
@@ -580,9 +731,20 @@ def main(argv: list[str] | None = None) -> int:
         check_pairs(arm_root, per_arm, report)
         check_stale(arm_root, per_arm, report)
         check_provenance(arm_root, rows, report)
+        if args.release:
+            check_packed_arms(pathlib.Path(args.release), arm_root,
+                              per_arm, report)
+        else:
+            report.skip("packed-arms",
+                        "no --release given, so the packed arms were never "
+                        "opened and an arm pack left behind by a rebuild "
+                        "would not show")
     else:
         for check in ("pairs", "stale", "provenance"):
             report.skip(check, "no --arms given, so no stego pair was examined")
+        report.skip("packed-arms",
+                    "no --arms given, so the packed arms had nothing current "
+                    "to be compared against")
 
     if args.docs and args.release:
         check_figures(pathlib.Path(args.docs), pathlib.Path(args.release),
@@ -592,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
                                "compared with the corpus it describes")
 
     order = ["covers", "licences", "digests", "pool", "pairs", "stale",
-             "provenance", "packed", "figures"]
+             "provenance", "packed", "packed-arms", "figures"]
     print()
     for check in order:
         if check in report.failures:
