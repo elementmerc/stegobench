@@ -211,8 +211,14 @@ def stale_numbers(text: str, name: str, value: int,
 NOT_PROSE = ("attribution",)
 
 
+#: `private/` is gitignored in every repo on this fleet and never published, so
+#: a figure in there is a working note rather than a claim to a reader. Scanning
+#: it makes the check fail over prose nobody will ever see.
+NOT_PUBLISHED = ("node_modules", "private")
+
+
 def is_prose(path: pathlib.Path) -> bool:
-    if "node_modules" in path.parts:
+    if any(part in NOT_PUBLISHED for part in path.parts):
         return False
     return path.stem.lower() not in NOT_PROSE
 
