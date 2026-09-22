@@ -434,8 +434,32 @@ class EndToEndTests(unittest.TestCase):
         # failure this file exists to prevent.
         body = release_metadata.splits()
         self.assertIn("split_salt", body)
-        self.assertIn("8,032", body)
-        self.assertIn("1,968", body)
+
+    def test_the_split_counts_are_derived_from_the_tier_rather_than_restated(self):
+        """This test used to assert the literal "8,032" and "1,968".
+
+        Those were the right numbers when they were written and the corpus
+        moved underneath them: the manifest holds 8,029 against 1,971. The
+        same absolute pair also shipped inside Nano, telling a reader with 200
+        covers that their tier held 8,032 training ones. So the assertion was
+        pinning the defect in place, which is the most expensive kind of test
+        to have.
+        """
+        rows = ([{"split": "train"}] * 8029) + ([{"split": "test"}] * 1971)
+        body = release_metadata.splits(rows)
+        self.assertIn("8,029 covers against 1,971", body)
+        self.assertNotIn("8,032", body)
+
+        nano = ([{"split": "train"}] * 167) + ([{"split": "test"}] * 33)
+        self.assertIn("167 covers against 33", release_metadata.splits(nano))
+
+    def test_the_split_guide_states_no_count_rather_than_a_wrong_one(self):
+        """With no rows there is nothing to derive, and the sentence drops the
+        figure rather than carrying a stale one. A document missing a number is
+        recoverable; one asserting a confident wrong number is not."""
+        body = release_metadata.splits(None)
+        self.assertIn("`split_salt`", body)
+        self.assertNotIn("covers against", body)
 
     def test_the_two_parts_do_not_write_the_same_filename(self):
         """Every destination is flat.

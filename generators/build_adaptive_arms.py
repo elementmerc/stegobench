@@ -276,8 +276,27 @@ def main(argv: list[str] | None = None) -> int:
                         arm = f"{scheme}/{int(rate * 1000):04d}"
                         stego = out / arm / f"{stem}.png"
                         key = str(stego.relative_to(out))
-                        if key in done or stego.is_file():
+                        # `done` is the manifest. The file being on disk is
+                        # NOT the same thing, and treating it as equivalent is
+                        # what cost this corpus 118 covers: an interrupted run
+                        # left 2,478 images written with no manifest row, and
+                        # every later run skipped them BECAUSE they existed, so
+                        # the rows were never written and `pack_arms`, which
+                        # reads the manifest, never packed them. Twenty-one
+                        # arms shipped at 9,882 instead of 10,000 with every
+                        # digest matching and every count internally
+                        # consistent.
+                        #
+                        # So an image with no row is rebuilt rather than
+                        # skipped. The embedders are seeded, so a rebuild
+                        # reproduces the same bytes; the cost of being wrong
+                        # about that is one redundant write, and the cost of
+                        # the old behaviour was a silently incomplete corpus.
+                        if key in done:
                             continue
+                        if stego.is_file():
+                            counts["unrecorded"] = counts.get("unrecorded", 0) + 1
+                            stego.unlink()
                         try:
                             seed = (args.seed + index * 7919
                                     + int(rate * 100000)) % (2 ** 31)
@@ -285,6 +304,18 @@ def main(argv: list[str] | None = None) -> int:
                             changed_arr = np.clip(changed_arr, 0, 255)
                         except Exception as e:  # noqa: BLE001 - one arm, not the run
                             counts["failed"] += 1
+                            # RECORDED, not just printed. This wrote the reason
+                            # to stderr and continued, so when 118 covers were
+                            # later found missing from every spatial arm the
+                            # only account of why had gone with a superseded
+                            # log. A rejection that lives in a log is a
+                            # rejection the corpus cannot describe.
+                            with (out / "rejected.jsonl").open("a") as rf:
+                                rf.write(json.dumps({
+                                    "arm": arm, "stem": stem,
+                                    "source_png": png.name,
+                                    "error": f"{type(e).__name__}: {e}",
+                                }) + "\n")
                             print(f"  {arm}/{stem}: {type(e).__name__}: {e}",
                                   file=sys.stderr)
                             continue

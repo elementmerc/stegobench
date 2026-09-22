@@ -263,7 +263,7 @@ def restate(cover: dict, arm: str) -> dict:
     return out
 
 
-def container_of(payload: bytes) -> tuple:
+def container_of(payload: bytes) -> tuple | None:
     """Everything about a file that the payload should NOT have changed.
 
     For a JPEG: every marker and its length before the start of scan. That is
@@ -284,9 +284,17 @@ def container_of(payload: bytes) -> tuple:
     leaving a mark. The number of IDAT chunks is a function of the compressed
     length, and the compressed length is already excluded on purpose.
 
-    Anything else: the empty tuple, meaning no opinion. A format this does not
+    Anything else: `None`, meaning no opinion. A format this does not
     understand must not be silently declared matched OR mismatched, and every
     format the corpus actually carries is handled above.
+
+    IT USED TO RETURN THE EMPTY TUPLE for that case, and the callers compare
+    two results for inequality. `() != ()` is false, so two files in an
+    unrecognised format were counted as CHECKED and declared identical - a
+    check that examined nothing and reported clean, which is the single fault
+    this codebase keeps finding. Unreachable today, because every file is JPEG
+    or PNG; one new format away from being the quietest bug in the release.
+    `None` makes the caller decide, and both callers now refuse it.
     """
     if payload[:2] == b"\xff\xd8":
         markers = []
@@ -325,7 +333,7 @@ def container_of(payload: bytes) -> tuple:
             i += 12 + length
         return ("png", tuple(chunks))
 
-    return ()
+    return None
 
 
 def pack_arm(
@@ -413,12 +421,35 @@ def pack_arm(
                 if clean_rel:
                     clean_path = arms_root / clean_rel
                     if clean_path.exists():
-                        if container_of(clean_path.read_bytes()) != container_of(payload):
+                        clean_shape = container_of(clean_path.read_bytes())
+                        stego_shape = container_of(payload)
+                        # `None` is "this format is not understood", which is
+                        # not the same as "the two agree". Refusing is the
+                        # only safe reading: a pair this cannot examine must
+                        # not be shipped as a pair it has examined.
+                        if clean_shape is None or stego_shape is None:
+                            container_mismatches.append(rel)
+                            position += 1
+                            continue
+                        if clean_shape != stego_shape:
                             container_mismatches.append(rel)
                             position += 1
                             continue
 
                 sample = dict(row)
+                # THE ARM NAME THE RELEASE PUBLISHES, not the one the builder
+                # used internally. The two differed, and for one arm they
+                # differed in the word rather than the punctuation: the
+                # appended-data shards are `append_after_eoi-0000` in every
+                # shard name, prose table, figure and docs entry, while the
+                # records inside them said `structural/0000`. A loader
+                # grouping by `record["arm"]`, which is what the docs tell a
+                # reader the field is for, produced a label matching nothing
+                # published and looking like an undocumented 40th arm.
+                #
+                # Every other arm differed only as `wow/0200` against
+                # `wow-0200`, which is just as unjoinable.
+                sample["arm"] = name
                 sample["sha256"] = actual
                 sample["source_png"] = cover_name
                 sample["licence_join"] = how

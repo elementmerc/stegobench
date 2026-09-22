@@ -342,7 +342,28 @@ class TestContainerOf(unittest.TestCase):
     def test_an_unknown_format_gets_no_opinion(self) -> None:
         # Not "matched", which would wave it through, and not "mismatched",
         # which would drop a whole arm the check does not understand.
-        self.assertEqual(pack_arms.container_of(b"not an image at all"), ())
+        #
+        # `None`, not `()`. The empty tuple WAS the no-opinion value, and the
+        # callers compare two results for inequality: `() != ()` is false, so
+        # two files in an unrecognised format were declared identical and
+        # counted as checked. The sentinel has to be one that cannot silently
+        # compare equal to itself and mean "verified".
+        self.assertIsNone(pack_arms.container_of(b"not an image at all"))
+
+    def test_two_unknown_files_are_not_declared_identical(self) -> None:
+        """The bug the sentinel change exists to prevent, stated as a test.
+
+        Under the old empty-tuple sentinel this assertion passed for the wrong
+        reason: the two were equal, so a caller comparing them saw a match.
+        """
+        a = pack_arms.container_of(b"some format nobody here knows")
+        b = pack_arms.container_of(b"an entirely different unknown thing")
+        self.assertIsNone(a)
+        self.assertIsNone(b)
+        # A caller must not be able to conclude "these agree" from this pair.
+        self.assertTrue(a is None or b is None,
+                        "an unrecognised format must force the caller to "
+                        "refuse rather than to compare")
 
 
 class TestContainerGate(TestPackArm):

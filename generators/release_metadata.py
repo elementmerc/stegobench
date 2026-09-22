@@ -97,8 +97,37 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
     total_covers = cover_index.get("samples", licences.get("total", 0))
     cover_shards = len(cover_index.get("shards", []))
     stego_total, stego_count, clean_total, clean_count = split_arms(arms)
+    # THE RATE UNIT COLUMN.
+    #
+    # The table listed `hugo-0400` and `steghide-0500` as adjacent rows with a
+    # bare sample count, and nothing in any SHIPPED file said that the four
+    # digits mean three incompatible quantities: bits per pixel for the
+    # spatial arms, bits per non-zero AC coefficient for the JPEG ones, and a
+    # fraction of capacity for steghide. All of that lived on the docs site,
+    # which is not part of any download. A reader who curls a shard, as this
+    # README's own quickstart tells them to, could rank schemes "at rate 0.2"
+    # while comparing three different things.
+    #
+    # The per-sample JSON has carried `rate_unit` correctly all along. This
+    # puts it where a human reads it.
+    UNITS = {
+        "hugo": "bits per pixel", "wow": "bits per pixel",
+        "suniward": "bits per pixel", "hill": "bits per pixel",
+        "mipod": "bits per pixel",
+        "juniward": "bits per non-zero AC", "uerd": "bits per non-zero AC",
+        "steghide": "fraction of capacity",
+        "outguess": "fraction of capacity",
+        "append_after_eoi": "not a rate: a fixed trailer",
+    }
+
+    def unit_of(arm_name: str) -> str:
+        if arm_name.startswith("clean"):
+            return "n/a, clean"
+        return UNITS.get(arm_name.rsplit("-", 1)[0], "unstated")
+
     arm_lines = "\n".join(
-        f"| `{a['arm']}` | {a['samples']:,} | {len(a['shards'])} |"
+        f"| `{a['arm']}` | {a['samples']:,} | {len(a['shards'])} | "
+        f"{unit_of(a['arm'])} |"
         for a in sorted((arms or {}).get("arms", []), key=lambda x: x["arm"]))
 
     attribution = licences.get("attribution_required", 0)
@@ -109,7 +138,34 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
                                   key=lambda kv: -kv[1])
     )
 
-    return f"""# Pentimento {tier}, v{version}
+    # YAML FRONTMATTER, for HuggingFace.
+    #
+    # This file is uploaded to the repository root, where HuggingFace treats it
+    # as the dataset card. Without a frontmatter block the page renders with no
+    # licence chip and the licence filter does not surface the dataset at all,
+    # so a reader arriving through HF saw a card whose licensing paragraph was
+    # a hundred lines down. The Internet Archive and Kaggle ignore the block;
+    # it is valid Markdown everywhere else.
+    return f"""---
+license: cc-by-4.0
+license_details: >-
+  The collection is CC BY 4.0, the strictest obligation present. Individual
+  cover photographs are third-party Wikimedia Commons works under CC0, public
+  domain or CC BY 1.0 through 4.0, each credited in ATTRIBUTION.csv and
+  carrying its own licence in its record.
+pretty_name: "Pentimento {tier}"
+task_categories:
+  - image-classification
+tags:
+  - steganalysis
+  - steganography
+  - image-forensics
+  - cover-source-mismatch
+size_categories:
+  - {"100K<n<1M" if stego_total >= 100000 else "10K<n<100K"}
+---
+
+# Pentimento {tier}, v{version}
 
 **{NOT_COMPARABLE}**
 
@@ -134,9 +190,10 @@ exactly the effect a user most needs to measure, so the arms here stay
 separate and labelled.
 
 **Rebuildable byte for byte.** Every generator is seeded and every file is
-recorded with a sha256 and the count of samples actually changed. A nine point
-accuracy swing has been measured in the literature from the data split alone,
-so a corpus that cannot be rebuilt identically cannot support a comparison.
+recorded with a sha256 and the count of samples actually changed. Results in
+the steganalysis literature differ by several accuracy points on the choice of
+data split alone, same network and same algorithm, so a corpus that cannot be
+rebuilt identically cannot support a comparison.
 
 ## Layout
 
@@ -151,10 +208,21 @@ pentimento-{tier.lower()}-00000.tar
 
 They stream without unpacking, and every major dataset loader reads them.
 
-| Part | Files | Shards |
-|---|---|---|
-| Covers | {total_covers:,} | {cover_shards} |
+| Part | Files | Shards | What the rate means |
+|---|---|---|---|
+| Covers | {total_covers:,} | {cover_shards} | n/a |
 {arm_lines}
+
+**The four digits in an arm name are not one quantity.** `hugo-0200` is 0.2
+bits per pixel; `juniward-0200` is 0.2 bits per non-zero AC coefficient;
+`steghide-0200` is 0.2 of the capacity steghide itself reports. Ranking arms
+on the number in the name compares three different things. Every sample's JSON
+record carries `rate_unit`, which is the authoritative answer per file.
+
+**Every JPEG arm is written at quality 95**, and the adaptive spatial arms are
+**simulated at the optimal embedding rate rather than by a real STC coder** -
+the `coding` field on each record says so. Both are ordinary practice and both
+change what a result means, so neither should be discovered after the fact.
 
 Each part ships its own checksum file, `SHA256SUMS-covers` and
 `SHA256SUMS-arms`, so verifying a download is one command:
@@ -173,10 +241,16 @@ the result.
 
 ## Licensing, in one paragraph
 
-Every file carries its own licence and the manifest is authoritative. The
-collection is published as **CC BY 4.0**, which is the strictest obligation
-present, not the loosest: complying with it satisfies every file here. Where
-the manifest records something looser for a given image, rely on that instead.
+Every file carries its own licence, and **each file's own `.json` member inside
+the shards is the authoritative record** of it. `ATTRIBUTION.csv` beside this
+file is an extract of those records for the covers that require a credit line,
+and is the one to read if you want the licences without downloading the
+shards. (This paragraph used to point at "the manifest", which does not ship as
+a standalone file; a reader who wanted to check a licence before committing to
+48 GB was sent to something they could not find.)
+The collection is published as **CC BY 4.0**, which is the strictest obligation
+present, not the loosest: complying with it satisfies every file here. Where a
+file's own record names something looser, rely on that instead.
 
 | Licence | Covers |
 |---|---|
@@ -207,19 +281,50 @@ Covers come from Wikimedia Commons under permissive licences, deduplicated by
 perceptual hash across sources and sessions, and capped per photographer and
 per camera body so no single prolific uploader dominates the sample. Rejected
 candidates are recorded with their reason rather than silently dropped.
+
+A caveat on that last sentence, kept because it was not true once. Cover
+SELECTION records its rejections. The arm BUILDERS did not: a failure during
+embedding was written to stderr and the loop continued, so 118 covers were
+missing from every spatial arm with nothing in the corpus saying so, and the
+build log that held the reason had been superseded. The images turned out to
+have been written without their manifest rows, they were rebuilt, and the
+arms are complete. The builders now record what they skip.
 """
 
 
 def citation(version: str, today: str, tier: str = "Core") -> str:
+    """The CFF record.
+
+    It carried no `url`, no `repository-code` and no `contact` until
+    2026-09-22. The README tells a reader that GitHub and Zenodo render this
+    file automatically, and rendered, it produced a citation with no way to
+    find the dataset or reach anybody about it. That matters MORE while the
+    DOI is deferred, not less: every citation minted in the interim is the one
+    without a resolvable identifier, and those references are permanent in the
+    literature.
+
+    The abstract now also says the covers are third-party photographs. Without
+    that, `creator: Daniel Iwugo` beside `license: CC-BY-4.0` reads to any
+    machine as a claim of authorship over 10,000 other people's work, which is
+    the exact over-claim this corpus exists to argue against.
+    """
     return f"""cff-version: 1.2.0
 message: "If you use this corpus, please cite it as below."
 title: "Pentimento {tier}: a licence-traceable steganalysis corpus"
+url: "https://archive.org/details/pentimento-{tier.lower()}-v1"
+repository-code: "https://github.com/elementmerc/pentimento"
+contact:
+  - family-names: Iwugo
+    given-names: Daniel
 abstract: >-
   {NOT_COMPARABLE}
   A steganalysis corpus of permissively licensed cover photographs with matched
   stego pairs across adaptive spatial schemes, JPEG schemes and real end-user
   tools, kept as separate labelled arms rather than a blend, with per-file
   licensing and per-file checksums.
+  The cover photographs are third-party works from Wikimedia Commons, each
+  retaining its own licence and credited individually in ATTRIBUTION.csv; the
+  corpus is the assembly, the labelling and the derived stego images.
 type: dataset
 version: "{version}"
 date-released: "{today}"
@@ -302,10 +407,26 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
             "@type": "cr:FileObject",
             "@id": "archive",
             "name": "archive",
-            "description": "The Internet Archive item holding every shard.",
+            # NO `sha256` HERE, and the omission is deliberate.
+            #
+            # This field held "https://github.com/mlcommons/croissant/issues/80"
+            # - the community workaround for Croissant requiring a checksum on
+            # a container FileObject that is not a file and has no checksum.
+            # The workaround is well known and it is still a false assertion
+            # in a record that HuggingFace mirrors and retains in git history.
+            # A consumer reading `sha256` got a URL, and it undercut the one
+            # claim this corpus rests on - that every file carries a real
+            # digest - at exactly the point a machine reads it.
+            #
+            # An absent field is honest and a validator warning is cheap. The
+            # per-shard digests, which are real, live in the FileSets below
+            # and in SHA256SUMS-covers / SHA256SUMS-arms.
+            "description": "The Internet Archive item holding every shard. "
+                           "This is a container, not a file, so it carries no "
+                           "checksum of its own; the shard digests are in "
+                           "SHA256SUMS-covers and SHA256SUMS-arms.",
             "contentUrl": ARCHIVE_ITEM.format(slug=slug),
             "encodingFormat": "text/html",
-            "sha256": "https://github.com/mlcommons/croissant/issues/80",
         },
         {
             "@type": "cr:FileSet",
@@ -351,6 +472,29 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
             "encodingFormat": "application/x-tar",
             "includes": f"pentimento-{slug}-*-[0-9][0-9][0-9][0-9][0-9].tar",
         })
+        # Split out for the same reason the covers are: the image and its
+        # record are two files sharing a basename, and a record set drawing on
+        # one FileSet cannot address both. The arms ship JPEG as well as PNG,
+        # because a JPEG arm's member keeps its real extension.
+        distribution.append({
+            "@type": "cr:FileSet",
+            "@id": "arm-images",
+            "name": "arm-images",
+            "description": "The sample images inside the arm shards.",
+            "containedIn": {"@id": "arm-shards"},
+            "encodingFormat": "image/png",
+            "includes": "*.png",
+        })
+        distribution.append({
+            "@type": "cr:FileSet",
+            "@id": "arm-records",
+            "name": "arm-records",
+            "description": "One record per sample, carrying its arm, its rate "
+                           "and unit, and the cover licence it inherits.",
+            "containedIn": {"@id": "arm-shards"},
+            "encodingFormat": "application/json",
+            "includes": "*.json",
+        })
 
     # The image and its record are two files that share a basename, so a reader
     # assembling a sample has to join them. Croissant will not infer that: a
@@ -362,6 +506,16 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
         "fileSet": {"@id": "cover-images"},
         "extract": {"fileProperty": "filename"},
         "transform": {"regex": "^(.*)\\.png$"},
+    }
+
+    # The same join for the arms. The regex has to strip either extension,
+    # because a JPEG arm's member ships as .jpg and a spatial one as .png;
+    # anchoring on .png alone would silently key every JPEG arm on a filename
+    # that still carries its suffix, and the join would match nothing.
+    ARM_KEY = {
+        "fileSet": {"@id": "arm-images"},
+        "extract": {"fileProperty": "filename"},
+        "transform": {"regex": "^(.*)\\.(?:png|jpg)$"},
     }
 
     def field(fid: str, name: str, description: str, data_type: str,
@@ -402,6 +556,70 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
                   "sc:URL", "cover-records", {"jsonPath": "$.descriptionurl"}),
         ],
     }]
+
+    # THE ARMS, which had no recordSet at all until 2026-09-22.
+    #
+    # `covers` was the only record set, so every automated consumer -
+    # HuggingFace's viewer, MLCommons tooling, anything reading the Croissant
+    # record - presented Pentimento as a 10,000 image dataset with a licence
+    # column. The 341,997 stego samples appeared only inside a FileSet's
+    # free-text description.
+    #
+    # `source_png` as a `references` join to `covers/key` is the load-bearing
+    # part. The central instruction of this corpus is split by cover, never by
+    # image, and without that reference a loader has no machine-readable way
+    # to know which samples share a photograph. The warning existed in prose
+    # only, which is to say it did not exist for the tools that need it.
+    if arms:
+        record_sets.append({
+            "@type": "cr:RecordSet",
+            "@id": "samples",
+            "name": "samples",
+            "description": f"One record per stego or clean sample. "
+                           f"{stego_total:,} stego samples across "
+                           f"{stego_count} arms and {clean_total:,} clean "
+                           f"across {clean_count}. Every sample descends from "
+                           f"one cover; partition on source_png, not on key.",
+            "field": [
+                dict(field("samples/key", "key",
+                           "The sample key: its position within its arm. It "
+                           "is NOT the cover key, and two arms use it for "
+                           "different photographs.",
+                           "sc:Text", "arm-images",
+                           {"fileProperty": "filename"}),
+                     source=dict(ARM_KEY)),
+                field("samples/image", "image", "The sample image.",
+                      "sc:ImageObject", "arm-images",
+                      {"fileProperty": "content"}),
+                field("samples/arm", "arm",
+                      "Which arm this sample belongs to, as the shard names "
+                      "it.", "sc:Text", "arm-records", {"jsonPath": "$.arm"}),
+                field("samples/rate", "rate",
+                      "The embedding rate, in the units given by rate_unit.",
+                      "sc:Float", "arm-records", {"jsonPath": "$.rate"}),
+                field("samples/rate_unit", "rate_unit",
+                      "What the rate MEANS. Bits per pixel and bits per "
+                      "non-zero AC coefficient are different quantities, so "
+                      "two arms at 0.2 are not comparable without this.",
+                      "sc:Text", "arm-records",
+                      {"jsonPath": "$.rate_unit"}),
+                field("samples/cover_licence", "cover_licence",
+                      "The credit line inherited from the cover this sample "
+                      "was derived from.",
+                      "sc:Text", "arm-records",
+                      {"jsonPath": "$.cover_licence.attribution"}),
+                {
+                    **field("samples/source_png", "source_png",
+                            "The cover this sample was derived from. JOIN ON "
+                            "THIS to split without leaking: a cover and every "
+                            "sample made from it must stay on the same side "
+                            "of any train/test boundary.",
+                            "sc:Text", "arm-records",
+                            {"jsonPath": "$.source_png"}),
+                    "references": {"field": {"@id": "covers/key"}},
+                },
+            ],
+        })
 
     return {
         "@context": CROISSANT_CONTEXT,
@@ -453,8 +671,10 @@ only in the embedded bits.
 stego images across {split_arms(arms)[1]} arms, plus {split_arms(arms)[2]:,}
 clean halves in {split_arms(arms)[3]} more.
 
-**Is any information missing?** Some covers carry no recorded author. Those
-cases say so in the `attribution` field rather than omitting it.
+**Is any information missing?** Not for attribution: every cover requiring a
+credit line carries a usable author. Covers whose author could not be
+recovered were removed and replaced during the build rather than shipped with
+a placeholder, so no `attribution` field reads "author not recorded".
 
 **Does it contain people?** Photographs from Wikimedia Commons may include
 people incidentally. No instance is labelled by, or selected for, any attribute
@@ -505,11 +725,45 @@ under CC BY 4.0 as the strictest obligation present in the corpus.
 
 **Who maintains it?** The author. Corrections and errata are published against
 the version they affect; versions are not silently replaced.
+
+**How do I report a problem, or ask for something to be removed?** Open an
+issue at <https://github.com/elementmerc/pentimento>. Requests from a
+photographer about their own work are acted on.
+
+**What can actually be withdrawn?** Not everything, and the honest answer
+differs per destination. A HuggingFace repository can be deleted and a Kaggle
+dataset removed. An Internet Archive item can be darkened on request, but its
+identifier stays taken. **A torrent, once seeded, cannot be recalled** - the
+Archive item is its web seed, so darkening the item removes the seed but not
+copies already in the swarm. This is said plainly because a promise of errata
+is worth what its mechanism is worth, and for the torrent the mechanism is
+persuasion.
 """
 
 
-def splits() -> str:
-    return """# Splitting this corpus without leaking
+def splits(rows: list[dict] | None = None) -> str:
+    """The split document, with its counts taken from the tier's own rows.
+
+    These were a hard-coded "8,032 covers against 1,968" until 2026-09-22, when
+    a panel counted the manifest and found 8,029 against 1,971. The literal had
+    been right when it was written and the corpus moved underneath it, which is
+    the same fault that shipped a wrong attribution figure to a public archive.
+
+    Worse than being wrong, it was wrong in EVERY tier: the same absolute
+    numbers shipped with Nano, whose real figures are 167 and 33, so a Nano
+    reader was told their 200 cover download held 8,032 training covers.
+
+    So the counts are derived, and when they cannot be, the sentence that would
+    have carried them is not written at all. A document that quietly drops a
+    figure is recoverable; one that states a confident wrong number is not.
+    """
+    if rows:
+        train = sum(1 for r in rows if r.get("split") == "train")
+        test = sum(1 for r in rows if r.get("split") == "test")
+        counts = f", {train:,} covers against {test:,},"
+    else:
+        counts = ""
+    return f"""# Splitting this corpus without leaking
 
 **Split by cover, never by image.** This is the one instruction in this corpus
 that will silently inflate your results if you ignore it.
@@ -547,8 +801,8 @@ arm they came from.
 
 ## The `split` field is a second, different partition
 
-Cover records also carry a fixed `split` of `train` or `test`, 8,032 covers
-against 1,968, and a `split_salt` naming the string those labels were derived
+Cover records also carry a fixed `split` of `train` or `test`{counts} and a
+`split_salt` naming the string those labels were derived
 under. It is partitioned by cover, so it does not leak either, but it is NOT the
 same partition as `fold()` above. Pick one and stay with it; a run that uses
 both puts the same photograph on both sides of the boundary.
@@ -567,9 +821,13 @@ boundary even though the arms are different, and the leak is the same leak.
 
 ## Reporting
 
-State the fold rule you used. Nine points of accuracy have been measured in the
-literature from the data split alone, same network, same algorithm, so a result
-without its split rule is not comparable to anything.
+State the fold rule you used. Results in the literature differ by several
+accuracy points on the choice of data split alone, same network and same
+algorithm, so a result without its split rule is not comparable to anything.
+
+This corpus publishes no detector results of its own, and the sentence above
+is a statement about the literature rather than a measurement made here. If
+you want a number to quote, measure it and say how.
 """
 
 
@@ -843,6 +1101,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"note: {args.arms_index} not found, writing covers-only metadata",
               file=sys.stderr)
 
+    # The tier's own cover rows, read BEFORE the documents are written because
+    # SPLITS.md now derives its counts from them rather than restating a
+    # literal. Scoping happens here for the same reason it always did for
+    # attribution: the manifest describes the whole corpus, and a smaller tier
+    # that quotes Core's numbers is making a false statement about what was
+    # downloaded.
+    tier_rows: list[dict] | None = None
+    if args.covers_manifest:
+        manifest = pathlib.Path(args.covers_manifest)
+        if not manifest.exists():
+            print(f"no covers manifest at {manifest}", file=sys.stderr)
+            return 1
+        tier_rows = [json.loads(line) for line in
+                     manifest.read_text(encoding="utf-8").splitlines()
+                     if line.strip()]
+        packed = cover_index.get("samples", len(tier_rows))
+        if packed < len(tier_rows):
+            try:
+                in_tier = tier_cover_names(manifest, packed)
+            except TierError as e:
+                print(f"cannot select the tier for attribution: {e}",
+                      file=sys.stderr)
+                return 1
+            tier_rows = [r for r in tier_rows if r.get("file") in in_tier]
+            print(f"  attribution scoped to {cover_index.get('tier', '?')}: "
+                  f"{len(tier_rows):,} covers")
+
     today = datetime.date.today().isoformat()
     written = {
         "README.md": readme(cover_index, licences, arms, args.version),
@@ -852,33 +1137,16 @@ def main(argv: list[str] | None = None) -> int:
             croissant(cover_index, licences, arms, args.version, today),
             indent=2, sort_keys=True) + "\n",
         "DATASHEET.md": datasheet(cover_index, licences, arms),
-        "SPLITS.md": splits(),
+        "SPLITS.md": splits(tier_rows),
         "load_pentimento.py": loader(),
     }
 
-    if args.covers_manifest:
-        manifest = pathlib.Path(args.covers_manifest)
-        if not manifest.exists():
-            print(f"no covers manifest at {manifest}", file=sys.stderr)
-            return 1
-        rows = [json.loads(line) for line in
-                manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
-        # The manifest covers the whole corpus, so a smaller tier has to be cut
-        # down to its own covers. Shipping Core's 5,429 credit lines with a
-        # 200 cover Nano would name photographers whose work is not in the
-        # download, which is a false statement about what was used.
-        packed = cover_index.get("samples", len(rows))
-        if packed < len(rows):
-            try:
-                in_tier = tier_cover_names(manifest, packed)
-            except TierError as e:
-                print(f"cannot select the tier for attribution: {e}", file=sys.stderr)
-                return 1
-            rows = [r for r in rows if r.get("file") in in_tier]
-            print(f"  attribution scoped to {cover_index.get('tier', '?')}: "
-                  f"{len(rows):,} covers")
-        written["ATTRIBUTION.md"] = attribution(rows)
-        written["ATTRIBUTION.csv"] = attribution_csv(rows)
+    if tier_rows is not None:
+        # Scoped above, where SPLITS.md also needed it. Shipping Core's credit
+        # lines with a 200 cover Nano would name photographers whose work is
+        # not in the download, which is a false statement about what was used.
+        written["ATTRIBUTION.md"] = attribution(tier_rows)
+        written["ATTRIBUTION.csv"] = attribution_csv(tier_rows)
     else:
         print("note: no --covers-manifest, so no attribution list is written. "
               "54% of these covers require one.", file=sys.stderr)

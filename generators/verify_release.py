@@ -315,6 +315,91 @@ def check_packed(release: pathlib.Path, rows: list[dict],
                               f"match the manifest at their position")
 
 
+def check_attribution(release: pathlib.Path, rows: list[dict],
+                      report: Report) -> None:
+    """Does the shipped credit list actually credit everybody it must?
+
+    Every numeric claim in this release has a gate behind it. The one artefact
+    that DISCHARGES the licence obligation had none: `check_licences` validates
+    the manifest's rows, and the figure check deliberately skips
+    `ATTRIBUTION.*` as data rather than claims. Both are right about their own
+    scope, and between them a truncated write or a tier packed before a
+    backfill produces a credit list short of rows while every check passes.
+
+    The people who lose by that are photographers, and they never find out.
+
+    So: for each packed cover tier, the credit list must exist, and must carry
+    exactly one row per attribution-requiring cover IN THAT TIER. The tier
+    scoping matters as much as the count. Shipping Core's 5,453 credit lines
+    with a 200 cover Nano names photographers whose work is not in the
+    download, which is its own false statement.
+    """
+    import csv
+    import io
+
+    indexes = sorted(p for p in release.rglob("pentimento-*-index.json")
+                     if "arms" not in p.name)
+    if not indexes:
+        report.fail("attribution", f"no packed cover tier under {release}")
+        return
+
+    by_order = sorted(rows, key=lambda r: r["tier_order"])
+    missing, wrong, checked, tiers = [], [], 0, []
+    for index_path in indexes:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        tier = index.get("tier", index_path.parent.name)
+        tiers.append(tier)
+        packed = index.get("samples", 0)
+        # A tier is a PREFIX of tier_order, which `check_covers` proves dense,
+        # so the tier's own covers are the first n of that ordering.
+        in_tier = by_order[:packed]
+        want = {r["file"] for r in in_tier if r.get("attribution_required")}
+
+        csv_path = index_path.parent / "ATTRIBUTION.csv"
+        md_path = index_path.parent / "ATTRIBUTION.md"
+        for p in (csv_path, md_path):
+            if not p.is_file():
+                missing.append(f"{tier}: no {p.name}")
+        if not csv_path.is_file():
+            continue
+
+        seen: list[str] = []
+        with io.StringIO(csv_path.read_text(encoding="utf-8")) as fh:
+            for row in csv.DictReader(fh):
+                name = (row.get("file") or row.get("cover") or "").strip()
+                if name:
+                    seen.append(name)
+        counts = collections.Counter(seen)
+        absent = sorted(want - set(counts))
+        extra = sorted(set(counts) - want)
+        repeated = sorted(n for n, c in counts.items() if c > 1)
+        checked += len(want)
+
+        if absent:
+            wrong.append(f"{tier}: {len(absent):,} cover(s) require "
+                         f"attribution and are not credited, e.g. {absent[:3]}")
+        if extra:
+            wrong.append(f"{tier}: {len(extra):,} credited cover(s) are not in "
+                         f"this tier or do not require it, e.g. {extra[:3]}")
+        if repeated:
+            wrong.append(f"{tier}: {len(repeated):,} cover(s) credited more "
+                         f"than once, e.g. {repeated[:3]}")
+
+    if missing:
+        report.fail("attribution", f"{len(missing)} credit list(s) are not "
+                                   f"present, e.g. {missing[:3]}")
+    if wrong:
+        for message in wrong[:4]:
+            report.fail("attribution", message)
+    if missing or wrong:
+        return
+    if nothing_checked("attribution", checked, report, "credit lines"):
+        return
+    report.note("attribution",
+                f"{checked:,} required credit line(s) across {len(tiers)} "
+                f"tier(s), each present exactly once")
+
+
 def arm_truth(arm_root: pathlib.Path) -> dict[str, dict[str, str]]:
     """What each arm holds TODAY, grouped exactly as the packer groups it.
 
@@ -512,6 +597,7 @@ def check_pairs(arm_root: pathlib.Path, sample_per_arm: int,
         return
 
     arms, missing, mismatched, checked = set(), [], [], 0
+    unknown_format: list[str] = []
     for path in manifests:
         base = path.parent
         by_arm: dict[str, list[dict]] = collections.defaultdict(list)
@@ -524,14 +610,28 @@ def check_pairs(arm_root: pathlib.Path, sample_per_arm: int,
                 if not (clean.is_file() and stego.is_file()):
                     missing.append(f"{arm}/{row['stego']}")
                     continue
+                clean_shape = container_of(clean.read_bytes())
+                stego_shape = container_of(stego.read_bytes())
+                # A format `container_of` does not understand returns None.
+                # Counting that as a match would add it to `checked` and
+                # report it clean, which is a check that examined nothing
+                # saying everything is fine.
+                if clean_shape is None or stego_shape is None:
+                    unknown_format.append(f"{arm}/{row['stego']}")
+                    continue
                 checked += 1
-                if container_of(clean.read_bytes()) != container_of(
-                        stego.read_bytes()):
+                if clean_shape != stego_shape:
                     mismatched.append(f"{arm}/{row['stego']}")
 
     if missing:
         report.fail("pairs", f"{len(missing):,} pair(s) have a half that is not "
                              f"on disk, e.g. {missing[:3]}")
+    if unknown_format:
+        report.fail("pairs",
+                    f"{len(unknown_format):,} pair(s) are in a format the "
+                    f"container comparison does not understand, e.g. "
+                    f"{unknown_format[:3]}. They were NOT examined, and a pair "
+                    f"nothing examined must not ship as a verified one")
     if mismatched:
         report.fail("pairs",
                     f"{len(mismatched):,} pair(s) differ in the CONTAINER as "
@@ -539,7 +639,7 @@ def check_pairs(arm_root: pathlib.Path, sample_per_arm: int,
                     f"reads that difference instead of the payload")
     if nothing_checked("pairs", checked, report, "pairs"):
         return
-    if not missing and not mismatched:
+    if not missing and not mismatched and not unknown_format:
         report.note("pairs", f"{checked:,} pairs across {len(arms)} arms, "
                              f"containers identical")
 
@@ -717,9 +817,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.release:
         check_packed(pathlib.Path(args.release), rows,
                      10 ** 9 if args.full else args.sample_per_arm, report)
+        check_attribution(pathlib.Path(args.release), rows, report)
     else:
         report.skip("packed", "no --release given, so the packed archives were "
                               "never opened and a stale pack would not show")
+        report.skip("attribution",
+                    "no --release given, so the shipped credit lists were "
+                    "never compared with the covers that require one")
     if args.jpeg_pool:
         check_pool(pathlib.Path(args.jpeg_pool), args.expect, report)
     else:
@@ -754,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
                                "compared with the corpus it describes")
 
     order = ["covers", "licences", "digests", "pool", "pairs", "stale",
-             "provenance", "packed", "packed-arms", "figures"]
+             "provenance", "packed", "packed-arms", "attribution", "figures"]
     print()
     for check in order:
         if check in report.failures:

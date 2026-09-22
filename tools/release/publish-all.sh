@@ -29,7 +29,14 @@
 set -euo pipefail
 
 RELEASE="${RELEASE:-$HOME/pentimento/release}"
-HF_REPO="${HF_REPO:-the-malware-files/pentimento-core-v1}"
+# NO -v1 on HuggingFace. An Internet Archive item is close to immutable, so its
+# identifier carries the version and IA_ITEM below is right to. HuggingFace
+# versions natively through git revisions, so a v1.1 corpus under a repo named
+# -v1 needs either a wrong name or a second repo, which splits stars, downloads
+# and every inbound link. Naming it bare also stops `pentimento-core` being
+# foreclosed under this org the moment the -v1 repo is created. Tag the release
+# v1.0.0 in the repo instead.
+HF_REPO="${HF_REPO:-the-malware-files/pentimento-core}"
 IA_ITEM="${IA_ITEM:-pentimento-core-v1}"
 STATE="${STATE:-$RELEASE/.upload}"
 BUDGET="$STATE/budget"

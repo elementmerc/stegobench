@@ -85,6 +85,36 @@ class DeriveTests(Fixture):
             derive(self.release, self.covers)
         self.assertIn("no longer agree", str(cm.exception))
 
+    def test_a_third_stego_arm_size_refuses_rather_than_passing(self):
+        """The defect that shipped, as a test.
+
+        The docs say outguess is "the one short arm". In the released corpus
+        twenty-one arms - every spatial adaptive one, plus clean-grey - sat at
+        9,882 against everything else's 10,000, so the sentence was wrong and
+        no per-arm count was. A reader comparing `wow-0200` with
+        `juniward-0200` had 118 covers on one side and not the other.
+
+        Nothing could have caught it: every number in the index was correct,
+        and the claim was about the SHAPE of the set rather than any one
+        value.
+        """
+        p = self.release / "core-arms" / "pentimento-core-arms-index.json"
+        d = json.loads(p.read_text())
+        # wow-0200 drops below the other full arms: a third stego size.
+        d["arms"][0]["samples"] = 98
+        p.write_text(json.dumps(d))
+        with self.assertRaises(FigureError) as cm:
+            derive(self.release, self.covers)
+        self.assertIn("3 different sample counts", str(cm.exception))
+
+    def test_a_clean_arm_of_its_own_size_is_not_an_error(self):
+        """There is one clean arm per distinct clean image set rather than per
+        rate, so its count answers a different question and is allowed to
+        differ. The fixture's clean-grey is already a third size overall; only
+        the STEGO arms are held to two."""
+        figures = derive(self.release, self.covers)
+        self.assertEqual(figures["clean arms"], 1)
+
 
 class CheckTests(Fixture):
     def test_docs_that_match_pass(self):

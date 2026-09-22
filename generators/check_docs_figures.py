@@ -36,6 +36,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import pathlib
 import re
@@ -74,9 +75,19 @@ def is_clean(arm: str) -> bool:
     return arm.startswith("clean")
 
 
-def derive(release: pathlib.Path, covers: pathlib.Path) -> dict[str, float]:
-    """Every figure the docs quote, taken from what was actually packed."""
-    ai = arms_index(release, "core")
+def derive(release: pathlib.Path, covers: pathlib.Path,
+           tier: str = "core") -> dict[str, float]:
+    """Every figure the docs quote, taken from what was actually packed.
+
+    `tier` matters more than it looks. This hard-wired "core" until
+    2026-09-22, which meant that run against a whole release directory the
+    check FAILED on correct Lite and Nano prose (54.8% and 56.5% are the right
+    attribution shares for those tiers) while never checking Nano's own 200
+    covers at all, because they fall outside the magnitude band around Core's
+    10,000. A checker that cries wolf on correct prose is one somebody
+    switches off, and it was also silently covering less than it appeared to.
+    """
+    ai = arms_index(release, tier)
     arms = ai["arms"]
     stego = [a for a in arms if not is_clean(a["arm"])]
     clean = [a for a in arms if is_clean(a["arm"])]
@@ -93,18 +104,65 @@ def derive(release: pathlib.Path, covers: pathlib.Path) -> dict[str, float]:
             f"({sorted(set(outguess.values()))}), so the docs cannot quote one "
             f"number for them. Reword the page rather than picking one")
 
+    # HOW MANY DIFFERENT ARM SIZES EXIST, which is the claim the docs make
+    # when they say outguess is "the one short arm".
+    #
+    # It was not true. Twenty-one arms - every spatial adaptive arm, plus
+    # clean-grey - sat at 9,882 while the page said everything but outguess
+    # held 10,000. A reader doing a paired comparison across two arms had 118
+    # covers on one side and not the other, and no per-arm count was wrong, so
+    # nothing anywhere contradicted the sentence.
+    #
+    # The rule matches the one above it: where the corpus stops fitting the
+    # sentence, refuse and make somebody reword it, rather than picking a
+    # number and carrying on. Two classes is the documented shape - the full
+    # arms and the short outguess ones.
+    # STEGO arms only. A clean arm is allowed to be a different size: there is
+    # one clean arm per distinct clean image set, not per rate, so its count
+    # answers a different question.
+    classes = sorted({a["samples"] for a in stego})
+    if len(classes) > 2:
+        raise FigureError(
+            f"the stego arms hold {len(classes)} different sample counts "
+            f"({classes}), and the docs describe only two: the full arms and "
+            f"the short outguess ones. Either the build is incomplete or the "
+            f"page needs rewriting; do not publish a 'one short arm' sentence "
+            f"over {len(classes)} sizes")
+
     rows = load_rows(covers / "manifest.jsonl")
+    packed_covers = covers_index(release, tier)["samples"]
+    # The manifest describes the whole corpus; a smaller tier is a PREFIX of
+    # tier_order, so its own rows are the first n by that ordering. Without
+    # this, every per-cover figure below describes Core no matter which tier
+    # was asked for.
+    if packed_covers < len(rows):
+        rows = sorted(rows, key=lambda r: r["tier_order"])[:packed_covers]
     attributed = sum(1 for r in rows if r.get("attribution_required"))
+    train = sum(1 for r in rows if r.get("split") == "train")
+    test = sum(1 for r in rows if r.get("split") == "test")
 
     figures = {
         "stego pairs": sum(a["samples"] for a in stego),
         "stego arms": len(stego),
         "clean arms": len(clean),
-        "covers": covers_index(release, "core")["samples"],
+        "covers": packed_covers,
+        # Hard-coded in the shipped SPLITS.md until a panel counted the
+        # manifest and found 8,029/1,971 where it claimed 8,032/1,968 - and
+        # claimed it in Nano too, whose real figures are 167 and 33.
+        "train covers": train,
+        "test covers": test,
         "samples per outguess arm": next(iter(outguess.values())),
         "steghide and outguess samples": sum(outguess.values()) + sum(steghide.values()),
         "tool arms": len(outguess) + len(steghide),
         "covers requiring attribution": attributed,
+        # Per-licence counts. The docs carried a breakdown table that was
+        # stale in six of its seven rows, on a page about licensing, in a
+        # corpus whose argument is that licensing must be traceable. The
+        # table's own summary line underneath it was correct, so the page
+        # contradicted itself and nothing noticed.
+        **{f"covers under {licence}": n
+           for licence, n in collections.Counter(
+               r.get("licence") for r in rows).items() if licence},
         # One decimal place, matching `publish_tier.py` exactly. 54.53 rounds
         # to 55 as a whole number and 54.5 to one place, so the docs and the
         # shipped README would disagree on sight while both being right.
@@ -140,12 +198,20 @@ COVERED_ELSEWHERE = {"clean arms"}
 
 #: A number only counts as a candidate for a figure when its own LINE mentions
 #: what the figure is about. Without this the check reported "50% of capacity",
-#: a payload rate, as a stale attribution percentage, and a train/test split of
-#: 8,032 covers as a stale outguess count. Both were the right kind of number in
-#: the wrong place, and a check that cries wolf is one somebody switches off,
-#: which leaves the docs unchecked by a different route.
+#: a payload rate, as a stale attribution percentage, and the train/test split
+#: as a stale outguess count. Both were the right kind of number in the wrong
+#: place, and a check that cries wolf is one somebody switches off, which
+#: leaves the docs unchecked by a different route.
+#:
+#: The split was formerly named here as a false positive to suppress. It is now
+#: a derived figure with a context of its own, because the number it was being
+#: excused for carrying turned out to be WRONG: 8,032/1,968 against a real
+#: 8,029/1,971. Suppressing a figure and checking it are one decision apart,
+#: and the suppression was protecting the defect.
 CONTEXT = {
     "stego pairs": ("stego pair", "matched stego"),
+    "train covers": ("train", "split"),
+    "test covers": ("test", "split"),
     "samples per outguess arm": ("outguess",),
     "steghide and outguess samples": ("steghide", "outguess"),
     "covers requiring attribution": ("attribution", "credit line", "require"),
@@ -156,6 +222,14 @@ CONTEXT = {
 
 def in_context(text: str, name: str) -> str:
     """Only the lines that are talking about this figure."""
+    # A per-licence count is only ever claimed on a line naming that licence,
+    # and the licences share magnitudes: CC0's 2,625 and CC BY 2.0's 2,624 sit
+    # inside each other's +/-10% band, so without this every row of the
+    # breakdown table reads as a stale value for every other row.
+    if name.startswith("covers under "):
+        licence = name[len("covers under "):].lower()
+        return "\n".join(line for line in text.splitlines()
+                         if licence in line.lower())
     words = CONTEXT.get(name)
     if not words:
         return text
@@ -262,10 +336,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="the packed release directory")
     ap.add_argument("--covers", required=True,
                     help="the cover directory holding manifest.jsonl")
+    ap.add_argument("--tier", default="core",
+                    help="which packed tier the docs describe (core, lite, "
+                         "nano). Lite and Nano have their own correct "
+                         "attribution shares and cover counts, so checking "
+                         "their prose against Core's reports correct text as "
+                         "wrong")
     args = ap.parse_args(argv)
 
     try:
-        figures = derive(pathlib.Path(args.release), pathlib.Path(args.covers))
+        figures = derive(pathlib.Path(args.release), pathlib.Path(args.covers),
+                         args.tier)
         problems, notes = check(pathlib.Path(args.docs), figures)
     except FigureError as e:
         print(f"cannot check: {e}", file=sys.stderr)
@@ -274,8 +355,15 @@ def main(argv: list[str] | None = None) -> int:
     for n in notes:
         print(f"  ok    {n}" if "as shipped" in n else f"  ----  {n}")
     if not problems:
-        print(f"\n{len(figures)} figure(s) derived from the packed index; "
-              f"the docs agree with all of them.")
+        # Derived, compared and never-stated are three different numbers, and
+        # printing only the first reported nine figures as agreed when four
+        # had been compared and three were never mentioned. That is the same
+        # over-claim this file's docstring argues against, one level up.
+        never = sum(1 for n in notes if "never state" in n)
+        compared = len(notes) - never
+        print(f"\n{len(figures)} figure(s) derived from the packed index, "
+              f"{compared} compared with the docs, {never} never stated there. "
+              f"Every figure that was compared agrees.")
         return 0
     print()
     for p in problems:

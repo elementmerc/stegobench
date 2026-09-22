@@ -117,12 +117,27 @@ def strictest_obligation(licences) -> tuple[str, list[str]]:
     return strictest, sorted(uncovered)
 COLLECTION_LICENCE_URL = "https://creativecommons.org/licenses/by/4.0/"
 
-#: Kaggle accepts an enumerated licence, and none of its values means "mixed".
-#: "other" plus an explicit description is the honest answer; picking CC0-1.0
-#: because it is on the list would be exactly the drift this file prevents.
-KAGGLE_LICENCE = "other"
+#: Kaggle accepts an enumerated licence and none of its values means "mixed",
+#: so this was "other" plus an explicit description, on the reasoning that
+#: picking a value off the list because it is there would be drift.
+#:
+#: Changed on 2026-09-22. The premise was right about CC0-1.0 and wrong about
+#: this field: the COLLECTION is released under CC BY 4.0, which is the
+#: strictest obligation present and is what `ia-metadata.json` already sets as
+#: its `licenseurl`, what `croissant.json` declares and what `CITATION.cff`
+#: carries. "other" was therefore not the honest answer, it was a different
+#: answer from the one every other destination gives, on the one platform
+#: where the licence field is the primary machine-readable signal and the only
+#: thing a filter reads. Per-file licences remain in the manifest, which is
+#: where "mixed" is actually expressed.
+KAGGLE_LICENCE = "CC-BY-4.0"
 
-IA_COLLECTION = "opensource_media"
+#: `opensource_media` is the Internet Archive's audio/video/image bucket, and
+#: these items are `mediatype: data`. Filed there, a dataset is reachable by
+#: direct link but sits outside the collections a researcher browsing data
+#: would look in. Collection membership is an admin-side change on IA and
+#: awkward to correct once an item exists.
+IA_COLLECTION = "datasets"
 
 
 def bencode(value) -> bytes:
@@ -222,7 +237,20 @@ def licence_summary(manifest: pathlib.Path, count: int | None = None) -> dict:
         # The digest rather than a timestamp, for the same reason arm rows
         # carry `source_sha256`: a copy, a restore or a clock skew all forge
         # an mtime, and none of them changes the bytes.
+        # THE WHOLE FILE'S DIGEST, and `rows_used_from_it` is how many of its
+        # rows this summary actually describes. These were
+        # `source_manifest_sha256` beside `source_manifest_rows`, and in Nano
+        # and Lite the pair contradicted itself: the digest of the full
+        # 10,000 row manifest sitting next to a row count of 200. Somebody
+        # verifying provenance fetched the manifest with that digest, counted
+        # 10,000 rows, and found it disagreeing with the file that named it.
+        # The field was added to make staleness visible, so it above all has
+        # to say precisely what it means.
         "source_manifest_sha256": digest_of(manifest),
+        "rows_used_from_it": total,
+        # Kept under its old name too, because `release_metadata` and the
+        # figure check both read it and a release is not the moment to
+        # rename a field two tools depend on.
         "source_manifest_rows": total,
         "total": total,
         "licences": dict(counts.most_common()),
@@ -389,9 +417,31 @@ def cmd_prepare(args) -> int:
     }
     (packed / "ia-metadata.json").write_text(json.dumps(ia_meta, indent=2) + "\n", encoding="utf-8")
 
+    # REFUSED, not defaulted. This emitted "USERNAME/pentimento-core-v1" when
+    # no owner was given, which is a placeholder that renders exactly like a
+    # finished file. Kaggle is the one destination uploaded by hand, so the
+    # placeholder would be discovered at the moment of publication and
+    # hand-edited under time pressure - and it carries the licence
+    # declaration. A file that refuses to be written is cheaper than a file
+    # that looks ready and is not.
+    if not args.kaggle_user:
+        raise SystemExit(
+            "--kaggle-user is required: dataset-metadata.json carries the "
+            "Kaggle dataset slug, and Kaggle slugs cannot be renamed after "
+            "the dataset is created. Pass the owner rather than shipping a "
+            "placeholder that looks finished.")
+
+    # NO -v1 HERE, unlike the Internet Archive. An IA item is close to
+    # immutable, so its identifier carries the version and that is correct.
+    # Kaggle and HuggingFace both version natively, so putting v1 in the slug
+    # means a v1.1 corpus needs either a wrongly named dataset or a second
+    # one, splitting downloads and inbound links, and it forecloses the bare
+    # name for good. Costs nothing today; impossible to change later.
+    kaggle_slug = f"pentimento-{tier.lower()}"
+
     kaggle_meta = {
         "title": f"Pentimento {tier} steganalysis covers",
-        "id": f"{args.kaggle_user or 'USERNAME'}/{identifier}",
+        "id": f"{args.kaggle_user}/{kaggle_slug}",
         "licenses": [{"name": KAGGLE_LICENCE}],
         "subtitle": f"{summary['total']:,} permissively licensed 512x512 covers",
         "description": blurb,
@@ -434,15 +484,56 @@ def cmd_torrent(args) -> int:
             file=sys.stderr)
         return 1
 
+    # THE LICENCE TRAVELS WITH THE PIXELS.
+    #
+    # This was `sorted(packed.glob("*.tar"))` alone, so the torrent carried
+    # 341,997 derivatives of 5,453 attribution-requiring photographs and no
+    # statement anywhere in the payload that the collection is CC BY 4.0, no
+    # credit list, and nothing pointing at one. The Academic Torrents copy is
+    # the one most likely to be mirrored and least likely to be re-fetched
+    # from source, and it is the one destination from which nothing can be
+    # recalled.
+    #
+    # The per-sample JSON sidecars do carry the credit line, which saves it in
+    # practice; but a reader has no way to know that without being told, and
+    # "the licence is in there somewhere" is not how attribution works.
+    CREDIT_FILES = ("README.md", "LICENCES.md", "ATTRIBUTION.md",
+                    "ATTRIBUTION.csv", "SHA256SUMS-arms", "SHA256SUMS-covers")
+
+    # An arms directory holds only shards and its index, because
+    # `release_metadata` runs against a COVER tier and needs a cover index.
+    # So the credit files are mirrored from the sibling cover tier, which is
+    # where they were written and whose covers these samples descend from.
+    # `core-arms` takes them from `core`.
+    if packed.name.endswith("-arms"):
+        sibling = packed.parent / packed.name[:-len("-arms")]
+        for name in CREDIT_FILES:
+            src, dst = sibling / name, packed / name
+            if src.is_file() and not dst.is_file():
+                dst.write_bytes(src.read_bytes())
+                print(f"  mirrored {name} from {sibling.name}")
+
+    extras = [p for p in (packed / n for n in CREDIT_FILES) if p.is_file()]
+    if not any(p.name in ("LICENCES.md", "ATTRIBUTION.csv") for p in extras):
+        print(f"refusing to build a torrent from {packed}: it carries no "
+              f"LICENCES.md and no ATTRIBUTION.csv, so the payload would "
+              f"redistribute third-party photographs with no licence "
+              f"statement and no credit list. Run `release_metadata` against "
+              f"the cover tier first.", file=sys.stderr)
+        return 1
+
     shards = sorted(packed.glob("*.tar"))
     if not shards:
         print(f"no shards under {packed}", file=sys.stderr)
         return 1
 
-    blob = make_torrent(shards, identifier, args.tracker, args.web_seed)
+    blob = make_torrent(shards + extras, identifier, args.tracker,
+                        args.web_seed)
     out = packed / f"{identifier}.torrent"
     out.write_bytes(blob)
-    print(f"{out}  {len(blob):,} bytes over {len(shards)} shard(s)")
+    print(f"{out}  {len(blob):,} bytes over {len(shards)} shard(s) "
+          f"plus {len(extras)} licence and credit file(s): "
+          f"{', '.join(p.name for p in extras)}")
     print(f"web seeds: {args.web_seed or 'NONE'}")
     print("\nAcademic Torrents has no upload API. Upload this file at\n"
           "  https://academictorrents.com/upload.php\n"

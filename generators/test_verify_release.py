@@ -25,7 +25,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import verify_release as vr  # noqa: E402
 from verify_release import (  # noqa: E402
-    Report, check_covers, check_licences, check_packed, check_packed_arms,
+    Report, check_attribution, check_covers, check_licences, check_packed,
+    check_packed_arms,
     check_pool,
 )
 
@@ -180,6 +181,74 @@ class PackedTierTests(unittest.TestCase):
         r = Report()
         check_packed(self.release.parent / "empty", self.rows, 10, r)
         self.assertIn("packed", r.failures)
+
+
+class AttributionCheckTests(unittest.TestCase):
+    """The credit list is the artefact that discharges the licence.
+
+    Everything numeric in this release has a gate behind it. This one had
+    none: `check_licences` validates the manifest's rows and the figure check
+    skips `ATTRIBUTION.*` as data rather than claims. Both are right about
+    their own scope, and between them a short credit list passed everything.
+    The people who lose by that are photographers, and they never find out.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.release = pathlib.Path(self.tmp.name) / "core"
+        self.release.mkdir(parents=True)
+        # Five covers, three of which require a credit line.
+        self.rows = [cover(n, attribution_required=(n % 2 == 0))
+                     for n in range(5)]
+        (self.release / "pentimento-core-index.json").write_text(json.dumps({
+            "tier": "Core", "samples": 5, "shards": []}), encoding="utf-8")
+        self.write([r["file"] for r in self.rows if r["attribution_required"]])
+
+    def write(self, files):
+        body = "file,licence,artist,attribution\n" + "".join(
+            f"{f},CC BY 4.0,A Photographer,\"credit for {f}\"\n" for f in files)
+        (self.release / "ATTRIBUTION.csv").write_text(body, encoding="utf-8")
+        (self.release / "ATTRIBUTION.md").write_text(
+            "# Attribution\n" + "".join(f"- {f}\n" for f in files),
+            encoding="utf-8")
+
+    def check(self) -> Report:
+        r = Report()
+        check_attribution(self.release.parent, self.rows, r)
+        return r
+
+    def test_a_complete_credit_list_passes(self):
+        r = self.check()
+        self.assertTrue(r.ok, r.failures)
+        self.assertIn("attribution", r.notes)
+
+    def test_a_photographer_left_out_is_caught(self):
+        """The failure this exists for: a truncated write, or a tier packed
+        before a backfill, and one cover's credit line simply is not there."""
+        self.write(["00000.png", "00002.png"])  # 00004.png dropped
+        r = self.check()
+        self.assertTrue(any("not credited" in m
+                            for m in r.failures["attribution"]), r.failures)
+
+    def test_a_credit_list_from_the_wrong_tier_is_caught(self):
+        """Shipping Core's list with Nano credits photographers whose work is
+        not in the download, which is its own false statement."""
+        self.write(["00000.png", "00002.png", "00004.png", "09999.png"])
+        r = self.check()
+        self.assertTrue(any("not in this tier" in m
+                            for m in r.failures["attribution"]), r.failures)
+
+    def test_a_duplicated_credit_is_caught(self):
+        self.write(["00000.png", "00002.png", "00004.png", "00002.png"])
+        r = self.check()
+        self.assertTrue(any("more than once" in m
+                            for m in r.failures["attribution"]), r.failures)
+
+    def test_a_missing_credit_file_is_caught_rather_than_skipped(self):
+        (self.release / "ATTRIBUTION.csv").unlink()
+        r = self.check()
+        self.assertIn("attribution", r.failures)
 
 
 class PackedArmTests(unittest.TestCase):
