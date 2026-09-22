@@ -26,6 +26,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import release_metadata  # noqa: E402
+import release_metadata as rm  # noqa: E402
 
 
 def row(file: str, *, required: bool = True, licence: str = "CC BY 4.0", **kw) -> dict:
@@ -297,6 +298,14 @@ class EndToEndTests(unittest.TestCase):
         self.manifest.write_text(
             json.dumps(row("00000.png")) + "\n"
             + json.dumps(row("00001.png", required=False, licence="CC0")) + "\n", encoding="utf-8")
+        self.stamp_summary()
+
+    def stamp_summary(self, digest: str | None = None) -> None:
+        """Record which manifest the summary describes, as publish_tier does."""
+        p = self.rel / "licence-summary.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        d["source_manifest_sha256"] = digest or rm.digest_of(self.manifest)
+        p.write_text(json.dumps(d), encoding="utf-8")
 
     def run_main(self, *extra: str) -> int:
         return release_metadata.main([
@@ -353,6 +362,32 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("# Pentimento Nano", (self.rel / "README.md").read_text(encoding="utf-8"))
         self.assertIn("Pentimento Nano", (self.rel / "CITATION.cff").read_text(encoding="utf-8"))
 
+    def test_a_summary_describing_another_manifest_is_refused(self):
+        """The fault this closes, 2026-09-22.
+
+        `publish_tier prepare` writes the summary and this reads it. The chain
+        ran the second without the first, so prose generated after a cover
+        backfill carried figures computed before it, and the shipped README
+        said 5,429 covers require attribution when 5,453 do. Nothing
+        downstream could tell: `verify_release` reads the manifest, never the
+        sentences derived from it.
+        """
+        self.stamp_summary(digest="b" * 64)
+        self.assertEqual(self.run_main("--covers-manifest", str(self.manifest)), 1)
+
+    def test_an_unstamped_summary_is_refused_rather_than_trusted(self):
+        """A summary written before the stamp existed cannot be shown to be
+        current, and "cannot be shown" must not read as "is"."""
+        p = self.rel / "licence-summary.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        d.pop("source_manifest_sha256", None)
+        p.write_text(json.dumps(d), encoding="utf-8")
+        self.assertEqual(self.run_main("--covers-manifest", str(self.manifest)), 1)
+
+    def test_a_matching_summary_is_accepted(self):
+        """The guard must not refuse the correct case, or it gets removed."""
+        self.assertEqual(self.run_main("--covers-manifest", str(self.manifest)), 0)
+
     def test_a_small_tier_credits_only_its_own_photographers(self):
         """Nano must not ship Core's credit list.
 
@@ -362,6 +397,7 @@ class EndToEndTests(unittest.TestCase):
         """
         rows = [dict(row(f"{i:05d}.png"), tier_order=i) for i in range(4)]
         self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        self.stamp_summary()          # the manifest changed; the summary describes the new one
         for path in self.rel.glob("pentimento-*-index.json"):
             path.unlink()
         (self.rel / "pentimento-nano-index.json").write_text(json.dumps({

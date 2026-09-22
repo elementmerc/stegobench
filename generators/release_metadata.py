@@ -61,6 +61,15 @@ NOT_COMPARABLE = (
 )
 
 
+def digest_of(path: pathlib.Path) -> str:
+    """The sha256 of a file, in blocks, matching `publish_tier.digest_of`."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def load(path: pathlib.Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -791,6 +800,43 @@ def main(argv: list[str] | None = None) -> int:
 
     cover_index = load(cover_index_path)
     licences = load(licences_path)
+
+    # THE SUMMARY HAS TO DESCRIBE THE MANIFEST THIS RUN WAS GIVEN.
+    #
+    # Every licence figure below is rendered from `licences`, not recomputed
+    # here, so a stale summary produces a README that is wrong in a way no
+    # later check reads: `verify_release` examines the manifest, never the
+    # prose derived from it. On 2026-09-22 that shipped a README saying 5,429
+    # covers require attribution when 5,453 do, because this step ran without
+    # `publish_tier prepare` and silently read a summary three days and one
+    # cover backfill old.
+    #
+    # Compared by content rather than by mtime: a copy, a restore or a clock
+    # skew all forge a timestamp and none of them changes the bytes.
+    if args.covers_manifest:
+        manifest_path = pathlib.Path(args.covers_manifest)
+        if not manifest_path.is_file():
+            print(f"no cover manifest at {manifest_path}", file=sys.stderr)
+            return 1
+        stamped = licences.get("source_manifest_sha256")
+        if not stamped:
+            print(f"{licences_path.name} does not say which manifest it was "
+                  f"computed from, so it cannot be shown to be current. It "
+                  f"predates the stamp; re-run `publish_tier.py prepare` to "
+                  f"write one.", file=sys.stderr)
+            return 1
+        actual = digest_of(manifest_path)
+        if stamped != actual:
+            print(f"{licences_path.name} was computed from a different cover "
+                  f"manifest than the one given here.\n"
+                  f"  summary describes : {stamped[:16]}...\n"
+                  f"  manifest given    : {actual[:16]}...\n"
+                  f"Every licence figure in the README and LICENCES.md comes "
+                  f"from that summary, so writing them now would publish "
+                  f"numbers for a corpus that no longer exists. Re-run "
+                  f"`publish_tier.py prepare` against this manifest first.",
+                  file=sys.stderr)
+            return 1
     arms = load(pathlib.Path(args.arms_index)) if args.arms_index and \
         pathlib.Path(args.arms_index).exists() else None
     if args.arms_index and arms is None:

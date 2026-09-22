@@ -168,6 +168,16 @@ def canonical_licence(value: str | None) -> str | None:
     return CANONICAL_LICENCE.get(value.strip().lower(), value.strip())
 
 
+def digest_of(path: pathlib.Path) -> str:
+    """The sha256 of a file, read in blocks so a large manifest does not sit
+    in memory twice."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def licence_summary(manifest: pathlib.Path, count: int | None = None) -> dict:
     """Everything the platforms need to know about licensing, from the files.
 
@@ -199,6 +209,21 @@ def licence_summary(manifest: pathlib.Path, count: int | None = None) -> dict:
             attribution_required += 1
         capture[row.get("capture_class") or "unknown"] += 1
     return {
+        # WHAT THIS WAS COMPUTED FROM, so it can witness its own staleness.
+        #
+        # On 2026-09-22 the shipped README said 5,429 covers require
+        # attribution and the manifest said 5,453. Nothing was wrong with
+        # either number: `release_metadata` read a summary written three days
+        # and one cover backfill earlier, and no field in the file said which
+        # manifest it described. A derived artefact that does not name its
+        # source cannot be checked against it, and the reader sees a figure
+        # that renders exactly like a current one.
+        #
+        # The digest rather than a timestamp, for the same reason arm rows
+        # carry `source_sha256`: a copy, a restore or a clock skew all forge
+        # an mtime, and none of them changes the bytes.
+        "source_manifest_sha256": digest_of(manifest),
+        "source_manifest_rows": total,
         "total": total,
         "licences": dict(counts.most_common()),
         "licence_urls": urls,

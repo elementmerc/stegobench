@@ -397,6 +397,72 @@ class DctProvenanceTests(unittest.TestCase):
         self.assertIn("of 2 rows", r.notes["provenance"])
 
 
+class FiguresCheckTests(unittest.TestCase):
+    """The published prose is part of the release, and nothing read it.
+
+    Every other check reads the manifest. A stale `licence-summary.json` put
+    "5,429 covers require attribution" into the shipped README while the
+    manifest said 5,453, and all eight checks passed, because none of them was
+    looking at a sentence.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name)
+        self.docs = root / "docs"
+        self.docs.mkdir()
+        self.release = root / "release"
+        (self.release / "core").mkdir(parents=True)
+        (self.release / "core-arms").mkdir(parents=True)
+        self.covers = root / "commons"
+        self.covers.mkdir()
+
+        def a(name, n):
+            return {"arm": name, "samples": n, "shards": [],
+                    "rows_in_manifest": n, "container_mismatches": [],
+                    "digest_mismatches": [], "mispaired": [], "missing": [],
+                    "unlicensed": []}
+
+        (self.release / "core-arms" / "pentimento-core-arms-index.json").write_text(
+            json.dumps({"arms": [a("wow-0200", 100), a("outguess-0050", 80),
+                                 a("steghide-0050", 100), a("clean-grey", 50)],
+                        "tier": "Core"}))
+        (self.release / "core" / "pentimento-core-index.json").write_text(
+            json.dumps({"samples": 200, "tier": "Core"}))
+        (self.covers / "manifest.jsonl").write_text("".join(
+            json.dumps({"file": f"{n:05d}.png", "attribution_required": n < 110})
+            + "\n" for n in range(200)))
+
+    def test_matching_prose_passes(self):
+        (self.docs / "index.md").write_text(
+            "280 stego pairs, 110 covers, 55%.")
+        r = Report()
+        vr.check_figures(self.docs, self.release, self.covers, r)
+        self.assertTrue(r.ok, r.failures)
+
+    def test_a_stale_published_figure_fails_the_release(self):
+        (self.docs / "index.md").write_text(
+            "5,429 of 10,000 covers, 110 covers, 55%.")
+        r = Report()
+        vr.check_figures(self.docs, self.release, self.covers, r)
+        self.assertIn("figures", r.failures)
+
+    def test_a_docs_directory_with_no_pages_is_a_failure(self):
+        r = Report()
+        vr.check_figures(self.docs, self.release, self.covers, r)
+        self.assertIn("figures", r.failures)
+
+    def test_prose_stating_no_figure_at_all_does_not_report_clean(self):
+        """Nothing compared is not the same as nothing wrong."""
+        (self.docs / "index.md").write_text("A corpus of photographs.")
+        r = Report()
+        vr.check_figures(self.docs, self.release, self.covers, r)
+        self.assertIn("figures", r.failures)
+        self.assertTrue(any("could not look" in m
+                            for m in r.failures["figures"]), r.failures)
+
+
 class CouldNotLookTests(unittest.TestCase):
     """The fault found eight times across this fleet in one day.
 

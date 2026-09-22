@@ -491,6 +491,42 @@ def check_stale(arm_root: pathlib.Path, sample_per_arm: int,
                              f"digest")
 
 
+def check_figures(docs: pathlib.Path, release: pathlib.Path,
+                  covers: pathlib.Path, report: Report) -> None:
+    """Do the published figures match the corpus that is about to ship?
+
+    The other checks read the manifest. Nothing read the PROSE derived from it,
+    and prose is what a user acts on. A stale `licence-summary.json` put "5,429
+    covers require attribution" into the shipped README while the manifest said
+    5,453, and every check here passed, because none of them was looking at a
+    sentence.
+
+    `check_docs_figures` derives each figure from the packed index rather than
+    restating it, so this cannot drift into agreeing with itself.
+    """
+    try:
+        from check_docs_figures import FigureError, check, derive
+    except ImportError as e:  # pragma: no cover - the import is the contract
+        report.fail("figures", f"the figure check could not be imported "
+                               f"({e}), so no published number was compared "
+                               f"with the corpus")
+        return
+    try:
+        figures = derive(release, covers)
+        problems, notes = check(docs, figures)
+    except FigureError as e:
+        report.fail("figures", str(e))
+        return
+    for problem in problems:
+        report.fail("figures", problem)
+    if not problems:
+        checked = sum(1 for n in notes if "as shipped" in n)
+        if nothing_checked("figures", checked, report, "published figures"):
+            return
+        report.note("figures", f"{checked} published figure(s) match the "
+                               f"corpus that shipped")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--covers", required=True)
@@ -503,6 +539,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sample", type=int, default=500,
                     help="covers to digest-check; --full overrides")
     ap.add_argument("--sample-per-arm", type=int, default=40)
+    ap.add_argument("--docs", default=None,
+                    help="a documentation directory whose published figures "
+                         "should match this corpus, e.g. pentimento/docs or "
+                         "the release directory itself")
     ap.add_argument("--full", action="store_true",
                     help="check every file rather than a sample")
     args = ap.parse_args(argv)
@@ -544,8 +584,15 @@ def main(argv: list[str] | None = None) -> int:
         for check in ("pairs", "stale", "provenance"):
             report.skip(check, "no --arms given, so no stego pair was examined")
 
+    if args.docs and args.release:
+        check_figures(pathlib.Path(args.docs), pathlib.Path(args.release),
+                      covers, report)
+    else:
+        report.skip("figures", "no --docs given, so no published number was "
+                               "compared with the corpus it describes")
+
     order = ["covers", "licences", "digests", "pool", "pairs", "stale",
-             "provenance", "packed"]
+             "provenance", "packed", "figures"]
     print()
     for check in order:
         if check in report.failures:
