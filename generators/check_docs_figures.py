@@ -74,7 +74,7 @@ def is_clean(arm: str) -> bool:
     return arm.startswith("clean")
 
 
-def derive(release: pathlib.Path, covers: pathlib.Path) -> dict[str, int]:
+def derive(release: pathlib.Path, covers: pathlib.Path) -> dict[str, float]:
     """Every figure the docs quote, taken from what was actually packed."""
     ai = arms_index(release, "core")
     arms = ai["arms"]
@@ -105,7 +105,10 @@ def derive(release: pathlib.Path, covers: pathlib.Path) -> dict[str, int]:
         "steghide and outguess samples": sum(outguess.values()) + sum(steghide.values()),
         "tool arms": len(outguess) + len(steghide),
         "covers requiring attribution": attributed,
-        "attribution percent": round(100 * attributed / len(rows)),
+        # One decimal place, matching `publish_tier.py` exactly. 54.53 rounds
+        # to 55 as a whole number and 54.5 to one place, so the docs and the
+        # shipped README would disagree on sight while both being right.
+        "attribution percent": round(100 * attributed / len(rows), 1),
     }
     return figures
 
@@ -120,7 +123,9 @@ def thousands(n: int) -> str:
 #: page actually uses, so a match is evidence and a mismatch is the real thing.
 def patterns(name: str, value: int, figures: dict[str, int]) -> list[str]:
     if name == "attribution percent":
-        return [f"{value}%"]
+        # `:g` so a whole percentage reads "55%" rather than "55.0%", which is
+        # what anybody would actually write in a sentence.
+        return [f"{value:g}%"]
     if name == "stego arms":
         return [f"{figures['stego arms']} stego, plus {figures['clean arms']} clean"]
     if name == "tool arms":
@@ -169,9 +174,9 @@ def stale_numbers(text: str, name: str, value: int,
     want = set(patterns(name, value, figures))
     text = in_context(text, name)
     if name == "attribution percent":
-        found = set(re.findall(r"\b(\d{1,3})%", text))
+        found = set(re.findall(r"\b(\d{1,3}(?:\.\d)?)%", text))
         return sorted(f"{f}%" for f in found if f"{f}%" not in want
-                      and 40 <= int(f) <= 70)
+                      and 40 <= float(f) <= 70)
     if name == "stego arms":
         found = re.findall(r"\b(\d{1,3}) stego, plus (\d{1,3}) clean", text)
         return sorted(f"{a} stego, plus {b} clean" for a, b in found
@@ -198,9 +203,22 @@ def stale_numbers(text: str, name: str, value: int,
     return sorted(out)
 
 
+#: Generated credit lists are DATA, not claims about the corpus. ATTRIBUTION.md
+#: is thousands of third-party file titles, and one of them is a photograph of a
+#: bus numbered 10040, which read as a cover count of 10,040. Nothing in such a
+#: file is a figure this corpus is asserting, so scanning it can only produce
+#: noise.
+NOT_PROSE = ("attribution",)
+
+
+def is_prose(path: pathlib.Path) -> bool:
+    if "node_modules" in path.parts:
+        return False
+    return path.stem.lower() not in NOT_PROSE
+
+
 def check(docs: pathlib.Path, figures: dict[str, int]) -> tuple[list[str], list[str]]:
-    pages = sorted(p for p in docs.rglob("*.md")
-                   if "node_modules" not in p.parts)
+    pages = sorted(p for p in docs.rglob("*.md") if is_prose(p))
     if not pages:
         raise FigureError(f"no documentation pages under {docs}, so this "
                           f"check examined nothing. That is not a pass")

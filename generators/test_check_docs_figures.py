@@ -200,6 +200,16 @@ class FalsePositiveTests(Fixture):
         self.assertTrue(any("outguess arm" in p for p in problems), problems)
 
 
+    def test_a_generated_credit_list_is_not_scanned(self):
+        """Found against the shipped release: ATTRIBUTION.md carries a
+        photograph of a bus numbered 10040, which read as a cover count."""
+        self.write("index.md", "200 covers, 55%, 110 need a credit line.")
+        (self.docs / "ATTRIBUTION.md").write_text(
+            "- `09772.png` \"File:Bus 199 on route U1\", by Someone, CC BY 2.0")
+        problems, _ = self.run_check()
+        self.assertEqual([p for p in problems if "covers" in p], [], problems)
+
+
 class EndToEndTests(Fixture):
     def test_main_returns_zero_when_the_docs_agree(self):
         self.write("index.md", "360 stego pairs, 110 covers, 55%.")
