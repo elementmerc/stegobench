@@ -1,10 +1,10 @@
 # Corpus generators
 
-Forty-four programs that fetch covers, build arms, check licences, pack a
+Forty-five programs that fetch covers, build arms, check licences, pack a
 release and verify it before it leaves the machine.
 
 This file used to describe three of them and claim to describe all of them,
-which is how a directory grows to forty-four without anybody noticing. The
+which is how a directory grows to forty-five without anybody noticing. The
 table below is hand-written, so `test_readme.py` fails when a module is added
 without a row: the claim that it goes stale loudly is only true if something
 checks, and the first version of this file made that claim while two modules
@@ -124,6 +124,7 @@ because a measurement was once wrong in exactly the way it detects.
 | `release_metadata.py` | CLI | Write the files a published dataset needs and this one was missing |
 | `validate_croissant.py` | CLI | Check a Croissant record before it is published |
 | `verify_release.py` | CLI | Every invariant this corpus must satisfy before it is published, in one run |
+| `check_docs_figures.py` | CLI | Check the figures the published docs quote against the corpus that shipped |
 | `make_fixtures.py` | CLI | Build the self-test fixtures: one image that is clean, one that is not |
 
 ### The way in
