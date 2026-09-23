@@ -597,6 +597,49 @@ def _hf_api(url: str, token: str, body: bytes | None = None,
         raise UploadError(f"{what}: could not reach it, {e.reason}") from e
 
 
+def ensure_huggingface_repo(repo: str, creds: dict[str, str], log,
+                            apply: bool = True) -> None:
+    """Make sure the dataset repository exists before a single byte is sent.
+
+    Nothing in this uploader created it. That was survivable while the
+    repository happened to exist, and stopped being survivable the moment one
+    was deleted: `preupload` answers 404 for a repository that is not there,
+    so the run fails on its first file having already spent the verify pass
+    and the operator's evening. This is the pre-flight the failure earned.
+
+    Created PUBLIC. A private dataset repository would upload 48 GB to an
+    address no reader can reach, which is the failure this corpus already had
+    once: the 2026-09-19 run left a private repository holding one shard.
+    """
+    token = creds["HF_TOKEN"]
+    url = f"https://huggingface.co/api/datasets/{repo}"
+    try:
+        _hf_api(url, token, what=f"{repo}: hugging face repository")
+        log(f"    the dataset repository {repo} exists")
+        return
+    except UploadError as e:
+        if " 404 " not in f" {e} ":
+            raise
+
+    if not apply:
+        log(f"    the dataset repository {repo} DOES NOT EXIST; a live run "
+            f"would create it, public")
+        return
+
+    if "/" not in repo:
+        raise UploadError(
+            f"{repo}: a dataset repository is named <owner>/<name>, and this "
+            f"has no owner, so there is nothing to create it under")
+    organization, _, name = repo.partition("/")
+    log(f"    creating the dataset repository {repo}, public")
+    _hf_api("https://huggingface.co/api/repos/create", token,
+            body=json.dumps({"type": "dataset", "name": name,
+                             "organization": organization,
+                             "private": False}).encode(),
+            method="POST", content_type="application/json",
+            what=f"{repo}: hugging face repository creation")
+
+
 def _hf_commit(repo: str, token: str, lines: list[dict], summary: str) -> None:
     """One commit on main. The API takes newline-delimited JSON, not a list."""
     payload = [{"key": "header", "value": {"summary": summary, "description": ""}}]
@@ -908,6 +951,12 @@ def main(argv: list[str] | None = None) -> int:
                                       apply=False)
             except (UploadError, urllib.error.URLError, OSError) as e:
                 log(f"  could not read the item's current metadata: {e}")
+        if args.destination == "huggingface":
+            try:
+                log("  the repository the files need to land in:")
+                ensure_huggingface_repo(args.item, creds, log, apply=False)
+            except (UploadError, urllib.error.URLError, OSError) as e:
+                log(f"  could not check the repository: {e}")
         log("DRY RUN complete. Nothing was sent. Re-run with --live to publish.")
         return 0
 
@@ -917,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
     # the description is what a reader sees first.
     if args.destination == "internetarchive":
         reconcile_ia_metadata(packed, args.item, creds, log)
+    if args.destination == "huggingface":
+        ensure_huggingface_repo(args.item, creds, log)
 
     started = time.monotonic()
     for position, name in enumerate(pending, 1):

@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import fnmatch
 import hashlib
 import io
 import json
@@ -55,6 +56,11 @@ from tiers import TierError, tier_cover_names  # noqa: E402
 #: who takes a number from here and compares it with a BOSSbase number has been
 #: misled, and the corpus is responsible for saying so first rather than in a
 #: footnote.
+# The repository the card's own examples point at. It must agree with HF_REPO
+# in tools/release/publish-all.sh; a card that names a repository nobody
+# published to sends every reader to a 404.
+HF_REPO_FORMAT = "the-malware-files/pentimento-{tier}"
+
 NOT_COMPARABLE = (
     "This is a JPEG-decompressed spatial corpus. It is NOT comparable to "
     "BOSSbase, whose covers were never JPEG compressed. Detector numbers "
@@ -94,11 +100,104 @@ def split_arms(arms: dict | None) -> tuple[int, int, int, int]:
     return stego_total, stego_count, clean_total, clean_count
 
 
+class ConfigError(Exception):
+    """A shard set that cannot be named by a pattern without catching others."""
+
+
+def _shard_glob(shards: list[str], others: set[str]) -> str:
+    """One glob matching every name in `shards` and nothing in `others`.
+
+    The covers and every arm land in ONE HuggingFace repository, flat, so
+    `pentimento-core-*.tar` is not a pattern for the covers: it also catches
+    `pentimento-core-wow-0050-00000.tar`. The numeric suffix is what tells them
+    apart, so the pattern spells it out one digit at a time.
+
+    Derived from the packed index and then checked against every other shard in
+    the release, because a pattern that silently over-matches builds a config
+    that loads the wrong arm with no error anywhere.
+    """
+    if not shards:
+        raise ConfigError("a config was asked for with no shards")
+    stems = {name[:-len(".tar")] for name in shards}
+    widths = {len(stem.rsplit("-", 1)[1]) for stem in stems}
+    prefixes = {stem.rsplit("-", 1)[0] for stem in stems}
+    if len(widths) != 1 or len(prefixes) != 1:
+        raise ConfigError(
+            f"these shards are not one numbered series, so no single pattern "
+            f"names them: {sorted(shards)[:3]}")
+    pattern = f"{prefixes.pop()}-{'[0-9]' * widths.pop()}.tar"
+
+    matched = {name for name in shards if fnmatch.fnmatchcase(name, pattern)}
+    if matched != set(shards):
+        raise ConfigError(
+            f"{pattern!r} does not match its own shards, missing "
+            f"{sorted(set(shards) - matched)[:3]}")
+    stray = {name for name in others if fnmatch.fnmatchcase(name, pattern)}
+    if stray:
+        raise ConfigError(
+            f"{pattern!r} would also load {sorted(stray)[:3]}, which belong to "
+            f"another part of the release")
+    return pattern
+
+
+def hf_configs(cover_index: dict, arms: dict | None) -> str:
+    """The `configs:` block, so `load_dataset` works without arguments.
+
+    Without this block a reader who arrives through HuggingFace can see the
+    card but cannot load the corpus: the files are tar shards at the repository
+    root and nothing tells the loader which ones belong together, so the covers
+    and all 39 arms read as one undifferentiated pile. With it, one arm is one
+    named config and streaming works, which means a user can look at the corpus
+    without downloading 48 GB first.
+
+    The split is called `full` rather than `train` on purpose. Cover records
+    carry their own `split` field, and the shards are NOT laid out along it;
+    naming the only split `train` would hand a reader the cover-leaking split
+    that SPLITS.md exists to warn them off.
+    """
+    cover_shards = [s["shard"] for s in cover_index.get("shards", [])]
+    arm_list = sorted((arms or {}).get("arms", []), key=lambda a: a["arm"])
+    arm_shards = {a["arm"]: [s["shard"] for s in a["shards"]] for a in arm_list}
+
+    every = set(cover_shards) | {s for v in arm_shards.values() for s in v}
+    blocks = []
+
+    def block(name: str, shards: list[str], default: bool = False) -> None:
+        pattern = _shard_glob(shards, every - set(shards))
+        blocks.append(
+            f"  - config_name: {name}\n"
+            + ("    default: true\n" if default else "")
+            + f"    data_files:\n"
+            f"      - split: full\n"
+            f"        path: {pattern}\n")
+
+    if cover_shards:
+        block("covers", cover_shards, default=True)
+    for arm in arm_list:
+        block(arm["arm"], arm_shards[arm["arm"]])
+    return "configs:\n" + "".join(blocks) if blocks else ""
+
+
 def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -> str:
     tier = cover_index.get("tier", "Core")
     total_covers = cover_index.get("samples", licences.get("total", 0))
     cover_shards = len(cover_index.get("shards", []))
     stego_total, stego_count, clean_total, clean_count = split_arms(arms)
+
+    # The quick start has to name a real arm and a real size, because a card
+    # whose example config does not exist is worse than no example.
+    HF_REPO = HF_REPO_FORMAT.format(tier=tier.lower())
+    stego_arms = sorted(a["arm"] for a in (arms or {}).get("arms", [])
+                        if not a["arm"].startswith("clean"))
+    # Alphabetical puts `append_after_eoi-0000` first, which appends a payload
+    # after the end-of-image marker and is the one arm a detector finds without
+    # trying. Leading with it as the example of a stego arm misrepresents the
+    # difficulty of the whole corpus.
+    example_arm = next((a for a in stego_arms if a.startswith("wow-")),
+                       stego_arms[0] if stego_arms else "covers")
+    total_bytes = (sum(s.get("bytes", 0) for s in cover_index.get("shards", []))
+                   + (arms or {}).get("total_bytes", 0))
+    total_bytes_gb = f"{total_bytes / 1e9:.0f}"
     # THE RATE UNIT COLUMN.
     #
     # The table listed `hugo-0400` and `steghide-0500` as adjacent rows with a
@@ -165,7 +264,7 @@ tags:
   - cover-source-mismatch
 size_categories:
   - {"100K<n<1M" if stego_total >= 100000 else "10K<n<100K"}
----
+{hf_configs(cover_index, arms)}---
 
 # Pentimento {tier}, v{version}
 
@@ -176,6 +275,28 @@ photographs and {stego_total:,} matched stego pairs across {stego_count} arms,
 where every image carries its own licence and every file carries its own
 checksum. A further {clean_count} arms hold the {clean_total:,} clean halves
 those pairs are measured against.
+
+## Quick start
+
+Nothing is downloaded until you ask for a sample, so looking costs seconds
+rather than {total_bytes_gb} GB.
+
+```python
+from datasets import load_dataset
+
+covers = load_dataset("{HF_REPO}", "covers", split="full", streaming=True)
+print(next(iter(covers))["json"]["licence"])
+
+stego = load_dataset("{HF_REPO}", "{example_arm}", split="full", streaming=True)
+```
+
+Each arm is its own config, named exactly as the arm table below names it, and
+`covers` is the default. Drop `streaming=True` to fetch a config to disk.
+
+The single split is called `full` because **the shards are not laid out along
+the train and test boundary**. Cover records carry their own `split` field and
+`SPLITS.md` gives the rule; splitting any other way puts a cover in training
+and its own stego copy in test.
 
 ## What makes it different
 

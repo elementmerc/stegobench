@@ -388,3 +388,85 @@ class IaMetadataReconcileTests(unittest.TestCase):
             upload_tier.urllib.request.urlopen = original
         self.assertEqual(posted, [])
         self.assertIn("does not exist yet", "\n".join(self.lines))
+
+
+class HuggingFaceRepository(unittest.TestCase):
+    """Nothing created the repository, and one day it was not there.
+
+    The 2026-09-23 release deleted a stale private repository and the live run
+    would then have failed on its first file, after the whole verify pass, with
+    a bare 404 from `preupload`.
+    """
+
+    def setUp(self):
+        self.creds = {"HF_TOKEN": "t"}
+        self.lines = []
+
+    def log(self, message):
+        self.lines.append(message)
+
+    def fake_remote(self, exists, posted):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def urlopen(request, timeout=None):
+            url = request if isinstance(request, str) else request.full_url
+            if url.endswith("/repos/create"):
+                posted.append(json.loads(request.data))
+                return Response(b'{"url": "x"}')
+            if exists:
+                return Response(b'{"id": "the-malware-files/pentimento-core"}')
+            raise upload_tier.urllib.error.HTTPError(
+                url, 404, "Not Found", {}, io.BytesIO(b'{"error":"Repo not found"}'))
+        return urlopen
+
+    def run_with(self, remote, **kwargs):
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.ensure_huggingface_repo(
+                "the-malware-files/pentimento-core", self.creds, self.log,
+                **kwargs)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+
+    def test_a_missing_repository_is_created_public(self):
+        posted = []
+        self.run_with(self.fake_remote(False, posted))
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["type"], "dataset")
+        self.assertEqual(posted[0]["organization"], "the-malware-files")
+        self.assertEqual(posted[0]["name"], "pentimento-core")
+        self.assertIs(posted[0]["private"], False,
+                      "a private repository is 48 GB nobody can reach")
+
+    def test_an_existing_repository_is_left_alone(self):
+        posted = []
+        self.run_with(self.fake_remote(True, posted))
+        self.assertEqual(posted, [], "creating over an existing repository")
+        self.assertIn("exists", "\n".join(self.lines))
+
+    def test_a_dry_run_reports_the_gap_without_creating_anything(self):
+        posted = []
+        self.run_with(self.fake_remote(False, posted), apply=False)
+        self.assertEqual(posted, [])
+        self.assertIn("DOES NOT EXIST", "\n".join(self.lines))
+
+    def test_an_error_that_is_not_a_missing_repository_is_raised(self):
+        """A 401 must not be read as "absent" and answered by a create."""
+        import io
+
+        def remote(request, timeout=None):
+            url = request if isinstance(request, str) else request.full_url
+            raise upload_tier.urllib.error.HTTPError(
+                url, 401, "Unauthorized", {}, io.BytesIO(b"bad token"))
+
+        with self.assertRaises(upload_tier.UploadError):
+            self.run_with(remote)
+
+
+if __name__ == "__main__":
+    unittest.main()

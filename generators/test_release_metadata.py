@@ -16,6 +16,7 @@ loader shipped to strangers can read a shard and refuses a truncated one.
 """
 from __future__ import annotations
 
+import fnmatch
 import io
 import json
 import pathlib
@@ -484,6 +485,100 @@ class EndToEndTests(unittest.TestCase):
     def test_a_missing_release_directory_is_refused(self):
         self.assertEqual(release_metadata.main(
             ["--release", "/nonexistent/core"]), 1)
+
+
+class HuggingFaceConfigs(unittest.TestCase):
+    """The `configs:` block is what makes the repository loadable at all."""
+
+    COVERS = {"tier": "Core", "samples": 20, "shards": [
+        {"shard": "pentimento-core-00000.tar", "samples": 10, "bytes": 5},
+        {"shard": "pentimento-core-00001.tar", "samples": 10, "bytes": 5}]}
+    ARMS = {"total_bytes": 9, "arms": [
+        {"arm": "wow-0400", "samples": 10, "shards": [
+            {"shard": "pentimento-core-wow-0400-00000.tar"}]},
+        {"arm": "clean-grey", "samples": 10, "shards": [
+            {"shard": "pentimento-core-clean-grey-00000.tar"}]}]}
+
+    def configs(self, covers=None, arms=None):
+        import yaml
+        block = release_metadata.hf_configs(covers or self.COVERS,
+                                            self.ARMS if arms is None else arms)
+        return {c["config_name"]: c for c in yaml.safe_load(block)["configs"]}
+
+    def test_every_arm_is_its_own_config_and_covers_is_the_default(self):
+        configs = self.configs()
+        self.assertEqual(set(configs), {"covers", "wow-0400", "clean-grey"})
+        self.assertTrue(configs["covers"]["default"])
+        self.assertNotIn("default", configs["wow-0400"])
+
+    def test_the_cover_pattern_does_not_swallow_the_arms(self):
+        """`pentimento-core-*.tar` matches every arm shard too.
+
+        The covers and all 39 arms land flat in ONE repository, so a pattern
+        that over-matches does not fail: it quietly loads the whole corpus
+        under the name of one part.
+        """
+        pattern = self.configs()["covers"]["data_files"][0]["path"]
+        for arm in ("pentimento-core-wow-0400-00000.tar",
+                    "pentimento-core-clean-grey-00000.tar"):
+            self.assertFalse(fnmatch.fnmatchcase(arm, pattern),
+                             f"{pattern} would also load {arm}")
+        self.assertTrue(fnmatch.fnmatchcase("pentimento-core-00000.tar", pattern))
+
+    def test_an_arm_pattern_does_not_reach_a_similarly_named_arm(self):
+        arms = {"arms": [
+            {"arm": "wow-0400", "samples": 1, "shards": [
+                {"shard": "pentimento-core-wow-0400-00000.tar"}]},
+            {"arm": "wow-04000", "samples": 1, "shards": [
+                {"shard": "pentimento-core-wow-04000-00000.tar"}]}]}
+        pattern = self.configs(arms=arms)["wow-0400"]["data_files"][0]["path"]
+        self.assertFalse(fnmatch.fnmatchcase(
+            "pentimento-core-wow-04000-00000.tar", pattern))
+
+    def test_every_shard_lands_in_exactly_one_config(self):
+        configs = self.configs()
+        shards = ([s["shard"] for s in self.COVERS["shards"]]
+                  + [s["shard"] for a in self.ARMS["arms"] for s in a["shards"]])
+        for shard in shards:
+            owners = [name for name, c in configs.items()
+                      if fnmatch.fnmatchcase(shard, c["data_files"][0]["path"])]
+            self.assertEqual(len(owners), 1, f"{shard} is claimed by {owners}")
+
+    def test_a_shard_set_that_no_pattern_can_name_is_refused(self):
+        """Fail loud rather than emit a config that loads the wrong files."""
+        arms = {"arms": [{"arm": "odd", "samples": 1, "shards": [
+            {"shard": "pentimento-core-odd-00000.tar"},
+            {"shard": "pentimento-core-odd-000001.tar"}]}]}
+        with self.assertRaises(release_metadata.ConfigError):
+            self.configs(arms=arms)
+
+    def test_the_split_is_not_called_train(self):
+        """The shards are not laid out along the train and test boundary.
+
+        Calling the only split `train` would hand a reader the cover-leaking
+        split that SPLITS.md exists to warn them off.
+        """
+        for config in self.configs().values():
+            self.assertEqual(config["data_files"][0]["split"], "full")
+
+    def test_the_card_frontmatter_stays_valid_yaml_with_the_block(self):
+        import yaml
+        card = release_metadata.readme(self.COVERS, {"total": 20}, self.ARMS,
+                                       "1.0.0")
+        front = yaml.safe_load(card.split("---")[1])
+        self.assertEqual(front["license"], "cc-by-4.0")
+        self.assertEqual(len(front["configs"]), 3)
+
+    def test_the_quick_start_names_an_arm_that_exists(self):
+        card = release_metadata.readme(self.COVERS, {"total": 20}, self.ARMS,
+                                       "1.0.0")
+        quick = card[card.index("## Quick start"):card.index("## What makes")]
+        self.assertIn('"wow-0400"', quick)
+        self.assertIn(release_metadata.HF_REPO_FORMAT.format(tier="core"), quick)
+
+    def test_a_tier_with_no_arms_still_produces_a_loadable_card(self):
+        configs = self.configs(arms={})
+        self.assertEqual(set(configs), {"covers"})
 
 
 if __name__ == "__main__":
