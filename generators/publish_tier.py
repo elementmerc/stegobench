@@ -441,12 +441,26 @@ def cmd_prepare(args) -> int:
     # name for good. Costs nothing today; impossible to change later.
     kaggle_slug = f"pentimento-{tier.lower()}"
 
+    # Kaggle EXTRACTS archives on upload and offers no way to refuse, so the
+    # tar shards arrive here as folders of the same members. The bytes are
+    # unchanged, but `sha256sum -c SHA256SUMS-covers` names containers that no
+    # longer exist on this mirror, and the README's first instruction is that
+    # command. Saying so in the description is the only place a Kaggle user
+    # reliably reads before downloading.
     kaggle_meta = {
         "title": f"Pentimento {tier} steganalysis covers",
         "id": f"{args.kaggle_user}/{kaggle_slug}",
         "licenses": [{"name": KAGGLE_LICENCE}],
         "subtitle": f"{summary['total']:,} permissively licensed 512x512 covers",
-        "description": blurb,
+        "description": blurb + (
+            "\n\nOn Kaggle the tar shards are unpacked, because Kaggle extracts "
+            "archives on upload. The bytes are identical; the container is "
+            "gone. SHA256SUMS-covers names the shards, so use "
+            "`python load_pentimento.py --verify pentimento-"
+            f"{tier.lower()}-00000/` instead, which checks every image against "
+            "the sha256 in its own record. The loader reads a folder and a tar "
+            "the same way."
+        ),
     }
     (packed / "dataset-metadata.json").write_text(json.dumps(kaggle_meta, indent=2) + "\n", encoding="utf-8")
 

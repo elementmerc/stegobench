@@ -246,8 +246,65 @@ class LoaderTests(unittest.TestCase):
             [sys.executable, str(self.script), *args],
             capture_output=True, text=True, timeout=60)
 
+    def unpacked(self, name: str, *, samples: int = 3,
+                 corrupt: bool = False) -> pathlib.Path:
+        """A shard as Kaggle serves it: a folder of the same members.
+
+        Kaggle extracts archives on upload and offers no way to refuse, so a
+        mirror exists where no `.tar` file is present and `SHA256SUMS-covers`
+        names ten containers that are not there.
+        """
+        import hashlib
+
+        path = self.dir / name
+        path.mkdir()
+        for i in range(samples):
+            key = f"{i:05d}"
+            image = b"\x89PNG\r\n\x1a\n" + bytes(64) + key.encode()
+            (path / f"{key}.png").write_bytes(image)
+            digest = hashlib.sha256(image).hexdigest()
+            if corrupt and i == 0:
+                digest = "0" * 64
+            (path / f"{key}.json").write_text(json.dumps(
+                {"licence": "CC0", "source_png": f"{key}.png",
+                 "sha256": digest}), encoding="utf-8")
+        return path
+
     def test_the_emitted_file_is_valid_python(self):
         compile(release_metadata.loader(), "load_pentimento.py", "exec")
+
+    def test_it_reads_an_unpacked_shard_exactly_like_a_tar(self):
+        result = self.run_script(str(self.unpacked("unpacked")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 samples", result.stdout)
+
+    def test_verify_checks_images_against_their_own_records(self):
+        """SHA256SUMS names containers, so it cannot check this mirror.
+
+        Each record carries the sha256 of the image beside it, which is a
+        finer check than the container's: it names the file that is wrong.
+        """
+        result = self.run_script("--verify", str(self.unpacked("good")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 image(s) checked, 0 mismatch", result.stdout)
+
+    def test_verify_fails_loud_on_a_corrupted_image(self):
+        result = self.run_script("--verify", str(self.unpacked("bad", corrupt=True)))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("MISMATCH", result.stderr)
+        self.assertIn("1 mismatch", result.stdout)
+
+    def test_verify_works_on_a_tar_too(self):
+        """A reader should not have to know which mirror they downloaded."""
+        result = self.run_script("--verify", str(self.shard("ok.tar")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_incomplete_unpacked_sample_is_still_refused(self):
+        path = self.unpacked("short")
+        next(path.glob("00000.json")).unlink()
+        result = self.run_script(str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("incomplete sample", result.stderr)
 
     def test_it_reads_a_shard_with_nothing_installed(self):
         result = self.run_script(str(self.shard("ok.tar")))

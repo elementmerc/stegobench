@@ -357,6 +357,21 @@ sha256sum -c SHA256SUMS-covers
 Do it before use: a shard that arrived truncated reads as a smaller corpus
 rather than as an error.
 
+**On Kaggle the shards are unpacked, and that command does not apply there.**
+Kaggle extracts archives when they are uploaded and offers no way to refuse,
+so `pentimento-{tier.lower()}-00000.tar` arrives as a folder of the same
+members under the same names. The bytes are the same; the container is gone.
+Verify that copy against each record's own checksum instead, which is a finer
+check because it names the file that is actually wrong:
+
+```
+python load_pentimento.py --verify pentimento-{tier.lower()}-00000/
+```
+
+`load_pentimento.py` reads a folder and a tar the same way, so nothing else
+changes. The Internet Archive and HuggingFace copies are tar shards as
+described above.
+
 Tiers nest. Nano is the first 200 covers of the same ordering Lite's first
 1,000 and Core's 10,000 follow, so you can develop against a small tier and
 evaluate on a larger one without the two overlapping in a way that flatters
@@ -1093,6 +1108,11 @@ def loader() -> str:
     The documentation said "any loader that reads WebDataset works unchanged",
     which is true and is not a starting point. Somebody who has just downloaded
     45 GB wants a file they can run.
+
+    It takes a DIRECTORY as readily as a tar, because one published mirror
+    unpacks the shards on upload and nothing can stop it. Anybody who has
+    simply extracted a shard is in the same position, so this is worth having
+    whatever Kaggle does.
     """
     return '''#!/usr/bin/env python3
 """Read Pentimento shards, with or without the webdataset package.
@@ -1101,17 +1121,47 @@ Two ways in. The first needs nothing beyond the standard library and is enough
 to look at the corpus; the second is what you would train on.
 
     python load_pentimento.py pentimento-core-00000.tar
+    python load_pentimento.py pentimento-core-00000/     # an unpacked shard
+    python load_pentimento.py --verify pentimento-core-00000/
 
 Shards are ordinary tar files. Each sample is an image and a JSON record that
 share a basename, so a sample is whatever group of members has the same stem.
+That holds whether the members are in a tar or in a directory, so a shard that
+somebody has extracted, or that a mirror extracted on upload, reads the same
+way.
 """
 from __future__ import annotations
 
 import io
 import json
+import pathlib
 import sys
 import tarfile
 from collections.abc import Iterator
+
+
+def _members(shard: str) -> Iterator[tuple[str, bytes]]:
+    """Yield (member name, bytes) from a tar OR from an unpacked directory.
+
+    One published mirror extracts archives when they are uploaded and offers
+    no way to refuse, so on that mirror a shard is a folder of the same
+    members under the same names. Reading both here means the rest of this
+    file, and anything built on it, never has to know which it got.
+    """
+    path = pathlib.Path(shard)
+    if path.is_dir():
+        for member in sorted(path.rglob("*")):
+            if member.is_file():
+                yield member.name, member.read_bytes()
+        return
+    with tarfile.open(shard, "r|*") as tar:          # "r|*" is the streaming form
+        for member in tar:
+            if not member.isfile():
+                continue
+            handle = tar.extractfile(member)
+            if handle is None:
+                continue
+            yield member.name, handle.read()
 
 
 def samples(shard: str) -> Iterator[tuple[str, bytes, dict]]:
@@ -1120,31 +1170,50 @@ def samples(shard: str) -> Iterator[tuple[str, bytes, dict]]:
     Streams rather than extracting, so a 1.3 GB shard costs one sample of
     memory rather than 1.3 GB of disk. Members of a sample are adjacent in the
     tar because the packer writes them that way, but this does not rely on it.
+
+    `shard` is a tar file or a directory holding the same members.
     """
     pending: dict[str, dict] = {}
-    with tarfile.open(shard, "r|*") as tar:          # "r|*" is the streaming form
-        for member in tar:
-            if not member.isfile():
-                continue
-            key, _, suffix = member.name.rpartition(".")
-            handle = tar.extractfile(member)
-            if handle is None:
-                continue
-            payload = handle.read()
-            slot = pending.setdefault(key, {})
-            if suffix == "json":
-                slot["record"] = json.loads(payload)
-            else:
-                slot["image"] = payload
-            if "record" in slot and "image" in slot:
-                yield key, slot["image"], slot["record"]
-                del pending[key]
+    for name, payload in _members(shard):
+        key, _, suffix = name.rpartition(".")
+        slot = pending.setdefault(key, {})
+        if suffix == "json":
+            slot["record"] = json.loads(payload)
+        else:
+            slot["image"] = payload
+        if "record" in slot and "image" in slot:
+            yield key, slot["image"], slot["record"]
+            del pending[key]
     if pending:
         raise ValueError(
             f"{len(pending)} incomplete sample(s) in {shard}, first: "
             f"{sorted(pending)[0]}. A truncated download is the usual cause; "
-            f"check the shard against SHA256SUMS."
+            f"check the shard against SHA256SUMS, or, where the mirror "
+            f"unpacked it, against each record's own sha256."
         )
+
+
+def verify(shard: str) -> int:
+    """Check every image against the sha256 in its own record.
+
+    `SHA256SUMS-covers` names the tar shards, so it cannot check a mirror that
+    unpacked them. It does not need to: every record carries the sha256 of the
+    image beside it, which is a finer check than the container's, because it
+    names the file that is actually wrong.
+    """
+    import hashlib
+
+    checked = bad = 0
+    for key, image, record in samples(shard):
+        want = record.get("sha256")
+        if not want:
+            continue
+        checked += 1
+        if hashlib.sha256(image).hexdigest() != want:
+            bad += 1
+            print(f"MISMATCH {key}", file=sys.stderr)
+    print(f"{checked:,} image(s) checked, {bad} mismatch(es)")
+    return 1 if bad else 0
 
 
 def as_webdataset(pattern: str):
@@ -1168,6 +1237,8 @@ def as_webdataset(pattern: str):
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[1] == "--verify":
+        return verify(argv[2])
     if len(argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2
