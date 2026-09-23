@@ -1,3 +1,5 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Daniel Iwugo
 """Find data hidden after the end of a picture, and say when it has not looked.

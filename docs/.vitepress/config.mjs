@@ -1,3 +1,5 @@
+// Author:  Daniel Iwugo
+// Comment: Christ is King
 // Stegobench documentation site.
 //
 // This site is the HARNESS only. The corpus it produces, Pentimento, has readers of its own

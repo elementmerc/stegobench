@@ -1,3 +1,5 @@
+// Author:  Daniel Iwugo
+// Comment: Christ is King
 // Stegobench documentation theme.
 //
 // VitePress ships an indigo/purple brand colour. The tool's blue is #0071E3,

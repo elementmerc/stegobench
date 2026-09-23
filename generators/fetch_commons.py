@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Author:  Daniel Iwugo
+# Comment: Christ is King
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Daniel Iwugo
 """Fetch cover images from Wikimedia Commons, with per-file licence provenance.

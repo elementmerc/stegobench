@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Author:  Daniel Iwugo
+# Comment: Christ is King
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Daniel Iwugo
 """Check the fixtures are what make_testdata.py's docstring says they are.

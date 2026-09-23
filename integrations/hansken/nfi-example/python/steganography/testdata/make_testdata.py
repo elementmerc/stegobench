@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Author:  Daniel Iwugo
+# Comment: Christ is King
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Daniel Iwugo
 """Generate the test pictures for this example.
