@@ -328,10 +328,17 @@ class IaMetadataReconcileTests(unittest.TestCase):
         self.assertIn("5%2C453", body.replace("%2C", "%2C"))
         joined = "\n".join(self.lines)
         self.assertIn("description", joined)
-        self.assertIn("collection", joined)
         # The fields that already agree must not be rewritten: a patch that
         # touches everything clobbers fields the Archive maintains itself.
         self.assertNotIn('"path": "/title"', body)
+        # COLLECTION IS REPORTED BUT NOT PATCHED. Including it returns
+        # HTTP 400 "Not authorized to add collection(s)" and takes the whole
+        # patch down with it, so a correct description fails to land because
+        # of a field nobody could have set anyway. Measured against the live
+        # API, then again when a live publish crashed on it at byte zero.
+        self.assertNotIn("%2Fcollection", body)
+        self.assertNotIn('"path": "/collection"', body)
+        self.assertIn("only lets its own staff set it", joined)
 
     def test_an_item_that_already_agrees_is_not_written_to(self):
         posted = []

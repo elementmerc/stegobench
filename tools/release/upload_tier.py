@@ -477,12 +477,29 @@ def reconcile_ia_metadata(packed: pathlib.Path, item: str,
             f"first upload, which is what creates it.")
         return
 
+    #: Fields the Archive will not let an ordinary account change, and which
+    #: fail the WHOLE patch if included - the API rejects the request rather
+    #: than skipping the offending op. Measured 2026-09-23:
+    #:
+    #:   HTTP 400 {"success":false,"error":"Not authorized to add collection(s)"}
+    #:
+    #: and it took the description correction down with it, so a figure that
+    #: was publicly wrong stayed wrong because of a field nobody could have
+    #: set. Collection membership is an Archive-side change; ask them.
+    STAFF_ONLY = {"collection"}
+
     # Only the fields we actually assert, and only where they differ. A patch
     # that rewrites everything would clobber fields the Archive maintains
     # itself, and a patch of no-ops is a write nobody can audit.
     changes = {}
     for key, value in want.items():
         if key == "identifier":
+            continue
+        if key in STAFF_ONLY:
+            if have.get(key) != value:
+                log(f"  NOTE: {key} is {have.get(key)!r} and should be "
+                    f"{value!r}, but the Archive only lets its own staff set "
+                    f"it. Request the move; it cannot be patched from here.")
             continue
         mine = value if not isinstance(value, (list, tuple)) else list(value)
         theirs = have.get(key)
@@ -773,6 +790,11 @@ def main(argv: list[str] | None = None) -> int:
                          "is mounted read only")
     ap.add_argument("--live", action="store_true",
                     help="actually send. Without this nothing leaves the machine")
+    ap.add_argument("--metadata-only", action="store_true",
+                    help="Internet Archive only: reconcile the item's "
+                         "metadata and send no files. For correcting what an "
+                         "item SAYS about itself without re-uploading what it "
+                         "holds, which is a 48 GB difference")
     ap.add_argument("--skip-verify", action="store_true",
                     help="do not re-hash every file first. Only for a re-run "
                          "minutes after a clean one")
@@ -790,6 +812,26 @@ def main(argv: list[str] | None = None) -> int:
 
     mode = "LIVE" if args.live else "DRY RUN, nothing will be sent"
     log(f"{args.destination}: {mode}")
+
+    # METADATA ONLY. An item's description is public the moment the item is,
+    # and it can be wrong while every file in it is right - which is what
+    # happened here: "5,429 covers (54.3%)" stood in a search-indexed
+    # description for four days over a corpus holding 5,453. Correcting that
+    # should not require re-sending 48 GB, and making it require that is how
+    # a wrong sentence survives.
+    if args.metadata_only:
+        if args.destination != "internetarchive":
+            print("--metadata-only applies to the Internet Archive, whose "
+                  "item metadata is separate from its files. Other "
+                  "destinations carry their metadata in the files "
+                  "themselves.", file=sys.stderr)
+            return 2
+        creds = credentials_for(args.destination)
+        reconcile_ia_metadata(pathlib.Path(args.packed), args.item, creds, log,
+                              apply=bool(args.live))
+        if not args.live:
+            log("DRY RUN complete. Nothing was changed. Re-run with --live.")
+        return 0
 
     try:
         files = load_index(packed)
