@@ -198,10 +198,28 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
     # trying. Leading with it as the example of a stego arm misrepresents the
     # difficulty of the whole corpus.
     example_arm = next((a for a in stego_arms if a.startswith("wow-")),
-                       stego_arms[0] if stego_arms else "covers")
+                       stego_arms[0] if stego_arms else None)
+    # With no arms there is no stego arm to show, and falling back to "covers"
+    # published a line reading `stego = load_dataset(..., "covers", ...)`. The
+    # variable name IS the claim: a reader believes they are streaming stego
+    # and streams covers, every record says cover, and nothing errors.
+    stego_example = (f'\n\nstego = load_dataset("{HF_REPO}", "{example_arm}", '
+                     'split="full", streaming=True)') if example_arm else ""
+
     total_bytes = (sum(s.get("bytes", 0) for s in cover_index.get("shards", []))
                    + (arms or {}).get("total_bytes", 0))
-    total_bytes_gb = f"{total_bytes / 1e9:.0f}"
+    if not total_bytes:
+        raise ConfigError(
+            "the packed index carries no byte counts, so the card would tell a "
+            "reader that streaming saves them 0 GB. The size is derived from "
+            "the index; a zero means this is not the index that was packed.")
+    # Picking the unit rather than fixing it at GB. Nano is under a gigabyte,
+    # so a fixed unit publishes "costs seconds rather than 0 GB" for a real
+    # tier, which reads as "this download is nothing" about a corpus somebody
+    # is deciding whether to fetch.
+    total_bytes_gb = (f"{total_bytes / 1e9:.0f} GB" if total_bytes >= 1e9
+                      else f"{total_bytes / 1e6:.0f} MB" if total_bytes >= 1e6
+                      else f"{total_bytes / 1e3:.0f} kB")
     # THE RATE UNIT COLUMN.
     #
     # The table listed `hugo-0400` and `steghide-0500` as adjacent rows with a
@@ -283,15 +301,13 @@ those pairs are measured against.
 ## Quick start
 
 Nothing is downloaded until you ask for a sample, so looking costs seconds
-rather than {total_bytes_gb} GB.
+rather than {total_bytes_gb}.
 
 ```python
 from datasets import load_dataset
 
 covers = load_dataset("{HF_REPO}", "covers", split="full", streaming=True)
-print(next(iter(covers))["json"]["licence"])
-
-stego = load_dataset("{HF_REPO}", "{example_arm}", split="full", streaming=True)
+print(next(iter(covers))["json"]["licence"]){stego_example}
 ```
 
 Each arm is its own config, named exactly as the arm table below names it, and
@@ -1144,6 +1160,17 @@ import tarfile
 from collections.abc import Iterator
 
 
+def _noise(name: str) -> bool:
+    """Files an operating system or a mirror leaves beside the data.
+
+    Skipped from a tar as well as a folder. The card tells anyone holding an
+    unpacked shard they can re-pack it with `tar cf ... -C <folder> .`, and a
+    `.DS_Store` in that folder goes straight into the tar, so treating the two
+    differently breaks the recovery this file recommends.
+    """
+    return pathlib.PurePosixPath(name).name.startswith(".")
+
+
 def _members(shard: str) -> Iterator[tuple[str, bytes]]:
     """Yield (member name, bytes) from a tar OR from an unpacked directory.
 
@@ -1161,12 +1188,12 @@ def _members(shard: str) -> Iterator[tuple[str, bytes]]:
         # pairs stay right, but two unrelated images are handed out under one
         # key and anything that keys on it keeps only the last.
         for member in sorted(path.rglob("*")):
-            if member.is_file() and not member.name.startswith("."):
+            if member.is_file() and not _noise(member.name):
                 yield member.relative_to(path).as_posix(), member.read_bytes()
         return
     with tarfile.open(shard, "r|*") as tar:          # "r|*" is the streaming form
         for member in tar:
-            if not member.isfile():
+            if not member.isfile() or _noise(member.name):
                 continue
             handle = tar.extractfile(member)
             if handle is None:
@@ -1226,12 +1253,18 @@ def verify(shard: str) -> int:
     print(f"{checked:,} image(s) checked, {bad} mismatch(es)"
           + (f", {skipped:,} record(s) carried no sha256" if skipped else ""))
     if not checked:
-        # "0 checked, 0 mismatches" and a zero exit reads as a pass, and would
-        # be the answer for an empty folder or a path that holds no records at
-        # all. Nothing verified is not the same as nothing wrong.
-        print(f"nothing was verified in {shard}: no record carried a sha256. "
-              f"Check you pointed at a shard rather than beside one.",
-              file=sys.stderr)
+        # "0 checked, 0 mismatches" and a zero exit reads as a pass. Nothing
+        # verified is not the same as nothing wrong. The two ways of getting
+        # here send a reader to different places, so they do not share a
+        # message: told their records lack checksums, somebody goes looking at
+        # the corpus when the fault is the path they typed.
+        if skipped:
+            print(f"nothing was verified in {shard}: {skipped:,} record(s) "
+                  f"were found and none carried a sha256.", file=sys.stderr)
+        else:
+            print(f"nothing was verified in {shard}: no samples were found "
+                  f"there. Check you pointed at a shard rather than beside "
+                  f"one.", file=sys.stderr)
         return 1
     return 1 if bad else 0
 

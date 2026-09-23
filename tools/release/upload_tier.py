@@ -98,6 +98,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import urllib.error
@@ -342,7 +343,8 @@ def load_index(packed: pathlib.Path) -> dict[str, str]:
     # quickstart runs `curl -O $BASE/SHA256SUMS -O $BASE/load_pentimento.py`
     # and then `sha256sum -c`, all of which would have answered 404. The
     # attribution files are worse than an inconvenience: they are how a reader
-    # discharges CC BY for the 5,429 covers that require it, and publishing a
+    # discharges CC BY for the thousands of covers that require it, and
+    # publishing a
     # CC BY corpus while withholding the credit list is the one failure this
     # corpus has no excuse for.
     #
@@ -432,10 +434,23 @@ def ia_item_exists(item: str) -> bool:
     try:
         with urllib.request.urlopen(f"https://archive.org/metadata/{item}",
                                     timeout=120) as response:
-            return bool(json.loads(response.read().decode("utf-8")).get("metadata"))
+            body = json.loads(response.read().decode("utf-8"))
     except urllib.error.URLError as e:
         raise UploadError(
             f"could not ask the archive whether {item} exists, {e.reason}") from e
+
+    metadata = body.get("metadata") or {}
+    # A DARKENED item still answers with metadata. DATASHEET.md promises
+    # photographers that a request about their own work is acted on, and that
+    # an item can be darkened on request; treating dark as present lets a
+    # resumed upload quietly undo a takedown that was honoured, harming the
+    # one person the corpus has already been told it harmed.
+    if str(metadata.get("is_dark", "")).lower() in ("true", "1"):
+        raise UploadError(
+            f"{item} is DARKENED on the archive. Somebody asked for it to be "
+            f"taken down and that was acted on. Publishing into it would "
+            f"reverse a withdrawal. Resolve that first, deliberately.")
+    return bool(metadata)
 
 
 def _ia_headers(packed: pathlib.Path, required: bool = True) -> dict[str, str]:
@@ -508,14 +523,30 @@ def reconcile_ia_metadata(packed: pathlib.Path, item: str,
         # no title, no licence and no description, so prove it rather than
         # assume it.
         if ia_item_exists(item):
-            log(f"  this part carries no item metadata of its own, and {item} "
-                f"already exists, described by the part that does")
-            return
-        raise UploadError(
-            f"no ia-metadata.json in {packed}, and the item {item} does not "
-            f"exist yet. The part that carries the metadata has to be "
-            f"uploaded first, or the item is created with no title, no "
-            f"licence and no description.")
+            # Proving the item EXISTS is not proving it says the right thing.
+            # This is the path that publishes 45 GB into whatever description
+            # is already there, and a wrong description is the exact defect
+            # this function was written for: "5,429 covers" stood on a public,
+            # search-indexed item for four days. The sibling part carries the
+            # description for the item they share, so reconcile against that
+            # rather than returning blind.
+            sibling = packed.parent / packed.name.removesuffix("-arms")
+            if sibling != packed and (sibling / "ia-metadata.json").is_file():
+                log(f"  this part carries no item metadata of its own; "
+                    f"checking {item} against the part that describes it")
+                source = sibling / "ia-metadata.json"
+            else:
+                log(f"  this part carries no item metadata of its own, and "
+                    f"{item} already exists. NOTE: nothing here could check "
+                    f"what it says, because the part that describes it is not "
+                    f"beside this one.")
+                return
+        else:
+            raise UploadError(
+                f"no ia-metadata.json in {packed}, and the item {item} does "
+                f"not exist yet. The part that carries the metadata has to be "
+                f"uploaded first, or the item is created with no title, no "
+                f"licence and no description.")
     want = json.loads(source.read_text(encoding="utf-8"))
 
     current_url = f"https://archive.org/metadata/{item}"
@@ -651,8 +682,29 @@ def _hf_api(url: str, token: str, body: bytes | None = None,
         raise UploadError(f"{what}: could not reach it, {e.reason}") from e
 
 
+def huggingface_repo_declared(packed: pathlib.Path) -> str | None:
+    """The repository the SHIPPED card tells readers to load, or None.
+
+    The card is the source of truth because it is the thing that goes public:
+    a `--item` that disagrees with it creates one public name and leaves the
+    card pointing at another, and neither is recoverable. The Archive copy of
+    that card is already search-indexed and the HuggingFace name, once taken,
+    is taken.
+
+    Only the part carrying the card can answer. The arms part carries no
+    README, which is exactly why it may not create a repository.
+    """
+    card = packed / "README.md"
+    if not card.is_file():
+        return None
+    found = re.findall(r'load_dataset\(\s*"([^"]+)"',
+                       card.read_text(encoding="utf-8"))
+    return found[0] if found else None
+
+
 def ensure_huggingface_repo(repo: str, creds: dict[str, str], log,
-                            apply: bool = True) -> None:
+                            apply: bool = True,
+                            may_create: bool = True) -> None:
     """Make sure the dataset repository exists before a single byte is sent.
 
     Nothing in this uploader created it. That was survivable while the
@@ -668,12 +720,30 @@ def ensure_huggingface_repo(repo: str, creds: dict[str, str], log,
     token = creds["HF_TOKEN"]
     url = f"https://huggingface.co/api/datasets/{repo}"
     try:
-        _hf_api(url, token, what=f"{repo}: hugging face repository")
-        log(f"    the dataset repository {repo} exists")
-        return
+        info = _hf_api(url, token, what=f"{repo}: hugging face repository")
     except UploadError as e:
         if e.status != 404:
             raise
+    else:
+        # EXISTING is not the same as REACHABLE. The 2026-09-19 failure left a
+        # PRIVATE repository holding one shard, and that run took this branch:
+        # a repository was already there. Checking only the create path guards
+        # the case that did not happen.
+        if info.get("private"):
+            raise UploadError(
+                f"{repo} exists but is PRIVATE. Publishing into it would send "
+                f"the corpus to an address no reader can reach, which is what "
+                f"happened on 2026-09-19, and the docs already link to it. "
+                f"Make it public first.")
+        log(f"    the dataset repository {repo} exists and is public")
+        return
+
+    if not may_create:
+        raise UploadError(
+            f"{repo} does not exist, and this part carries no README.md, so "
+            f"creating it here would publish a repository with no licence, no "
+            f"dataset card and no credit list for the photographers. Upload "
+            f"the part that carries the card first.")
 
     if not apply:
         log(f"    the dataset repository {repo} DOES NOT EXIST; a live run "
@@ -1013,12 +1083,30 @@ def main(argv: list[str] | None = None) -> int:
                                       apply=False)
             except (UploadError, urllib.error.URLError, OSError) as e:
                 log(f"  could not read the item's current metadata: {e}")
+        unchecked = []
         if args.destination == "huggingface":
             try:
                 log("  the repository the files need to land in:")
-                ensure_huggingface_repo(args.item, creds, log, apply=False)
+                declared = huggingface_repo_declared(packed)
+                if declared and declared != args.item:
+                    unchecked.append(
+                        f"--item is {args.item} but the shipped card names "
+                        f"{declared}")
+                ensure_huggingface_repo(args.item, creds, log, apply=False,
+                                        may_create=declared is not None)
             except (UploadError, urllib.error.URLError, OSError) as e:
                 log(f"  could not check the repository: {e}")
+                unchecked.append(str(e))
+        if unchecked:
+            # The dry run is THE proving step before a live publish, so a
+            # precondition it could not check must not be reported as one it
+            # checked. An expired token printed one line in the middle of a
+            # long output and the run still ended "complete" and exited zero.
+            print(f"\nDRY RUN INCOMPLETE: {len(unchecked)} precondition(s) "
+                  f"could not be checked. Nothing was sent.", file=sys.stderr)
+            for line in unchecked:
+                print(f"  {line}", file=sys.stderr)
+            return 3
         log("DRY RUN complete. Nothing was sent. Re-run with --live to publish.")
         return 0
 
@@ -1029,7 +1117,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.destination == "internetarchive":
         reconcile_ia_metadata(packed, args.item, creds, log)
     if args.destination == "huggingface":
-        ensure_huggingface_repo(args.item, creds, log)
+        declared = huggingface_repo_declared(packed)
+        if declared and declared != args.item:
+            print(f"\n--item is {args.item}, but the card this part ships "
+                  f"sends every reader to {declared}. Publishing would take "
+                  f"one public name and leave the card pointing at another, "
+                  f"and neither can be undone.", file=sys.stderr)
+            return 2
+        ensure_huggingface_repo(args.item, creds, log,
+                                may_create=declared is not None)
 
     started = time.monotonic()
     for position, name in enumerate(pending, 1):

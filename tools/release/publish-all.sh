@@ -101,4 +101,11 @@ step "$RELEASE/core-arms" huggingface     "$HF_REPO"  "$HOME/catastrophic/hf-tok
 echo
 echo "Kaggle is not in this list. It builds a dataset version from a whole"
 echo "directory through its own client, which does its own chunking and cannot"
-echo "draw from the shared budget, so it runs on its own once these finish."
+echo "draw from the shared budget, so it runs on its own once these finish:"
+echo
+echo "  tools/release/publish-kaggle.sh          # dry run"
+echo "  tools/release/publish-kaggle.sh --live"
+echo
+echo "Run it. The Kaggle DESCRIPTION does not travel with the other"
+echo "destinations, and leaving it to memory is how the corrected prose sat"
+echo "on disk while the public page carried the old copy."

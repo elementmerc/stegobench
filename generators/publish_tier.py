@@ -24,7 +24,7 @@ Every hosting platform wants ONE licence for the item. This corpus has seven,
 across 10,000 files, and no single one of them is true of the whole.
 
 Taking the loosest, CC0, would be laundering: it would tell a user they owe no
-attribution for 5,429 covers that require it.
+attribution for the majority of covers, which require it.
 
 So the collection-level licence is the **strictest obligation present**, CC BY
 4.0. A user who complies with it is compliant for every file in the corpus,

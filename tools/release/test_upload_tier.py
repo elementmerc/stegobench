@@ -569,3 +569,88 @@ class PartsThatShareAnItem(unittest.TestCase):
     def test_a_part_that_should_carry_metadata_still_fails_loud(self):
         with self.assertRaises(upload_tier.UploadError):
             upload_tier._ia_headers(self.packed)
+
+
+class HuggingFaceRepoGuards(unittest.TestCase):
+    """The panel found three holes in one function, from three lenses.
+
+    A private repository that already exists takes 48 GB to an address no
+    reader can reach; a part with no card creates one with no licence and no
+    credit list; and `--item` was a free string with nothing tying it to what
+    the shipped card tells readers to load.
+    """
+
+    def setUp(self):
+        self.packed = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.packed)
+        self.creds = {"HF_TOKEN": "t"}
+        self.lines = []
+
+    def log(self, message):
+        self.lines.append(message)
+
+    def card(self, repo="the-malware-files/pentimento-core"):
+        (self.packed / "README.md").write_text(
+            f'covers = load_dataset("{repo}", "covers", split="full")\n',
+            encoding="utf-8")
+
+    def remote(self, *, exists=True, private=False, posted=None):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def urlopen(request, timeout=None):
+            url = request if isinstance(request, str) else request.full_url
+            if url.endswith("/repos/create"):
+                (posted if posted is not None else []).append(request.data)
+                return Response(b'{"url":"x"}')
+            if exists:
+                return Response(json.dumps({"id": "x", "private": private}).encode())
+            raise upload_tier.urllib.error.HTTPError(
+                url, 404, "Not Found", {}, io.BytesIO(b'{"error":"not found"}'))
+        return urlopen
+
+    def run_with(self, remote, **kwargs):
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.ensure_huggingface_repo(
+                "the-malware-files/pentimento-core", self.creds, self.log,
+                **kwargs)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+
+    def test_an_existing_private_repository_is_refused(self):
+        """The 2026-09-19 failure took the EXISTS branch, not the create one."""
+        with self.assertRaises(upload_tier.UploadError) as caught:
+            self.run_with(self.remote(exists=True, private=True))
+        self.assertIn("PRIVATE", str(caught.exception))
+
+    def test_an_existing_public_repository_is_accepted(self):
+        self.run_with(self.remote(exists=True, private=False))
+        self.assertIn("exists and is public", "\n".join(self.lines))
+
+    def test_a_part_with_no_card_may_not_create_the_repository(self):
+        """Otherwise 45 GB lands with no licence and no credit list."""
+        posted = []
+        with self.assertRaises(upload_tier.UploadError) as caught:
+            self.run_with(self.remote(exists=False, posted=posted),
+                          may_create=False)
+        self.assertIn("no README.md", str(caught.exception))
+        self.assertEqual(posted, [], "a bare public repository was created")
+
+    def test_the_part_that_carries_the_card_may_create_it(self):
+        posted = []
+        self.run_with(self.remote(exists=False, posted=posted), may_create=True)
+        self.assertEqual(len(posted), 1)
+        self.assertIs(json.loads(posted[0])["private"], False)
+
+    def test_the_declared_repository_comes_from_the_shipped_card(self):
+        self.card("the-malware-files/pentimento-lite")
+        self.assertEqual(upload_tier.huggingface_repo_declared(self.packed),
+                         "the-malware-files/pentimento-lite")
+
+    def test_a_part_with_no_card_declares_nothing(self):
+        self.assertIsNone(upload_tier.huggingface_repo_declared(self.packed))

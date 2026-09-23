@@ -286,6 +286,73 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 samples", result.stdout)
 
+    def test_the_two_readers_return_the_same_sequence(self):
+        """"Exactly like a tar" is the load-bearing claim, so compare them.
+
+        Asserting only that both exit zero let a real divergence through: the
+        directory branch skipped dotfiles and the tar branch did not, so the
+        same content read one way and failed the other.
+        """
+        import hashlib
+
+        folder = self.unpacked("pair")
+        tar_path = self.dir / "pair.tar"
+        with tarfile.open(tar_path, "w") as tar:
+            for member in sorted(folder.iterdir()):
+                info = tarfile.TarInfo(member.name)
+                payload = member.read_bytes()
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+
+        harness = self.dir / "dump.py"
+        harness.write_text(
+            "import json, sys\n"
+            "sys.path.insert(0, %r)\n" % str(self.dir) +
+            "from load_pentimento import samples\n"
+            "import hashlib\n"
+            "print(json.dumps([(k, hashlib.sha256(i).hexdigest(), r)\n"
+            "                  for k, i, r in samples(sys.argv[1])]))\n",
+            encoding="utf-8")
+
+        def read(path):
+            out = subprocess.run([sys.executable, str(harness), str(path)],
+                                 capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return json.loads(out.stdout)
+
+        self.assertEqual(read(folder), read(tar_path))
+
+    def test_a_dotfile_is_skipped_in_a_tar_as_well_as_a_folder(self):
+        """The card tells a reader to re-pack a folder with `tar cf ... .`
+
+        A `.DS_Store` in that folder goes straight into the tar, so treating
+        the two differently breaks the recovery the card recommends.
+        """
+        folder = self.unpacked("repack")
+        (folder / ".DS_Store").write_bytes(b"junk")
+        tar_path = self.dir / "repack.tar"
+        with tarfile.open(tar_path, "w") as tar:
+            for member in sorted(folder.iterdir()):
+                info = tarfile.TarInfo(member.name)
+                payload = member.read_bytes()
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+        result = self.run_script(str(tar_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 samples", result.stdout)
+
+    def test_records_without_checksums_say_so_rather_than_no_samples(self):
+        """The two ways of verifying nothing send a reader to different places."""
+        path = self.dir / "nosums"
+        path.mkdir()
+        (path / "00000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (path / "00000.json").write_text(json.dumps({"licence": "CC0"}),
+                                         encoding="utf-8")
+        result = self.run_script("--verify", str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("none carried a sha256", result.stderr)
+        self.assertNotIn("no samples were found", result.stderr)
+
     def test_verify_checks_images_against_their_own_records(self):
         """SHA256SUMS names containers, so it cannot check this mirror.
 
@@ -332,13 +399,13 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 samples", result.stdout)
 
-    def test_verifying_something_with_no_checksums_is_not_a_pass(self):
+    def test_verifying_an_empty_folder_is_not_a_pass(self):
         """"0 checked, 0 mismatches" with a zero exit reads as success."""
         empty = self.dir / "empty"
         empty.mkdir()
         result = self.run_script("--verify", str(empty))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("nothing was verified", result.stderr)
+        self.assertIn("no samples were found", result.stderr)
 
     def test_an_incomplete_unpacked_sample_is_still_refused(self):
         path = self.unpacked("short")
@@ -684,6 +751,31 @@ class HuggingFaceConfigs(unittest.TestCase):
     def test_a_tier_with_no_arms_still_produces_a_loadable_card(self):
         configs = self.configs(arms={})
         self.assertEqual(set(configs), {"covers"})
+
+    def test_a_card_with_no_arms_does_not_call_the_covers_a_stego_arm(self):
+        """The variable name IS the claim a reader reads.
+
+        Falling back to "covers" published `stego = load_dataset(..., "covers")`,
+        so somebody believes they are streaming stego, streams covers, and
+        nothing errors because every record honestly says cover.
+        """
+        card = release_metadata.readme(self.COVERS, {"total": 20}, None, "1.0.0")
+        quick = card[card.index("## Quick start"):card.index("## What makes")]
+        self.assertNotIn("stego = ", quick)
+        self.assertIn("covers = ", quick)
+
+    def test_a_card_never_says_the_download_it_saves_you_is_zero(self):
+        covers = dict(self.COVERS,
+                      shards=[{"shard": "pentimento-core-00000.tar",
+                               "samples": 10}])
+        with self.assertRaises(release_metadata.ConfigError):
+            release_metadata.readme(covers, {"total": 20}, None, "1.0.0")
+
+    def test_the_quick_start_states_the_real_size(self):
+        card = release_metadata.readme(self.COVERS, {"total": 20}, self.ARMS,
+                                       "1.0.0")
+        quick = card[card.index("## Quick start"):card.index("## What makes")]
+        self.assertNotIn("rather than 0 GB", quick)
 
 
 if __name__ == "__main__":
