@@ -119,6 +119,10 @@ def _shard_glob(shards: list[str], others: set[str]) -> str:
     if not shards:
         raise ConfigError("a config was asked for with no shards")
     stems = {name[:-len(".tar")] for name in shards}
+    if any("-" not in stem for stem in stems):
+        raise ConfigError(
+            f"a shard name carries no numbered suffix, so no pattern can name "
+            f"the series: {sorted(shards)[:3]}")
     widths = {len(stem.rsplit("-", 1)[1]) for stem in stems}
     prefixes = {stem.rsplit("-", 1)[0] for stem in stems}
     if len(widths) != 1 or len(prefixes) != 1:
@@ -1150,9 +1154,15 @@ def _members(shard: str) -> Iterator[tuple[str, bytes]]:
     """
     path = pathlib.Path(shard)
     if path.is_dir():
+        # The key is the path RELATIVE to what you pointed at, not the
+        # basename. Point this at a folder holding several unpacked shards and
+        # basenames collide, because every arm restarts its numbering at
+        # 00000. Sorting keeps each sample's own members together, so the
+        # pairs stay right, but two unrelated images are handed out under one
+        # key and anything that keys on it keeps only the last.
         for member in sorted(path.rglob("*")):
-            if member.is_file():
-                yield member.name, member.read_bytes()
+            if member.is_file() and not member.name.startswith("."):
+                yield member.relative_to(path).as_posix(), member.read_bytes()
         return
     with tarfile.open(shard, "r|*") as tar:          # "r|*" is the streaming form
         for member in tar:
@@ -1203,16 +1213,26 @@ def verify(shard: str) -> int:
     """
     import hashlib
 
-    checked = bad = 0
+    checked = bad = skipped = 0
     for key, image, record in samples(shard):
         want = record.get("sha256")
         if not want:
+            skipped += 1
             continue
         checked += 1
         if hashlib.sha256(image).hexdigest() != want:
             bad += 1
             print(f"MISMATCH {key}", file=sys.stderr)
-    print(f"{checked:,} image(s) checked, {bad} mismatch(es)")
+    print(f"{checked:,} image(s) checked, {bad} mismatch(es)"
+          + (f", {skipped:,} record(s) carried no sha256" if skipped else ""))
+    if not checked:
+        # "0 checked, 0 mismatches" and a zero exit reads as a pass, and would
+        # be the answer for an empty folder or a path that holds no records at
+        # all. Nothing verified is not the same as nothing wrong.
+        print(f"nothing was verified in {shard}: no record carried a sha256. "
+              f"Check you pointed at a shard rather than beside one.",
+              file=sys.stderr)
+        return 1
     return 1 if bad else 0
 
 
@@ -1221,6 +1241,11 @@ def as_webdataset(pattern: str):
 
     `pattern` is a brace expression over shards, for example
     "pentimento-core-{00000..00009}.tar".
+
+    This one needs real tar shards, so it does NOT work on a mirror that
+    unpacked them: there is nothing for the pattern to match. Use `samples()`
+    above, which reads either, or re-pack a folder with
+    `tar cf pentimento-core-00000.tar -C pentimento-core-00000 .`
 
     Split by cover before you do this, not after. A cover and its stego
     versions are near-identical, so a random split puts a photograph on both

@@ -226,13 +226,21 @@ class LoaderTests(unittest.TestCase):
         self.script.write_text(release_metadata.loader(), encoding="utf-8")
 
     def shard(self, name: str, *, samples: int = 3, truncate: bool = False) -> pathlib.Path:
+        import hashlib
+
         path = self.dir / name
         with tarfile.open(path, "w") as tar:
             for i in range(samples):
                 key = f"{i:05d}"
+                image = b"\x89PNG\r\n\x1a\n" + bytes(64)
+                # Every real record carries the sha256 of the image beside it,
+                # and a fixture without one let `--verify` report a pass over
+                # nothing.
+                record = {"licence": "CC0", "source_png": f"{key}.png",
+                          "sha256": hashlib.sha256(image).hexdigest()}
                 for suffix, payload in (
-                    ("png", b"\x89PNG\r\n\x1a\n" + bytes(64)),
-                    ("json", json.dumps({"licence": "CC0", "source_png": f"{key}.png"}).encode()),
+                    ("png", image),
+                    ("json", json.dumps(record).encode()),
                 ):
                     if truncate and i == samples - 1 and suffix == "json":
                         continue  # a sample missing its record
@@ -298,6 +306,39 @@ class LoaderTests(unittest.TestCase):
         """A reader should not have to know which mirror they downloaded."""
         result = self.run_script("--verify", str(self.shard("ok.tar")))
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_several_unpacked_shards_under_one_folder_do_not_collide(self):
+        """Every arm restarts its numbering at 00000.
+
+        Keyed on the basename, `wow-0050/00000.png` and `hugo-0400/00000.png`
+        are handed out under the same key, so a caller building a dict of
+        samples silently keeps half the data.
+        """
+        parent = self.dir / "both"
+        parent.mkdir()
+        for arm in ("wow-0050", "hugo-0400"):
+            self.unpacked(f"both/{arm}", samples=2)
+        result = self.run_script(str(parent))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("4 samples", result.stdout)
+        self.assertIn("first sample: hugo-0400/00000", result.stdout,
+                      "the key must carry the shard, or two arms share it")
+
+    def test_a_stray_dotfile_does_not_break_the_read(self):
+        """A mirror or an operating system can leave one beside the data."""
+        path = self.unpacked("withjunk")
+        (path / ".DS_Store").write_bytes(b"junk")
+        result = self.run_script(str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 samples", result.stdout)
+
+    def test_verifying_something_with_no_checksums_is_not_a_pass(self):
+        """"0 checked, 0 mismatches" with a zero exit reads as success."""
+        empty = self.dir / "empty"
+        empty.mkdir()
+        result = self.run_script("--verify", str(empty))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nothing was verified", result.stderr)
 
     def test_an_incomplete_unpacked_sample_is_still_refused(self):
         path = self.unpacked("short")
@@ -606,6 +647,13 @@ class HuggingFaceConfigs(unittest.TestCase):
         arms = {"arms": [{"arm": "odd", "samples": 1, "shards": [
             {"shard": "pentimento-core-odd-00000.tar"},
             {"shard": "pentimento-core-odd-000001.tar"}]}]}
+        with self.assertRaises(release_metadata.ConfigError):
+            self.configs(arms=arms)
+
+    def test_a_shard_with_no_numbered_suffix_is_refused_cleanly(self):
+        """It used to raise IndexError, which names nothing useful."""
+        arms = {"arms": [{"arm": "odd", "samples": 1, "shards": [
+            {"shard": "loose.tar"}]}]}
         with self.assertRaises(release_metadata.ConfigError):
             self.configs(arms=arms)
 

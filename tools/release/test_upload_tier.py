@@ -468,6 +468,39 @@ class HuggingFaceRepository(unittest.TestCase):
         with self.assertRaises(upload_tier.UploadError):
             self.run_with(remote)
 
+    def test_a_401_whose_body_mentions_404_is_still_not_a_missing_repo(self):
+        """This was matched on the message text, which reads the server's body.
+
+        A refusal that happens to quote "404" would have been taken for an
+        absent repository and answered by CREATING one under that name.
+        """
+        import io
+
+        def remote(request, timeout=None):
+            url = request if isinstance(request, str) else request.full_url
+            raise upload_tier.urllib.error.HTTPError(
+                url, 401, "Unauthorized", {},
+                io.BytesIO(b'{"error":"token lacks scope; see error 404 docs"}'))
+
+        with self.assertRaises(upload_tier.UploadError) as caught:
+            self.run_with(remote)
+        self.assertEqual(caught.exception.status, 401)
+
+    def test_a_repository_created_by_the_other_part_is_not_a_failure(self):
+        """Both parts go to one repository, so this runs twice per release."""
+        import io
+
+        def remote(request, timeout=None):
+            url = request if isinstance(request, str) else request.full_url
+            if url.endswith("/repos/create"):
+                raise upload_tier.urllib.error.HTTPError(
+                    url, 409, "Conflict", {}, io.BytesIO(b"already created"))
+            raise upload_tier.urllib.error.HTTPError(
+                url, 404, "Not Found", {}, io.BytesIO(b'{"error":"Repo not found"}'))
+
+        self.run_with(remote)
+        self.assertIn("which is fine", "\n".join(self.lines))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,7 +133,17 @@ CREDENTIALS = {
 
 
 class UploadError(RuntimeError):
-    pass
+    """`status` carries the HTTP code where one caused the failure.
+
+    Callers that need to tell "not there" from "not allowed" read it. Matching
+    on the message text instead reads whatever the server put in the body, so
+    a 401 whose body happens to mention 404 would be taken for a missing
+    repository and answered by creating one.
+    """
+
+    def __init__(self, *args, status: int | None = None):
+        super().__init__(*args)
+        self.status = status
 
 
 class SharedBudget:
@@ -635,7 +645,8 @@ def _hf_api(url: str, token: str, body: bytes | None = None,
         return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         detail = e.read()[:300].decode("utf-8", "replace").strip()
-        raise UploadError(f"{what}: {e.code} {e.reason}. {detail}") from e
+        raise UploadError(f"{what}: {e.code} {e.reason}. {detail}",
+                          status=e.code) from e
     except urllib.error.URLError as e:
         raise UploadError(f"{what}: could not reach it, {e.reason}") from e
 
@@ -661,7 +672,7 @@ def ensure_huggingface_repo(repo: str, creds: dict[str, str], log,
         log(f"    the dataset repository {repo} exists")
         return
     except UploadError as e:
-        if " 404 " not in f" {e} ":
+        if e.status != 404:
             raise
 
     if not apply:
@@ -675,12 +686,20 @@ def ensure_huggingface_repo(repo: str, creds: dict[str, str], log,
             f"has no owner, so there is nothing to create it under")
     organization, _, name = repo.partition("/")
     log(f"    creating the dataset repository {repo}, public")
-    _hf_api("https://huggingface.co/api/repos/create", token,
-            body=json.dumps({"type": "dataset", "name": name,
-                             "organization": organization,
-                             "private": False}).encode(),
-            method="POST", content_type="application/json",
-            what=f"{repo}: hugging face repository creation")
+    try:
+        _hf_api("https://huggingface.co/api/repos/create", token,
+                body=json.dumps({"type": "dataset", "name": name,
+                                 "organization": organization,
+                                 "private": False}).encode(),
+                method="POST", content_type="application/json",
+                what=f"{repo}: hugging face repository creation")
+    except UploadError as e:
+        # Two parts go to one repository, so this runs twice per release, and
+        # a re-run after an interruption runs it again. "It is already there"
+        # is the outcome we wanted, not a failure.
+        if e.status != 409:
+            raise
+        log(f"    {repo} was created by something else first, which is fine")
 
 
 def _hf_commit(repo: str, token: str, lines: list[dict], summary: str) -> None:
