@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import pathlib
+import shutil
 import sys
 import tempfile
 import time
@@ -470,3 +471,68 @@ class HuggingFaceRepository(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartsThatShareAnItem(unittest.TestCase):
+    """`core-arms` goes into the item `core` created, and ships no metadata.
+
+    That was fatal until 2026-09-23: the live release finished its 3.3 GB
+    covers step and died on the first line of the 45 GB arms step, because
+    `reconcile_ia_metadata` raised on a file only the covers part carries.
+    """
+
+    def setUp(self):
+        self.packed = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.packed)
+        self.creds = {"IA_ACCESS_KEY": "k", "IA_SECRET_KEY": "s"}
+        self.lines = []
+
+    def log(self, message):
+        self.lines.append(message)
+
+    def fake_remote(self, exists, posted):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def urlopen(request, timeout=None):
+            if isinstance(request, str):
+                body = {"metadata": {"identifier": "i"}} if exists else {}
+                return Response(json.dumps(body).encode())
+            posted.append(request.data)
+            return Response(b'{"success": true}')
+        return urlopen
+
+    def run_with(self, remote):
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.reconcile_ia_metadata(
+                self.packed, "pentimento-core-v1", self.creds, self.log)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+
+    def test_a_part_with_no_metadata_joins_an_item_that_exists(self):
+        posted = []
+        self.run_with(self.fake_remote(True, posted))
+        self.assertEqual(posted, [])
+        self.assertIn("already exists", "\n".join(self.lines))
+
+    def test_a_part_with_no_metadata_refuses_to_create_a_bare_item(self):
+        """Otherwise the item goes public with no title and no licence."""
+        posted = []
+        with self.assertRaises(upload_tier.UploadError) as caught:
+            self.run_with(self.fake_remote(False, posted))
+        self.assertIn("does not exist yet", str(caught.exception))
+        self.assertEqual(posted, [])
+
+    def test_the_per_file_headers_still_ask_for_the_bucket(self):
+        """Without `x-amz-auto-make-bucket` the PUT 404s, metadata or not."""
+        headers = upload_tier._ia_headers(self.packed, required=False)
+        self.assertEqual(headers, {"x-amz-auto-make-bucket": "1"})
+
+    def test_a_part_that_should_carry_metadata_still_fails_loud(self):
+        with self.assertRaises(upload_tier.UploadError):
+            upload_tier._ia_headers(self.packed)

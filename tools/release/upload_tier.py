@@ -412,15 +412,37 @@ def credentials_for(destination: str) -> dict[str, str]:
     return {k: os.environ[k] for k in needed}
 
 
-def _ia_headers(packed: pathlib.Path) -> dict[str, str]:
+def ia_item_exists(item: str) -> bool:
+    """Whether the Archive already holds this identifier.
+
+    The metadata endpoint answers 200 with an empty body for an identifier
+    nobody has taken, rather than 404, so presence is the `metadata` key
+    rather than the status code.
+    """
+    try:
+        with urllib.request.urlopen(f"https://archive.org/metadata/{item}",
+                                    timeout=120) as response:
+            return bool(json.loads(response.read().decode("utf-8")).get("metadata"))
+    except urllib.error.URLError as e:
+        raise UploadError(
+            f"could not ask the archive whether {item} exists, {e.reason}") from e
+
+
+def _ia_headers(packed: pathlib.Path, required: bool = True) -> dict[str, str]:
     """Item metadata as the Archive's S3 endpoint wants it.
 
     The endpoint creates the item on the first PUT and only then, so the
     metadata has to ride along with it. Sending nothing gives a 404: there is
     no bucket, and nothing asked for one to be made.
+
+    `required=False` is for a part JOINING an item another part created and
+    described. Only `main` may decide that, because it is the only caller that
+    has checked the item is really there.
     """
     source = packed / "ia-metadata.json"
     if not source.is_file():
+        if not required:
+            return {"x-amz-auto-make-bucket": "1"}
         raise UploadError(
             f"no ia-metadata.json in {packed}. It is derived from the manifest "
             f"by publish_tier.py prepare, and without it the item would be "
@@ -465,7 +487,25 @@ def reconcile_ia_metadata(packed: pathlib.Path, item: str,
     """
     source = packed / "ia-metadata.json"
     if not source.is_file():
-        raise UploadError(f"no ia-metadata.json in {packed}")
+        # A part that JOINS an item carries no metadata of its own. `core-arms`
+        # goes into the item `core` created and described, and only the covers
+        # part ships `ia-metadata.json`, so this is the normal case for the
+        # arms rather than a fault. It was fatal until 2026-09-23, which killed
+        # the live release between step 1 and step 2, 45 GB from done.
+        #
+        # It is only safe once the item is REALLY there. A part with no
+        # metadata landing in an item nobody made creates one, publicly, with
+        # no title, no licence and no description, so prove it rather than
+        # assume it.
+        if ia_item_exists(item):
+            log(f"  this part carries no item metadata of its own, and {item} "
+                f"already exists, described by the part that does")
+            return
+        raise UploadError(
+            f"no ia-metadata.json in {packed}, and the item {item} does not "
+            f"exist yet. The part that carries the metadata has to be "
+            f"uploaded first, or the item is created with no title, no "
+            f"licence and no description.")
     want = json.loads(source.read_text(encoding="utf-8"))
 
     current_url = f"https://archive.org/metadata/{item}"
@@ -563,7 +603,10 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
         # corpus of tar shards there is nothing useful to derive and the queue
         # would run for days.
         request.add_header("x-archive-queue-derive", "0")
-        for key, value in _ia_headers(packed).items():
+        # `main` has already established that an item exists for a part with no
+        # metadata of its own, so the absence here is the arms joining the
+        # covers' item rather than a release that forgot to describe itself.
+        for key, value in _ia_headers(packed, required=False).items():
             request.add_header(key, value)
         try:
             with urllib.request.urlopen(request, timeout=7200) as response:
