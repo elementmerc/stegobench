@@ -257,3 +257,125 @@ class PublishableSetTests(unittest.TestCase):
         # Nano has no arms checksum file of its own when packed alone.
         files = upload_tier.load_index(self.packed)
         self.assertIn("pentimento-core-00000.tar", files)
+
+
+class IaMetadataReconcileTests(unittest.TestCase):
+    """Item metadata does NOT ride along with a PUT to an existing item.
+
+    `x-archive-meta-*` headers are applied by the S3 endpoint only when
+    `x-amz-auto-make-bucket` creates the item. On an item that already exists
+    they are ignored and the PUT still succeeds, so re-uploading a corrected
+    README leaves the item's description exactly as it was.
+
+    That is not hypothetical: `pentimento-core-v1` was created by hand on
+    2026-09-19 with a description claiming 5,429 covers require attribution,
+    against a corpus that holds 5,453, and it stood for three days.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.packed = pathlib.Path(self.tmp.name)
+        (self.packed / "ia-metadata.json").write_text(json.dumps({
+            "identifier": "pentimento-core-v1",
+            "title": "Pentimento Core",
+            "description": "5,453 covers (54.5%) require attribution.",
+            "collection": "datasets",
+            "subject": ["steganalysis", "dataset"],
+        }), encoding="utf-8")
+        self.creds = {"IA_ACCESS_KEY": "k", "IA_SECRET_KEY": "s"}
+        self.lines = []
+
+    def log(self, message):
+        self.lines.append(message)
+
+    def fake_remote(self, metadata, posted):
+        """Stand in for the metadata API: a GET, then maybe a POST."""
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def urlopen(request, timeout=None):
+            if isinstance(request, str):
+                return Response(json.dumps({"metadata": metadata}).encode())
+            posted.append(request.data)
+            return Response(json.dumps({"success": True}).encode())
+        return urlopen
+
+    def test_a_stale_description_is_detected_and_patched(self):
+        posted = []
+        remote = self.fake_remote({
+            "identifier": "pentimento-core-v1",
+            "title": "Pentimento Core",
+            "description": "5,429 covers (54.3%) require attribution.",
+            "collection": "opensource_media",
+            "subject": ["steganalysis", "dataset"],
+        }, posted)
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.reconcile_ia_metadata(
+                self.packed, "pentimento-core-v1", self.creds, self.log)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+
+        self.assertEqual(len(posted), 1, "the patch was never sent")
+        body = posted[0].decode()
+        self.assertIn("5%2C453", body.replace("%2C", "%2C"))
+        joined = "\n".join(self.lines)
+        self.assertIn("description", joined)
+        self.assertIn("collection", joined)
+        # The fields that already agree must not be rewritten: a patch that
+        # touches everything clobbers fields the Archive maintains itself.
+        self.assertNotIn('"path": "/title"', body)
+
+    def test_an_item_that_already_agrees_is_not_written_to(self):
+        posted = []
+        remote = self.fake_remote({
+            "identifier": "pentimento-core-v1",
+            "title": "Pentimento Core",
+            "description": "5,453 covers (54.5%) require attribution.",
+            "collection": "datasets",
+            "subject": ["steganalysis", "dataset"],
+        }, posted)
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.reconcile_ia_metadata(
+                self.packed, "pentimento-core-v1", self.creds, self.log)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+        self.assertEqual(posted, [], "a no-op patch is a write nobody can audit")
+        self.assertIn("already matches", "\n".join(self.lines))
+
+    def test_a_dry_run_reports_the_drift_and_sends_nothing(self):
+        posted = []
+        remote = self.fake_remote({
+            "identifier": "pentimento-core-v1",
+            "description": "5,429 covers (54.3%) require attribution.",
+        }, posted)
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.reconcile_ia_metadata(
+                self.packed, "pentimento-core-v1", self.creds, self.log,
+                apply=False)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+        self.assertEqual(posted, [], "a dry run must not write")
+        self.assertIn("WOULD be updated", "\n".join(self.lines))
+
+    def test_an_item_that_does_not_exist_yet_is_left_to_the_upload(self):
+        posted = []
+        remote = self.fake_remote({}, posted)
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = remote
+        try:
+            upload_tier.reconcile_ia_metadata(
+                self.packed, "pentimento-core-v1", self.creds, self.log)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+        self.assertEqual(posted, [])
+        self.assertIn("does not exist yet", "\n".join(self.lines))

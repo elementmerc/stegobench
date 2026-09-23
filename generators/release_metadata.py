@@ -407,26 +407,39 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
             "@type": "cr:FileObject",
             "@id": "archive",
             "name": "archive",
-            # NO `sha256` HERE, and the omission is deliberate.
+            # THE `sha256` BELOW IS A PLACEHOLDER, AND IT HAS TO BE.
             #
-            # This field held "https://github.com/mlcommons/croissant/issues/80"
-            # - the community workaround for Croissant requiring a checksum on
-            # a container FileObject that is not a file and has no checksum.
-            # The workaround is well known and it is still a false assertion
-            # in a record that HuggingFace mirrors and retains in git history.
-            # A consumer reading `sha256` got a URL, and it undercut the one
-            # claim this corpus rests on - that every file carries a real
-            # digest - at exactly the point a machine reads it.
+            # A panel flagged it on 2026-09-22 as a false assertion: a GitHub
+            # issue URL sitting in a checksum field, in a record HuggingFace
+            # mirrors and keeps in history, undercutting the one claim this
+            # corpus rests on at exactly the point a machine reads it. That
+            # reading is right, and the obvious fix - drop the key - was tried
+            # the same night and is WRONG. mlcroissant refuses the record:
             #
-            # An absent field is honest and a validator warning is cheap. The
-            # per-shard digests, which are real, live in the FileSets below
-            # and in SHA256SUMS-covers / SHA256SUMS-arms.
+            #   ValidationError: [Metadata > FileObject(archive)] At least one
+            #   of these properties should be defined: ['md5', 'sha256'].
+            #
+            # It is an error, not a warning, so dropping the field trades a
+            # cosmetic falsehood for an unpublishable record. This FileObject
+            # is an Archive ITEM, a container with no bytes of its own, and
+            # Croissant has no way to say that - which is what issue 80 is
+            # about and why the URL is the community's answer to it.
+            #
+            # So it stays, and the description beside it now says what it is,
+            # so the next reader finds an explanation rather than a bug. The
+            # REAL digests, which is what actually matters, are per shard in
+            # the FileSets below and in SHA256SUMS-covers / SHA256SUMS-arms.
             "description": "The Internet Archive item holding every shard. "
-                           "This is a container, not a file, so it carries no "
-                           "checksum of its own; the shard digests are in "
-                           "SHA256SUMS-covers and SHA256SUMS-arms.",
+                           "NOTE: this is an item, not a file, so it has no "
+                           "checksum of its own. Croissant requires one on a "
+                           "FileObject, so the sha256 field carries a pointer "
+                           "to the upstream issue about that requirement "
+                           "rather than a digest. Do not parse it. The real "
+                           "per-shard digests are in SHA256SUMS-covers and "
+                           "SHA256SUMS-arms, and on each FileSet below.",
             "contentUrl": ARCHIVE_ITEM.format(slug=slug),
             "encodingFormat": "text/html",
+            "sha256": "https://github.com/mlcommons/croissant/issues/80",
         },
         {
             "@type": "cr:FileSet",
@@ -518,6 +531,24 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
         "transform": {"regex": "^(.*)\\.(?:png|jpg)$"},
     }
 
+    #: Which key a record set joins on, per file set. A field reading from the
+    #: JSON side has to declare the join back to the image side or mlcroissant
+    #: refuses the record; and it has to be the RIGHT key. This was implicit
+    #: ("anything that is not cover-images joins on KEY"), which silently gave
+    #: the arm fields the cover join and produced:
+    #:
+    #:   ValidationError: You try to use the sources with names ('arm-images',
+    #:   'arm-records') as sources, but you didn't declare a join between them.
+    #:
+    #: Naming it per file set is the difference between a rule that happens to
+    #: hold for one record set and one that states what it means.
+    JOIN_KEY = {
+        "cover-images": None,   # this IS the key side
+        "cover-records": KEY,
+        "arm-images": None,     # likewise, for the arms
+        "arm-records": ARM_KEY,
+    }
+
     def field(fid: str, name: str, description: str, data_type: str,
               file_set: str, extract: dict) -> dict:
         spec = {
@@ -528,8 +559,9 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
             "dataType": data_type,
             "source": {"fileSet": {"@id": file_set}, "extract": extract},
         }
-        if file_set != "cover-images":
-            spec["references"] = dict(KEY)
+        join = JOIN_KEY.get(file_set, KEY)
+        if join is not None:
+            spec["references"] = dict(join)
         return spec
 
     record_sets = [{
@@ -608,16 +640,25 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
                       "was derived from.",
                       "sc:Text", "arm-records",
                       {"jsonPath": "$.cover_licence.attribution"}),
-                {
-                    **field("samples/source_png", "source_png",
-                            "The cover this sample was derived from. JOIN ON "
-                            "THIS to split without leaking: a cover and every "
-                            "sample made from it must stay on the same side "
-                            "of any train/test boundary.",
-                            "sc:Text", "arm-records",
-                            {"jsonPath": "$.source_png"}),
-                    "references": {"field": {"@id": "covers/key"}},
-                },
+                # `references` here declares the join to `arm-images`, which
+                # is what mlcroissant requires of any field read from the JSON
+                # side. It CANNOT also carry the cross-record-set join to
+                # `covers/key`: a field has one `references`, and pointing it
+                # at the cover key was tried and left the arm join undeclared,
+                # which mlcroissant refuses.
+                #
+                # So the join to the covers is stated in the description
+                # instead, where a human reads it. That is weaker than a
+                # machine-readable edge and it is what the format allows here.
+                # The VALUE is the cover's filename, identical to `covers/key`,
+                # so a loader can still join on it; it just is not told to.
+                field("samples/source_png", "source_png",
+                      "The cover this sample was derived from, as a filename "
+                      "identical to the `key` field of the `covers` record "
+                      "set. JOIN ON THIS to split without leaking: a cover "
+                      "and every sample made from it must stay on the same "
+                      "side of any train/test boundary.",
+                      "sc:Text", "arm-records", {"jsonPath": "$.source_png"}),
             ],
         })
 
@@ -730,14 +771,20 @@ the version they affect; versions are not silently replaced.
 issue at <https://github.com/elementmerc/pentimento>. Requests from a
 photographer about their own work are acted on.
 
-**What can actually be withdrawn?** Not everything, and the honest answer
-differs per destination. A HuggingFace repository can be deleted and a Kaggle
-dataset removed. An Internet Archive item can be darkened on request, but its
-identifier stays taken. **A torrent, once seeded, cannot be recalled** - the
-Archive item is its web seed, so darkening the item removes the seed but not
-copies already in the swarm. This is said plainly because a promise of errata
-is worth what its mechanism is worth, and for the torrent the mechanism is
-persuasion.
+**What can actually be withdrawn?** The honest answer differs per destination,
+and it is better than it was. A HuggingFace repository can be deleted and a
+Kaggle dataset removed. An Internet Archive item can be darkened on request,
+though its identifier stays taken.
+
+**No torrent is published for this corpus**, and that is the part worth saying
+plainly, because a seeded torrent is the one thing on that list that could
+never be recalled: darkening the Archive item would remove the web seed but not
+the copies already in the swarm. The Archive generates a torrent of its own for
+every public item; that one is the Archive's and follows the item.
+
+So a removal request can be honoured everywhere this corpus is published. A
+promise of errata is worth what its mechanism is worth, and here the mechanism
+exists.
 """
 
 

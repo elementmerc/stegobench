@@ -2,14 +2,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Daniel Iwugo
 #
-# Send the release to every destination, in the order the torrent requires,
-# through one shared bandwidth budget.
+# Send the release to every destination, through one shared bandwidth budget.
 #
 # ORDER IS NOT A PREFERENCE
 #
-# The torrent carries the Internet Archive item as its web seed, so the Archive
-# has to hold the files before the torrent means anything. Covers before arms,
-# because the covers are the part somebody can use on their own.
+# Covers before arms, because the covers are the part somebody can use on their
+# own.
+#
+# NO TORRENT STEP. Academic Torrents was the intended home for it and only
+# accepts uploads from .edu domains, which the operator does not have and
+# cannot get (.edu.ng is not accepted either). Parked permanently on
+# 2026-09-23 rather than left as a step that would fail at the end of a six
+# hour upload.
+#
+# Worth recording what that removes: a seeded torrent was the one destination
+# here that could never be withdrawn. Darkening the Archive item kills the web
+# seed but not the swarm. Without it, every destination this script touches can
+# actually be pulled back, which changes the risk of publishing at all.
+#
+# The Archive still generates its own torrent for the item; that is IA's, not
+# ours, and it follows the item if the item is darkened.
 #
 # ONE BUDGET, WHATEVER THE ORDER
 #
@@ -83,11 +95,6 @@ step "$RELEASE/core"      internetarchive "$IA_ITEM"  "$HOME/catastrophic/pentim
 step "$RELEASE/core-arms" internetarchive "$IA_ITEM"  "$HOME/catastrophic/pentimento.env"
 step "$RELEASE/core"      huggingface     "$HF_REPO"  "$HOME/catastrophic/hf-token-pentimento.env"
 step "$RELEASE/core-arms" huggingface     "$HF_REPO"  "$HOME/catastrophic/hf-token-pentimento.env"
-
-# The torrent step checks that the Archive holds every file before saying the
-# seed exists, and Academic Torrents has no upload API, so it ends with an
-# instruction rather than a transfer.
-step "$RELEASE/core-arms" torrent "$IA_ITEM" "$HOME/catastrophic/pentimento.env"
 
 echo
 echo "Kaggle is not in this list. It builds a dataset version from a whole"

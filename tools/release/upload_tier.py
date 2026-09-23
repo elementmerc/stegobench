@@ -99,6 +99,7 @@ import pathlib
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:
@@ -437,6 +438,86 @@ def _ia_headers(packed: pathlib.Path) -> dict[str, str]:
     return headers
 
 
+def reconcile_ia_metadata(packed: pathlib.Path, item: str,
+                          creds: dict[str, str], log,
+                          apply: bool = True) -> None:
+    """Make an EXISTING item's metadata match `ia-metadata.json`.
+
+    WHY THIS IS NOT COVERED BY THE UPLOAD.
+
+    `_ia_headers` rides `x-archive-meta-*` along with every PUT, and that is
+    how a NEW item gets its title, licence and description: the S3 endpoint
+    applies them when `x-amz-auto-make-bucket` creates the item. On an item
+    that already exists they are ignored. Silently: the PUT succeeds, the file
+    lands, and the metadata is whatever it was.
+
+    Measured on 2026-09-22. `pentimento-core-v1` had been created by hand on
+    the 19th and its description read "5,429 covers (54.3%) require
+    attribution" when the corpus holds 5,453 at 54.5%. Re-uploading the
+    corrected README would have replaced the file and left that sentence
+    standing in the item's public, search-indexed description, which is the
+    first thing a reader sees and the last thing anybody would think to check.
+
+    So metadata is reconciled explicitly, through the metadata API, which is
+    the only route that edits an item in place.
+    """
+    source = packed / "ia-metadata.json"
+    if not source.is_file():
+        raise UploadError(f"no ia-metadata.json in {packed}")
+    want = json.loads(source.read_text(encoding="utf-8"))
+
+    current_url = f"https://archive.org/metadata/{item}"
+    with urllib.request.urlopen(current_url, timeout=120) as response:
+        current = json.loads(response.read().decode("utf-8"))
+    have = current.get("metadata") or {}
+    if not have:
+        log(f"  {item} does not exist yet; its metadata will ride with the "
+            f"first upload, which is what creates it.")
+        return
+
+    # Only the fields we actually assert, and only where they differ. A patch
+    # that rewrites everything would clobber fields the Archive maintains
+    # itself, and a patch of no-ops is a write nobody can audit.
+    changes = {}
+    for key, value in want.items():
+        if key == "identifier":
+            continue
+        mine = value if not isinstance(value, (list, tuple)) else list(value)
+        theirs = have.get(key)
+        if isinstance(theirs, (list, tuple)):
+            theirs = list(theirs)
+        if mine != theirs:
+            changes[key] = mine
+
+    if not changes:
+        log(f"  {item} metadata already matches ia-metadata.json")
+        return
+
+    for key in sorted(changes):
+        before = str(have.get(key, "<absent>"))
+        after = str(changes[key])
+        log(f"    {key}: {before[:70]!r} -> {after[:70]!r}")
+
+    if not apply:
+        log(f"  DRY RUN: {len(changes)} metadata field(s) WOULD be updated")
+        return
+
+    patch = json.dumps([{"op": "add", "path": f"/{k}", "value": v}
+                        for k, v in changes.items()])
+    body = urllib.parse.urlencode({
+        "-target": "metadata",
+        "-patch": patch,
+        "access": creds["IA_ACCESS_KEY"],
+        "secret": creds["IA_SECRET_KEY"],
+    }).encode()
+    request = urllib.request.Request(current_url, data=body, method="POST")
+    with urllib.request.urlopen(request, timeout=300) as response:
+        result = json.loads(response.read().decode("utf-8") or "{}")
+    if not result.get("success"):
+        raise UploadError(f"metadata update refused for {item}: {result}")
+    log(f"  {item}: {len(changes)} metadata field(s) updated")
+
+
 def put_internetarchive(packed: pathlib.Path, name: str, item: str,
                         creds: dict[str, str], budget: SharedBudget, log) -> None:
     """One file into an Archive item, over its S3 compatible endpoint.
@@ -772,8 +853,26 @@ def main(argv: list[str] | None = None) -> int:
             log(f"  would send {name}")
         if len(pending) > 5:
             log(f"  ... and {len(pending) - 5} more")
+        # Read-only, and worth doing in a dry run precisely because item
+        # metadata is the part that does NOT ride along with the files. A dry
+        # run that lists the shards and says nothing about a stale description
+        # is the report that let 5,429 stand for three days.
+        if args.destination == "internetarchive":
+            try:
+                log("  item metadata, which does not travel with the files:")
+                reconcile_ia_metadata(packed, args.item, creds, log,
+                                      apply=False)
+            except (UploadError, urllib.error.URLError, OSError) as e:
+                log(f"  could not read the item's current metadata: {e}")
         log("DRY RUN complete. Nothing was sent. Re-run with --live to publish.")
         return 0
+
+    # BEFORE the files, not after. If the run is interrupted halfway the item
+    # should already describe itself correctly; an item carrying new shards
+    # under a stale description is the worse of the two partial states, and
+    # the description is what a reader sees first.
+    if args.destination == "internetarchive":
+        reconcile_ia_metadata(packed, args.item, creds, log)
 
     started = time.monotonic()
     for position, name in enumerate(pending, 1):
