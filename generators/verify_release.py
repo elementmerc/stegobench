@@ -65,6 +65,15 @@ THE CHECKS, AND WHY EACH ONE IS HERE
     manifest being right does not make the README right: they are checked by
     different things, and for one release they disagreed by 24 covers.
 
+`links`
+    Every URL in the shipped prose answers. `DATASHEET.md` went to three public
+    mirrors telling photographers to open an issue at a repository that was
+    private, so the address was a 404 for the whole life of the release, and
+    `CITATION.cff` names the same one as `repository-code`. A reviewer called a
+    dead objection channel the one thing that would fail their chain of custody
+    standard. Needs `--check-urls`, because it is the only check that reaches
+    off this machine and an offline run must not go red for being offline.
+
 `pool`
     The JPEG cover pool is dense, because `build_adaptive_arms.py` indexes it
     positionally and one gap mispairs every cover after it.
@@ -103,7 +112,11 @@ import hashlib
 import json
 import pathlib
 import random
+import re
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -123,6 +136,117 @@ try:
     from manifest_repair import UNUSABLE_ARTIST
 except ImportError:  # pragma: no cover - the constant is the contract
     UNUSABLE_ARTIST = {"", "unknown", "unknown author", "not recorded"}
+
+#: Which of the published files are read for links. Taken by SUFFIX from
+#: `release_metadata.PUBLISHED_EXTRAS` rather than listed here, so a document
+#: added to the release is scanned without anybody remembering to add it: the
+#: Markdown prose, plus the structured files that carry addresses
+#: (`CITATION.cff`, `croissant.json`, `licence-summary.json`). The checksum
+#: files, the CSV and the loader script hold no prose and are left out.
+PROSE_SUFFIXES = (".md", ".cff", ".json")
+
+#: Every request is bounded, because this is the one check that waits on a
+#: machine nobody here controls. A host that accepts a connection and then
+#: never answers would otherwise hang a release gate indefinitely.
+URL_TIMEOUT = 10.0
+URL_REDIRECT_CAP = 5
+#: At most this many distinct URLs per run, spread across hosts rather than
+#: taken in order (see `_spread`). `ATTRIBUTION.md` alone carries one Commons
+#: link per credited photograph, and checking them in sorted order would spend
+#: the whole budget on one host and never reach the repository link that is
+#: the reason this check exists.
+URL_CAP = 200
+#: A per-file read cap, so a corrupt or accidentally enormous document cannot
+#: pull the whole release into memory. Exceeding it is reported, not ignored.
+PROSE_BYTES_CAP = 8 << 20
+#: Some hosts refuse an unidentified client outright, which would read as a
+#: dead link when the page is fine.
+URL_USER_AGENT = "pentimento-verify-release/1.0 (+link check)"
+
+#: Deliberately excludes the closing brackets and the quote characters, so a
+#: link written as Markdown, as JSON or inside a sentence ends where the prose
+#: resumes rather than swallowing the punctuation after it.
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'\\)\]}|]+")
+
+#: Answers that say nothing about whether the page exists: the host declined to
+#: talk to us this minute. A rate limit must not fail a release.
+UNSETTLED_STATUSES = frozenset({408, 425, 429})
+
+
+class _CappedRedirects(urllib.request.HTTPRedirectHandler):
+    max_redirections = URL_REDIRECT_CAP
+
+
+def fetch_status(url: str, timeout: float = URL_TIMEOUT) -> tuple[int | None, str]:
+    """Ask a URL whether it is there, and report what happened.
+
+    Returns ``(status, how)``. A status of None means no answer arrived at all,
+    which is a different thing from a 404 and is reported differently: the page
+    may be perfectly alive and this machine simply off the network.
+
+    HEAD first, because a link check has no use for the body and some of these
+    documents are large. A host that will not do HEAD says so with a 4xx of its
+    own, and GET is tried once before its refusal is believed.
+    """
+    opener = urllib.request.build_opener(_CappedRedirects())
+    last = "no request was made"
+    for method in ("HEAD", "GET"):
+        request = urllib.request.Request(
+            url, method=method, headers={"User-Agent": URL_USER_AGENT})
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return response.status, method
+        except urllib.error.HTTPError as e:
+            # 405 and 501 are the standard "I do not do that verb"; 400 and 403
+            # are what several CDNs send instead. Anything else is the host's
+            # real answer about this address.
+            if method == "HEAD" and e.code in (400, 403, 405, 501):
+                last = f"HEAD refused with {e.code}"
+                continue
+            return e.code, method
+        except Exception as e:
+            # Deliberately broad: DNS, TLS, reset, timeout and the malformed
+            # URL all arrive as different types and mean the same thing here,
+            # that nothing answered. The reason is carried, never discarded.
+            return None, f"{type(e).__name__}: {e}"
+    return None, last
+
+
+def urls_in(text: str) -> list[str]:
+    """Every URL in a document, in the order it appears, trailing punctuation
+    removed. A sentence ending "...at https://example.org." names a host, not a
+    path with a full stop on it."""
+    found = []
+    for raw in URL_PATTERN.findall(text):
+        url = raw.rstrip(".,;:!?")
+        if url:
+            found.append(url)
+    return found
+
+
+def _spread(urls: list[str], cap: int) -> list[str]:
+    """Take at most `cap` URLs, one host at a time, round robin.
+
+    Taking the first `cap` in any stable order hands the whole budget to
+    whichever host appears most, and in this release that is Commons with one
+    link per credited photograph. The link that has actually been broken, the
+    repository address in `DATASHEET.md` and `CITATION.cff`, appears twice. So
+    every distinct host gets looked at before any host gets looked at twice.
+    """
+    by_host: dict[str, list[str]] = collections.OrderedDict()
+    for url in urls:
+        host = urllib.parse.urlsplit(url).netloc.lower()
+        by_host.setdefault(host, []).append(url)
+
+    taken: list[str] = []
+    queues = [q for q in by_host.values()]
+    while queues and len(taken) < cap:
+        queues = [q for q in queues if q]
+        for queue in queues:
+            taken.append(queue.pop(0))
+            if len(taken) >= cap:
+                break
+    return taken
 
 
 
@@ -780,6 +904,118 @@ def check_figures(docs: pathlib.Path, release: pathlib.Path,
                                f"corpus that shipped")
 
 
+def check_links(release: pathlib.Path, report: Report,
+                fetch=fetch_status, cap: int = URL_CAP,
+                timeout: float = URL_TIMEOUT) -> None:
+    """Does every address in the shipped prose answer?
+
+    `DATASHEET.md` went to three public mirrors telling photographers to open
+    an issue at `https://github.com/elementmerc/pentimento`, and that address
+    was a 404 for the whole life of the release, because the repository was
+    private. `CITATION.cff` names the same one as `repository-code`. A forensic
+    analyst reviewing the corpus called a dead objection channel the single
+    thing that would fail their chain of custody standard, and no check here
+    was looking at a link.
+
+    Every other check reads bytes on this machine. This one reaches off it, so
+    it runs only when asked for, and it separates the three answers a link can
+    give: gone, alive, and nobody said. The middle one is the release's
+    problem; the last one is usually the checker's.
+    """
+    try:
+        from release_metadata import PUBLISHED_EXTRAS
+    except ImportError as e:  # pragma: no cover - the import is the contract
+        report.fail("links", f"the list of published files could not be "
+                             f"imported ({e}), so no shipped link was checked "
+                             f"and a hardcoded list would drift from it")
+        return
+
+    if not release.is_dir():
+        report.fail("links", f"no release directory at {release}")
+        return
+
+    wanted = {name for name in PUBLISHED_EXTRAS
+              if name.endswith(PROSE_SUFFIXES)}
+    documents = sorted(p for p in release.rglob("*") if p.name in wanted)
+    if not documents:
+        report.fail("links", f"no published prose under {release}, so this "
+                             f"check had nothing to read. The release ships "
+                             f"{len(wanted)} such file(s) per tier")
+        return
+
+    seen: dict[str, list[str]] = collections.OrderedDict()
+    oversized = []
+    for path in documents:
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            report.fail("links", f"{path.name} could not be read ({e})")
+            continue
+        if size > PROSE_BYTES_CAP:
+            oversized.append(f"{path.name} ({size:,} bytes)")
+            continue
+        where = f"{path.parent.name}/{path.name}"
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for url in urls_in(text):
+            origins = seen.setdefault(url, [])
+            if where not in origins:
+                origins.append(where)
+
+    if oversized:
+        report.fail("links", f"{len(oversized)} published document(s) are "
+                             f"larger than the {PROSE_BYTES_CAP:,} byte read "
+                             f"cap and were NOT scanned, e.g. {oversized[:3]}")
+
+    chosen = _spread(list(seen), cap)
+    dead, unreachable, unsettled, checked = [], [], [], 0
+    for url in chosen:
+        status, how = fetch(url, timeout)
+        checked += 1
+        origin = ", ".join(seen[url][:2])
+        if status is None:
+            unreachable.append(f"{url} (in {origin}): {how}")
+        elif status in UNSETTLED_STATUSES or status >= 500:
+            unsettled.append(f"{url} (in {origin}): {status}")
+        elif status >= 400:
+            dead.append(f"{url} (in {origin}): {status}")
+
+    if dead:
+        report.fail("links",
+                    f"{len(dead):,} address(es) in the shipped prose do not "
+                    f"exist: {dead[:3]}. A reader following one of these has "
+                    f"no way to reach us, and the objection channel a licence "
+                    f"depends on is the worst of them to lose")
+    if unreachable:
+        report.fail("links",
+                    f"{len(unreachable):,} address(es) gave no answer at all: "
+                    f"{unreachable[:3]}. That is NOT the same as a 404. The "
+                    f"page may be perfectly alive and this machine off the "
+                    f"network, so confirm connectivity before believing it")
+    if dead or unreachable or oversized:
+        return
+    # Settled, not checked. A run where every host rate-limited us looked at
+    # 200 addresses and proved nothing about any of them, and "200 addresses
+    # answer" is the clean line people act on.
+    settled = checked - len(unsettled)
+    if nothing_checked("links", settled, report,
+                       "addresses that gave a usable answer"):
+        return
+
+    tail = ""
+    if unsettled:
+        # A rate limit is the host declining to talk this minute. Failing the
+        # release over it would teach everyone to pass --check-urls twice and
+        # believe the second answer, which is worse than saying what happened.
+        tail = (f"; {len(unsettled)} host(s) declined to answer this run "
+                f"(rate limit or server error), e.g. {unsettled[:2]}, and "
+                f"were NOT proven either way")
+    if len(seen) > len(chosen):
+        tail += (f"; capped at {cap:,} of {len(seen):,} distinct address(es), "
+                 f"spread across hosts")
+    report.note("links", f"{settled:,} address(es) across {len(documents)} "
+                         f"published document(s) answer{tail}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--covers", required=True)
@@ -798,6 +1034,9 @@ def main(argv: list[str] | None = None) -> int:
                          "the release directory itself")
     ap.add_argument("--full", action="store_true",
                     help="check every file rather than a sample")
+    ap.add_argument("--check-urls", action="store_true",
+                    help="fetch every address in the shipped prose, which is "
+                         "the only check that needs a network")
     args = ap.parse_args(argv)
 
     # Line buffering is so a long run's progress reaches a tail as it happens.
@@ -859,8 +1098,19 @@ def main(argv: list[str] | None = None) -> int:
         report.skip("figures", "no --docs given, so no published number was "
                                "compared with the corpus it describes")
 
+    if args.check_urls and args.release:
+        check_links(pathlib.Path(args.release), report)
+    elif args.check_urls:
+        report.skip("links", "no --release given, so there was no shipped "
+                             "prose to take addresses from")
+    else:
+        report.skip("links", "no --check-urls given, so no published address "
+                             "was fetched and a dead objection channel would "
+                             "not show. This one needs a network")
+
     order = ["covers", "licences", "digests", "pool", "pairs", "stale",
-             "provenance", "packed", "packed-arms", "attribution", "figures"]
+             "provenance", "packed", "packed-arms", "attribution", "figures",
+             "links"]
     print()
     for check in order:
         if check in report.failures:

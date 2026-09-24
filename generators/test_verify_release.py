@@ -626,6 +626,159 @@ class FiguresCheckTests(unittest.TestCase):
                             for m in r.failures["figures"]), r.failures)
 
 
+class LinkCheckTests(unittest.TestCase):
+    """The shipped prose sends people somewhere, and nothing read the address.
+
+    `DATASHEET.md` told photographers to open an issue at a repository that
+    was private, so the address 404ed for the whole life of the release, on
+    three public mirrors, with `CITATION.cff` naming the same one. A reviewer
+    called a dead objection channel the one thing that would fail their chain
+    of custody standard.
+
+    Nothing here touches a real network: `fetch` is stubbed, because a test
+    that needs the internet is a test that goes red on a train.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.release = pathlib.Path(self.tmp.name) / "release"
+        self.tier = self.release / "core"
+        self.tier.mkdir(parents=True)
+        self.write("DATASHEET.md",
+                   "Open an issue at https://github.com/elementmerc/pentimento "
+                   "if a photograph of yours is here in error.")
+        self.write("CITATION.cff",
+                   "repository-code: https://github.com/elementmerc/pentimento\n")
+        self.write("README.md",
+                   "Licensed [CC BY 4.0](https://creativecommons.org/cc-by).")
+        self.calls = []
+
+    def write(self, name: str, body: str) -> None:
+        (self.tier / name).write_text(body, encoding="utf-8")
+
+    def fetch(self, answers: dict):
+        def stub(url, timeout):
+            self.calls.append(url)
+            return answers.get(url, (200, "HEAD"))
+        return stub
+
+    def check(self, answers: dict | None = None, **kw) -> Report:
+        r = Report()
+        vr.check_links(self.release, r, fetch=self.fetch(answers or {}), **kw)
+        return r
+
+    def test_a_release_whose_addresses_all_answer_passes(self):
+        r = self.check()
+        self.assertTrue(r.ok, r.failures)
+        self.assertIn("links", r.notes)
+
+    def test_a_dead_address_is_caught_and_names_the_file_it_came_from(self):
+        """A count alone is unactionable: the fix is editing a document, so the
+        report has to say which document."""
+        r = self.check({"https://github.com/elementmerc/pentimento": (404, "HEAD")})
+        self.assertIn("links", r.failures)
+        message = " ".join(r.failures["links"])
+        self.assertIn("do not exist", message)
+        self.assertIn("404", message)
+        self.assertIn("DATASHEET.md", message)
+
+    def test_an_address_that_gave_no_answer_reads_differently_from_a_404(self):
+        """A dead page and a dead network are different problems with different
+        fixes, and one line covering both sends somebody editing prose that is
+        perfectly correct."""
+        r = self.check({"https://github.com/elementmerc/pentimento":
+                        (None, "URLError: Name or service not known")})
+        message = " ".join(r.failures["links"])
+        self.assertIn("gave no answer at all", message)
+        self.assertIn("NOT the same as a 404", message)
+        self.assertNotIn("do not exist", message)
+
+    def test_a_duplicated_address_is_fetched_once(self):
+        """The repository link appears in both DATASHEET.md and CITATION.cff,
+        and a release with 5,453 credit lines cannot afford to fetch a link
+        once per mention."""
+        self.check()
+        self.assertEqual(sorted(self.calls), sorted(set(self.calls)))
+        self.assertEqual(len(self.calls), 2)
+
+    def test_both_files_naming_a_dead_address_are_named(self):
+        r = self.check({"https://github.com/elementmerc/pentimento": (404, "HEAD")})
+        message = " ".join(r.failures["links"])
+        self.assertIn("CITATION.cff", message)
+
+    def test_a_rate_limited_host_does_not_fail_the_release_but_is_reported(self):
+        """Failing over a 429 teaches everyone to run it twice and believe the
+        second answer, which is worse than saying what happened."""
+        r = self.check({"https://creativecommons.org/cc-by": (429, "HEAD")})
+        self.assertTrue(r.ok, r.failures)
+        self.assertIn("declined to answer", r.notes["links"])
+
+    def test_a_run_where_every_host_declined_does_not_report_clean(self):
+        """Looked at 2 addresses and proved nothing about either is not a pass,
+        however clean the line reads."""
+        r = self.check({"https://github.com/elementmerc/pentimento": (503, "HEAD"),
+                        "https://creativecommons.org/cc-by": (429, "HEAD")})
+        self.assertTrue(any("cannot look" in m for m in r.failures["links"]),
+                        r.failures)
+
+    def test_the_cap_is_spread_across_hosts_rather_than_taken_in_order(self):
+        """ATTRIBUTION.md carries one Commons link per credited photograph.
+        Taking the first n in any stable order spends the whole budget on
+        Commons and never reaches the repository link this check exists for."""
+        self.write("ATTRIBUTION.md", "\n".join(
+            f"- [cover {n}](https://commons.wikimedia.org/wiki/File:{n})"
+            for n in range(50)))
+        self.check(cap=4)
+        self.assertIn("https://github.com/elementmerc/pentimento", self.calls)
+        self.assertEqual(len(self.calls), 4)
+
+    def test_a_release_with_no_published_prose_is_caught_rather_than_skipped(self):
+        for name in ("DATASHEET.md", "CITATION.cff", "README.md"):
+            (self.tier / name).unlink()
+        r = self.check()
+        self.assertIn("links", r.failures)
+
+    def test_prose_carrying_no_address_at_all_does_not_report_clean(self):
+        self.write("DATASHEET.md", "A corpus of photographs.")
+        self.write("CITATION.cff", "title: Pentimento\n")
+        self.write("README.md", "Ten thousand covers.")
+        r = self.check()
+        self.assertTrue(any("cannot look" in m for m in r.failures["links"]),
+                        r.failures)
+
+    def test_a_trailing_full_stop_is_not_part_of_the_address(self):
+        """"...at https://example.org." names a host, not a path with a full
+        stop on it, and fetching the punctuation reports a false 404."""
+        self.assertEqual(vr.urls_in("see https://example.org/a. Next"),
+                         ["https://example.org/a"])
+
+    def test_a_markdown_link_ends_at_the_bracket(self):
+        self.assertEqual(vr.urls_in("[CC](https://example.org/cc) and more"),
+                         ["https://example.org/cc"])
+
+    def test_the_check_reports_not_run_when_the_flag_is_absent(self):
+        """A network check that quietly turns a green offline verification red
+        would get switched off, so it is opt in; a check nobody ran must still
+        leave a line, or the summary reads as though it passed."""
+        covers = pathlib.Path(self.tmp.name) / "commons"
+        covers.mkdir()
+        rows = []
+        for n in range(3):
+            payload = f"cover {n}".encode()
+            (covers / f"{n:05d}.png").write_bytes(payload)
+            rows.append(cover(n, sha256=hashlib.sha256(payload).hexdigest()))
+        (covers / "manifest.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(
+                vr.main(["--covers", str(covers), "--expect", "3"]), 0)
+        text = out.getvalue()
+        self.assertIn("links     NOT RUN", text)
+        self.assertIn("--check-urls", text)
+
+
 class CouldNotLookTests(unittest.TestCase):
     """The fault found eight times across this fleet in one day.
 
