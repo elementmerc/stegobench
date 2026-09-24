@@ -20,6 +20,7 @@ import fnmatch
 import io
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tarfile
@@ -776,6 +777,55 @@ class HuggingFaceConfigs(unittest.TestCase):
                                        "1.0.0")
         quick = card[card.index("## Quick start"):card.index("## What makes")]
         self.assertNotIn("rather than 0 GB", quick)
+
+
+class ChecksumFileScope(unittest.TestCase):
+    """`sha256sum -c` is the FIRST thing the README asks a reader to run.
+
+    It listed 23 files while 22 published, so every reader of the Archive copy
+    was told two files were missing from a download that was intact.
+    """
+
+    def test_the_checksum_file_lists_only_what_publishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = pathlib.Path(tmp)
+            (d / "pentimento-core-00000.tar").write_bytes(b"")
+            (d / "pentimento-core-index.json").write_text(json.dumps({
+                "tier": "Core", "samples": 1,
+                "shards": [{"shard": "pentimento-core-00000.tar", "samples": 1,
+                            "bytes": 5_000_000, "sha256": "a" * 64}],
+            }), encoding="utf-8")
+            (d / "licence-summary.json").write_text(json.dumps({
+                "total": 1, "licences": {"CC0": 1},
+                "attribution_required": 0, "attribution_required_pct": 0.0,
+            }), encoding="utf-8")
+            for name in ("README.md", "LICENCES.md", "load_pentimento.py",
+                         "dataset-metadata.json", "ia-metadata.json"):
+                (d / name).write_text("x", encoding="utf-8")
+            release_metadata.main(["--release", str(d), "--version", "1.0.0"])
+            listed = {line.split("  ", 1)[1]
+                      for line in (d / "SHA256SUMS-covers").read_text().splitlines()
+                      if line.strip()}
+        self.assertIn("README.md", listed)
+        self.assertIn("pentimento-core-index.json", listed,
+                      "the pack index ships, so it needs a checksum too")
+        self.assertNotIn("dataset-metadata.json", listed,
+                         "Kaggle's control file is not part of the corpus")
+        self.assertNotIn("ia-metadata.json", listed,
+                         "the Archive's control file is not part of the corpus")
+
+    def test_the_two_copies_of_the_published_set_agree(self):
+        """The uploader keeps its own copy because it may not import this one.
+
+        It is bind-mounted alone into a container holding write tokens for
+        public archives. The duplication is deliberate; the drift is not.
+        """
+        uploader = (pathlib.Path(__file__).resolve().parent.parent
+                    / "tools" / "release" / "upload_tier.py")
+        text = uploader.read_text(encoding="utf-8")
+        body = text.split("PACKAGED_EXTRAS = (", 1)[1].split(")", 1)[0]
+        theirs = tuple(re.findall(r'"([^"]+)"', body))
+        self.assertEqual(theirs, release_metadata.PUBLISHED_EXTRAS)
 
 
 if __name__ == "__main__":

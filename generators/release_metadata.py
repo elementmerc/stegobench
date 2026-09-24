@@ -61,6 +61,31 @@ from tiers import TierError, tier_cover_names  # noqa: E402
 # published to sends every reader to a 404.
 HF_REPO_FORMAT = "the-malware-files/pentimento-{tier}"
 
+#: The non-shard files that PUBLISH. This must stay identical to
+#: `PACKAGED_EXTRAS` in `tools/release/upload_tier.py`, which is the uploader's
+#: copy of the same list; `test_release_metadata.py` reads both files and fails
+#: if they drift.
+#:
+#: Two copies rather than an import because the uploader is deliberately
+#: standalone: it is bind-mounted alone into a container that holds write
+#: tokens for public archives, so it may not import from `generators/`. The
+#: duplication is the price of that isolation, and the test is what makes it
+#: safe.
+PUBLISHED_EXTRAS = (
+    "README.md",
+    "LICENCES.md",
+    "DATASHEET.md",
+    "SPLITS.md",
+    "CITATION.cff",
+    "croissant.json",
+    "licence-summary.json",
+    "ATTRIBUTION.md",
+    "ATTRIBUTION.csv",
+    "load_pentimento.py",
+    "SHA256SUMS-covers",
+    "SHA256SUMS-arms",
+)
+
 NOT_COMPARABLE = (
     "This is a JPEG-decompressed spatial corpus. It is NOT comparable to "
     "BOSSbase, whose covers were never JPEG compressed. Detector numbers "
@@ -1457,12 +1482,33 @@ def main(argv: list[str] | None = None) -> int:
     # Last, because it hashes the files written above. Anything that changes
     # after this point invalidates it, which is why nothing does.
     def digests_of(directory: pathlib.Path) -> dict[str, str]:
+        # NAMES, NOT A GLOB. Listing everything in the directory put
+        # `dataset-metadata.json` and `ia-metadata.json` into the checksum
+        # file, and neither is ever published: they are instructions to Kaggle
+        # and to the Archive, not part of the corpus. So `sha256sum -c
+        # SHA256SUMS-covers`, which is the FIRST thing the README tells a
+        # reader to run, reported two missing files on a download that was
+        # completely intact. It did that on the public Archive item from the
+        # day it was published.
+        #
+        # A checksum file that cries wolf is worse than none: the reader who
+        # meets it either stops trusting the corpus or stops running the check.
+        def publishes(name: str) -> bool:
+            # The pack index ships too, and its name carries the tier, so it
+            # cannot be a fixed entry in the list. Leaving it out shipped a
+            # file with no checksum against it, which is the opposite fault to
+            # the one above and just as quiet.
+            if fnmatch.fnmatchcase(name, "pentimento-*-index.json"):
+                return True
+            return name in PUBLISHED_EXTRAS
+
         return {
             p.name: hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(directory.iterdir())
-            if p.is_file() and not p.name.endswith(".tar")
+            # A checksum file cannot carry its own digest, so the two
+            # SHA256SUMS files are the only published things not listed.
+            if p.is_file() and publishes(p.name)
             and not p.name.startswith("SHA256SUMS")
-            and p.name != ".upload-budget"
         }
 
     # NAMED PER PART, because every destination is flat.
