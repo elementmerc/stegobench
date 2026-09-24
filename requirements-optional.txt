@@ -45,3 +45,22 @@ mlcroissant==1.1.0
 # The Hansken extraction plugin SDK, used only by `integrations/hansken/`.
 hansken-extraction-plugin==0.10.0
 logbook==1.8.2
+
+# WebDataset, which `generators/release_metadata.py` names in the shipped
+# corpus documentation: `as_webdataset()` is the training path it recommends,
+# and the prose now tells a Kaggle reader that it opens a `.tar.bin` shard
+# directly. That claim is the reason this line exists. It was verified on
+# 2026-09-25, reading two renamed shards through a brace pattern and decoding
+# six samples, and `test_release_metadata.py` re-runs that check wherever the
+# package is present and skips where it is not.
+#
+# A claim we publish, that nothing can re-check, is the same defect the
+# mlcroissant note above describes.
+#
+# COOLDOWN NOT CONFIRMED. 1.0.2 is the latest on PyPI and is what was
+# verified, but the upload date could not be read from this machine (the JSON
+# API returned a stale answer naming 0.2.111 as latest, and the release page
+# would not load), so the 7 day window in baseline Section 5 is unchecked
+# rather than cleared. Confirm it before installing this set on a machine that
+# holds credentials.
+webdataset==1.0.2

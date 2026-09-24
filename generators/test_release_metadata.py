@@ -432,6 +432,31 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 image(s) checked, 0 mismatch", result.stdout)
 
+    def test_webdataset_opens_a_tar_bin_shard(self):
+        """The shipped prose recommends WebDataset and says it reads this copy.
+
+        That sentence was written before anybody ran it here, and the risk was
+        specific rather than vague: WebDataset expands a brace pattern into
+        filenames itself, so a content sniff would not save it if it filtered
+        by extension on the way. Measured on 2026-09-25 with 1.0.2, it does
+        not: two renamed shards yielded six samples.
+
+        Skipped rather than failed where the package is absent, matching every
+        other optional dependency here. It is in
+        `requirements-optional.txt` so this is re-runnable at all.
+        """
+        try:
+            import webdataset as wds
+        except ImportError:
+            self.skipTest("webdataset is not installed (requirements-optional.txt)")
+
+        for n in range(2):
+            self.shard(f"pentimento-core-{n:05d}.tar.bin")
+        pattern = str(self.dir / "pentimento-core-{00000..00001}.tar.bin")
+        rows = list(wds.WebDataset(pattern, shardshuffle=False)
+                    .to_tuple("png;jpg;jpeg", "json"))
+        self.assertEqual(len(rows), 6)
+
     def test_several_unpacked_shards_under_one_folder_do_not_collide(self):
         """Every arm restarts its numbering at 00000.
 
