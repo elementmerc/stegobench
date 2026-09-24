@@ -44,7 +44,10 @@ def packed_release(root: pathlib.Path, *, tier: str = "Core", covers: int = 1000
     (root / f"pentimento-{tier.lower()}-index.json").write_text(json.dumps({
         "tier": tier,
         "samples": covers,
-        "shards": [{"name": f"pentimento-{tier.lower()}-{n:05d}.tar"}
+        # `shard`, which is the key pack_tier.py actually writes. The notebook
+        # only counts these, so a wrong key would pass here and mislead the
+        # next person who copied this fixture for something that reads it.
+        "shards": [{"shard": f"pentimento-{tier.lower()}-{n:05d}.tar"}
                    for n in range(shards)],
     }), encoding="utf-8")
     (root / "dataset-metadata.json").write_text(json.dumps({

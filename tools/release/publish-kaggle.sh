@@ -24,8 +24,13 @@
 #
 # TWO THINGS THAT WILL BITE
 #
-#   1. Kaggle versions a whole directory, so the release directory must hold
-#      the tier folders and nothing else. Anything stray goes public.
+#   1. Kaggle versions a whole directory and has no exclude flag, so whatever
+#      sits in the directory it is pointed at goes public. It is therefore
+#      pointed at a STAGING directory holding exactly the published set, built
+#      by kaggle_stage.py from the pack index and the published-file list
+#      rather than from whatever happens to be on disk. Pointing it at the
+#      release directory itself published ia-metadata.json, which is an
+#      instruction file for the Internet Archive and no part of the corpus.
 #   2. Kaggle EXTRACTS archives on upload and gives no way to refuse, so the
 #      tar shards arrive as folders. That is expected, it is described in the
 #      dataset description, and `load_pentimento.py --verify` is what checks
@@ -80,7 +85,36 @@ echo
 # It goes to a temporary directory rather than into $PACKED, because Kaggle
 # versions that whole directory and anything stray in it goes public.
 KERNEL="$(mktemp -d)"
-trap 'rm -rf "$KERNEL"' EXIT
+STAGE=""
+# ONE CLEANUP FOR BOTH TEMPORARY DIRECTORIES, on the way out however we leave.
+# bash clears an inherited EXIT trap inside a `( )` subshell, so the subshells
+# below that source the credentials do not fire this on their own exit; it runs
+# once, when this shell does. INT and TERM are named too because a staged tier
+# is up to 3.3 GB of hard links and a Ctrl+C should not leave it behind.
+cleanup() {
+  [ -n "$KERNEL" ] && rm -rf "$KERNEL"
+  [ -n "$STAGE" ] && rm -rf "$STAGE"
+  return 0
+}
+trap cleanup EXIT INT TERM
+
+# THE PUBLISHED SET, CHOSEN BEFORE ANYTHING IS SENT. kaggle_stage.py refuses,
+# loudly and with nothing staged, if a file the published set names is not in
+# the release directory, and it prints what it left behind as well as what it
+# took, because a silent exclusion is how the opposite fault starts.
+#
+# The staging directory sits BESIDE the release rather than in /tmp: hard links
+# need one filesystem, and a Core tier is 3.3 GB that would otherwise be copied
+# on every publish.
+echo "=== what goes to Kaggle ==="
+if [ "${1:-}" != "--live" ]; then
+  python3 "$HERE/kaggle_stage.py" --packed "$PACKED" --dry-run
+else
+  STAGE="$(mktemp -d "$RELEASE/.kaggle-stage.XXXXXX")"
+  python3 "$HERE/kaggle_stage.py" --packed "$PACKED" --stage "$STAGE"
+fi
+echo
+
 echo "=== starter notebook ==="
 python3 "$HERE/kaggle_notebook.py" --packed "$PACKED" --out "$KERNEL"
 echo
@@ -88,7 +122,8 @@ echo
 if [ "${1:-}" != "--live" ]; then
   echo "DRY RUN. Nothing will be sent. Pass --live to publish."
   echo
-  echo "It would run, from $PACKED:"
+  echo "It would run, from a staging directory holding exactly the set"
+  echo "listed above:"
   echo "  kaggle datasets version -m '$MESSAGE' -p . -t -r skip"
   echo
   echo "  -t  KEEPS TABULAR FILES AS THEY ARE. Without it Kaggle rewrites"
@@ -111,7 +146,11 @@ echo "LIVE. This publishes a new public version of $SLUG."
   set +a
   # KAGGLE_USERNAME is not in the credentials file; only KAGGLE_KEY is.
   export KAGGLE_USERNAME="${KAGGLE_USERNAME:-$KAGGLE_USER}"
-  cd "$PACKED"
+  # THE STAGING DIRECTORY, NOT $PACKED. The client versions everything it
+  # finds here, and here holds only what publishes plus dataset-metadata.json,
+  # which it reads for the id, title, licence and description and then skips
+  # rather than uploading.
+  cd "$STAGE"
   "$KAGGLE" datasets version -m "$MESSAGE" -p . -t -r skip
 ) 2>&1 | tee -a "$LOGS/publish-kaggle.log"
 
