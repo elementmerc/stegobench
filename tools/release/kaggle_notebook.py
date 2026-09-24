@@ -80,7 +80,7 @@ def _lines(lines) -> list[str]:
     return [line + "\n" for line in body.split("\n")][:-1] + [body.split("\n")[-1]]
 
 
-def build(packed: pathlib.Path, slug: str) -> dict:
+def build(packed: pathlib.Path) -> dict:
     """The notebook, with every figure read from the packed release."""
     summary_path = packed / "licence-summary.json"
     if not summary_path.is_file():
@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     try:
-        notebook = build(packed, slug)
+        notebook = build(packed)
     except ReleaseIncomplete as e:
         print(e, file=sys.stderr)
         return 1

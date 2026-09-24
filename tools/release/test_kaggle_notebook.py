@@ -109,18 +109,18 @@ class FiguresComeFromTheReleaseTests(unittest.TestCase):
 
     def test_the_cover_count_is_the_one_in_the_index(self):
         packed = packed_release(self.root / "core", covers=1234)
-        text = sources(kaggle_notebook.build(packed, "owner/slug"))
+        text = sources(kaggle_notebook.build(packed))
         self.assertIn("1,234", text)
 
     def test_the_attribution_figures_are_the_ones_in_the_summary(self):
         packed = packed_release(self.root / "core", covers=1234,
                                 required=567, pct=45.9)
-        text = sources(kaggle_notebook.build(packed, "owner/slug"))
+        text = sources(kaggle_notebook.build(packed))
         self.assertIn("567 of 1,234 covers (45.9%)", text)
 
     def test_the_shard_count_is_the_one_in_the_index(self):
         packed = packed_release(self.root / "core", shards=3)
-        text = sources(kaggle_notebook.build(packed, "owner/slug"))
+        text = sources(kaggle_notebook.build(packed))
         self.assertIn("3 tar shards", text)
 
     def test_a_different_tier_names_its_own_shards(self):
@@ -128,7 +128,7 @@ class FiguresComeFromTheReleaseTests(unittest.TestCase):
         # a notebook opening `pentimento-core-00000` on the Nano page would
         # fail at the first cell it asks the reader to run.
         packed = packed_release(self.root / "nano", tier="Nano", covers=200)
-        text = sources(kaggle_notebook.build(packed, "owner/slug"))
+        text = sources(kaggle_notebook.build(packed))
         self.assertIn("pentimento-nano-00000", text)
         self.assertNotIn("pentimento-core-00000", text)
 
@@ -137,11 +137,11 @@ class FiguresComeFromTheReleaseTests(unittest.TestCase):
         # else, and a starter notebook is the page most likely to be read
         # instead of the card rather than beside it.
         packed = packed_release(self.root / "core")
-        self.assertIn("BOSSbase", sources(kaggle_notebook.build(packed, "owner/slug")))
+        self.assertIn("BOSSbase", sources(kaggle_notebook.build(packed)))
 
     def test_the_split_warning_is_present(self):
         packed = packed_release(self.root / "core")
-        text = sources(kaggle_notebook.build(packed, "owner/slug"))
+        text = sources(kaggle_notebook.build(packed))
         self.assertIn("source_png", text)
         self.assertIn("Split by cover", text)
 
@@ -152,14 +152,14 @@ class FiguresComeFromTheReleaseTests(unittest.TestCase):
             json.dumps({"total": 1, "attribution_required": 0,
                         "attribution_required_pct": 0.0}), encoding="utf-8")
         with self.assertRaises(kaggle_notebook.ReleaseIncomplete) as caught:
-            kaggle_notebook.build(packed, "owner/slug")
+            kaggle_notebook.build(packed)
         self.assertIn("pack_tier.py", str(caught.exception))
 
     def test_a_release_missing_its_licence_summary_names_the_file(self):
         packed = packed_release(self.root / "core")
         (packed / "licence-summary.json").unlink()
         with self.assertRaises(kaggle_notebook.ReleaseIncomplete) as caught:
-            kaggle_notebook.build(packed, "owner/slug")
+            kaggle_notebook.build(packed)
         self.assertIn("licence-summary.json", str(caught.exception))
 
     def test_two_tiers_in_one_directory_are_refused(self):
@@ -170,7 +170,7 @@ class FiguresComeFromTheReleaseTests(unittest.TestCase):
             json.dumps({"tier": "Nano", "samples": 200, "shards": []}),
             encoding="utf-8")
         with self.assertRaises(kaggle_notebook.ReleaseIncomplete) as caught:
-            kaggle_notebook.build(packed, "owner/slug")
+            kaggle_notebook.build(packed)
         self.assertIn("2 pack indexes", str(caught.exception))
 
 
