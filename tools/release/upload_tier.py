@@ -140,11 +140,21 @@ class UploadError(RuntimeError):
     on the message text instead reads whatever the server put in the body, so
     a 401 whose body happens to mention 404 would be taken for a missing
     repository and answered by creating one.
+
+    `retryable` is set only where the failure came from the connection layer,
+    and it is a separate field from `status` because the absence of a status
+    does not imply one. Most of the status-less failures raised here are
+    permanent and local: no ia-metadata.json in the packed directory, an item
+    that has been darkened, a body that is not JSON. Treating "no status" as
+    "the line dropped" made the uploader sleep two minutes and repeat each of
+    those five times before reporting the thing it already knew.
     """
 
-    def __init__(self, *args, status: int | None = None):
+    def __init__(self, *args, status: int | None = None,
+                 retryable: bool = False):
         super().__init__(*args)
         self.status = status
+        self.retryable = retryable
 
 
 class SharedBudget:
@@ -652,13 +662,19 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
         try:
             with urllib.request.urlopen(request, timeout=7200) as response:
                 if response.status not in (200, 201):
-                    raise UploadError(f"{name}: archive returned {response.status}")
+                    raise UploadError(f"{name}: archive returned {response.status}",
+                                      status=response.status)
         except urllib.error.HTTPError as e:
             detail = e.read()[:300].decode("utf-8", "replace").strip()
+            # `status` is carried, because `with_retries` reads it to tell a
+            # server that said no from a line that dropped. Without it a 401
+            # here was indistinguishable from a reset and was retried five
+            # times, two minutes of sleeping to be refused again.
             raise UploadError(f"{name}: archive returned {e.code} {e.reason}. "
-                              f"{detail}") from e
+                              f"{detail}", status=e.code) from e
         except urllib.error.URLError as e:
-            raise UploadError(f"{name}: could not reach the archive, {e.reason}") from e
+            raise UploadError(f"{name}: could not reach the archive, {e.reason}",
+                              retryable=True) from e
 
 
 #: How many times a network-level failure is retried, and the first delay.
@@ -666,6 +682,30 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
 #: that window is not an exception, it is the weather.
 RETRIES = 5
 RETRY_BACKOFF = 4.0
+
+#: The HTTP answers that are the line rather than the request. A 429 is the
+#: host asking to be asked later and a 5xx is it having a bad minute; both come
+#: back differently on their own. Every other 4xx is a decision about this
+#: request and repeating it only says no more slowly.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def retryable(e: BaseException) -> bool:
+    """Whether trying the same thing again could plausibly work.
+
+    Read rather than guessed. The earlier rule was "an UploadError with no
+    status came from the connection layer", and that was wrong in both
+    directions: the Archive's own HTTP wrapper did not record a status, so a
+    401 was retried five times, and half the status-less failures raised in
+    this file are permanent local refusals that a retry cannot touch.
+    """
+    if isinstance(e, UploadError):
+        return e.retryable or e.status in RETRYABLE_STATUSES
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in RETRYABLE_STATUSES
+    # URLError, ConnectionError, TimeoutError and the bare OSError beneath
+    # them all mean the request did not complete.
+    return True
 
 
 def with_retries(attempt, what: str, log, retries: int = RETRIES):
@@ -675,9 +715,11 @@ def with_retries(attempt, what: str, log, retries: int = RETRIES):
     reset it, the name did not resolve, the socket timed out. Trying again is
     the right answer and the only one that gets a day-long upload finished.
 
-    An HTTP error is NOT retried. The server answered; it said no. Repeating a
-    401 or a 400 just says no more slowly, and for a destination that creates
-    public artefacts a blind retry is how one bad request becomes five.
+    A refusal is NOT retried. The server answered; it said no. Repeating a 401
+    or a 400 just says no more slowly, and for a destination that creates
+    public artefacts a blind retry is how one bad request becomes five. The
+    exceptions are in `RETRYABLE_STATUSES`, which are the answers that say
+    "not now" rather than "no".
 
     Added 2026-09-24 after `[Errno 104] Connection reset by peer` killed the
     live publish 127 files into the 770-file arms step, having already lost a
@@ -687,20 +729,20 @@ def with_retries(attempt, what: str, log, retries: int = RETRIES):
     for remaining in range(retries, -1, -1):
         try:
             return attempt()
-        except (urllib.error.HTTPError, UploadError) as e:
-            # UploadError from _hf_api already wraps an HTTP answer. Only the
-            # ones carrying no status came from the connection layer.
-            if isinstance(e, UploadError) and e.status is None and remaining:
-                pass
-            else:
+        except (urllib.error.HTTPError, UploadError, urllib.error.URLError,
+                ConnectionError, TimeoutError, OSError) as e:
+            if not remaining or not retryable(e):
                 raise
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
-            if not remaining:
-                raise
-        log(f"    {what}: connection failed, retrying in {delay:.0f}s "
+            why = e
+        # The real reason, not the word "connection": a log saying every
+        # failure was a connection failure is how a permanent refusal hid
+        # behind two minutes of sleeping.
+        log(f"    {what}: {why}; retrying in {delay:.0f}s "
             f"({remaining} attempt(s) left)")
         time.sleep(delay)
         delay *= 2
+    # Only reachable if `retries` is negative, which would mean the caller
+    # asked for no attempt at all. Loud rather than a silent None.
     raise UploadError(f"{what}: gave up after {retries} retries")
 
 
@@ -745,7 +787,8 @@ def _hf_api(url: str, token: str, body: bytes | None = None,
         raise UploadError(f"{what}: {e.code} {e.reason}. {detail}",
                           status=e.code) from e
     except urllib.error.URLError as e:
-        raise UploadError(f"{what}: could not reach it, {e.reason}") from e
+        raise UploadError(f"{what}: could not reach it, {e.reason}",
+                          retryable=True) from e
 
 
 def huggingface_repo_declared(packed: pathlib.Path) -> str | None:

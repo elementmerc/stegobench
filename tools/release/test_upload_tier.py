@@ -748,18 +748,76 @@ class Retries(unittest.TestCase):
         self.assertEqual(self.slept, [])
 
     def test_a_connection_level_upload_error_is_retried(self):
-        """`_hf_api` wraps URLError as UploadError with no status."""
+        """`_hf_api` wraps URLError as UploadError, marked retryable."""
         calls = []
 
         def attempt():
             calls.append(1)
             if len(calls) < 2:
-                raise upload_tier.UploadError("could not reach it, reset")
+                raise upload_tier.UploadError("could not reach it, reset",
+                                              retryable=True)
             return "landed"
 
         self.assertEqual(upload_tier.with_retries(attempt, "shard", self.log),
                          "landed")
         self.assertEqual(len(calls), 2)
+
+    def test_a_local_refusal_with_no_status_is_not_retried(self):
+        """The rule used to be "no status means the line dropped".
+
+        Most of the status-less failures in the uploader are permanent and
+        local: no ia-metadata.json, a darkened item, a body that is not JSON.
+        Sleeping two minutes and repeating each of them five times delayed the
+        report and described a refusal as a connection failure.
+        """
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            raise upload_tier.UploadError(
+                "no ia-metadata.json in /packed/core")
+
+        with self.assertRaises(upload_tier.UploadError):
+            upload_tier.with_retries(attempt, "shard", self.log)
+        self.assertEqual(len(calls), 1, "a permanent refusal was retried")
+        self.assertEqual(self.slept, [])
+
+    def test_the_archive_records_its_status_so_a_refusal_is_not_retried(self):
+        """The Archive's HTTP wrapper did not carry `status`.
+
+        So every 401, 403 and 404 from it looked status-less, which under the
+        old rule meant retryable, which is the exact case the docstring said
+        was never retried.
+        """
+        self.assertEqual(
+            upload_tier.UploadError("x", status=401).retryable, False)
+        self.assertFalse(upload_tier.retryable(
+            upload_tier.UploadError("archive returned 403 Forbidden",
+                                    status=403)))
+
+    def test_a_host_asking_to_be_asked_later_is_retried(self):
+        """429 and 5xx are the line, not the request."""
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            if len(calls) < 2:
+                raise upload_tier.UploadError("archive returned 503",
+                                              status=503)
+            return "landed"
+
+        self.assertEqual(upload_tier.with_retries(attempt, "shard", self.log),
+                         "landed")
+        self.assertEqual(len(calls), 2)
+
+    def test_the_log_carries_the_real_reason(self):
+        """"connection failed" on every line is how a refusal hid."""
+        def attempt():
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+        with self.assertRaises(ConnectionResetError):
+            upload_tier.with_retries(attempt, "shard", self.log, retries=1)
+        self.assertIn("Connection reset by peer", self.lines[0])
 
     def test_it_gives_up_rather_than_looping_for_ever(self):
         def attempt():
