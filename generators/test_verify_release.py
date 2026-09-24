@@ -757,6 +757,27 @@ class LinkCheckTests(unittest.TestCase):
         self.assertEqual(vr.urls_in("[CC](https://example.org/cc) and more"),
                          ["https://example.org/cc"])
 
+    def test_an_address_in_inline_code_ends_at_the_backtick(self):
+        """README.md writes addresses as inline code in several places.
+
+        A trailing backtick fetched as part of the path is a false 404, and a
+        release gate that cries wolf is one somebody switches off.
+        """
+        self.assertEqual(vr.urls_in("run `https://example.org/a` first"),
+                         ["https://example.org/a"])
+
+    def test_a_redirect_that_was_not_followed_is_not_counted_as_alive(self):
+        """A redirect only reaches the classifier when it was NOT followed.
+
+        The cap in `_CappedRedirects` raises on a loop and the code it carries
+        is the 30x, so a loop read as "under 400, therefore fine" and the one
+        address the checker could not resolve was the one it reported clean.
+        """
+        r = self.check({"https://github.com/elementmerc/pentimento": (302, "HEAD")})
+        self.assertTrue(r.ok, r.failures)
+        self.assertIn("not followed", r.notes["links"])
+        self.assertIn("NOT proven", r.notes["links"])
+
     def test_the_check_reports_not_run_when_the_flag_is_absent(self):
         """A network check that quietly turns a green offline verification red
         would get switched off, so it is opt in; a check nobody ran must still

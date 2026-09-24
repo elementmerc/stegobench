@@ -163,10 +163,13 @@ PROSE_BYTES_CAP = 8 << 20
 #: dead link when the page is fine.
 URL_USER_AGENT = "pentimento-verify-release/1.0 (+link check)"
 
-#: Deliberately excludes the closing brackets and the quote characters, so a
-#: link written as Markdown, as JSON or inside a sentence ends where the prose
-#: resumes rather than swallowing the punctuation after it.
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'\\)\]}|]+")
+#: Deliberately excludes the closing brackets, the quote characters and the
+#: backtick, so a link written as Markdown, as inline code, as JSON or inside a
+#: sentence ends where the prose resumes rather than swallowing the punctuation
+#: after it. A trailing backtick fetched as part of the address is a false 404
+#: in a release gate, which is the failure mode that costs this check its
+#: credibility fastest.
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'`\\)\]}|]+")
 
 #: Answers that say nothing about whether the page exists: the host declined to
 #: talk to us this minute. A rate limit must not fail a release.
@@ -976,6 +979,13 @@ def check_links(release: pathlib.Path, report: Report,
             unreachable.append(f"{url} (in {origin}): {how}")
         elif status in UNSETTLED_STATUSES or status >= 500:
             unsettled.append(f"{url} (in {origin}): {status}")
+        elif 300 <= status < 400:
+            # A redirect only reaches here when it was NOT followed, which
+            # means the cap in `_CappedRedirects` was hit or there was no
+            # Location to follow. Either way nothing has been proved about the
+            # address, and counting a redirect loop as alive would be this
+            # check reporting clean on the one thing it could not look at.
+            unsettled.append(f"{url} (in {origin}): {status}, not followed")
         elif status >= 400:
             dead.append(f"{url} (in {origin}): {status}")
 
