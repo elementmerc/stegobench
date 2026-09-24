@@ -100,18 +100,40 @@ class KaggleCardTests(unittest.TestCase):
 
     def test_every_described_file_actually_ships(self):
         described = {r["path"] for r in publish_tier.kaggle_resources(self.packed)}
-        present = {p.name for p in self.packed.iterdir()}
+        present = {publish_tier.kaggle_name(p.name) for p in self.packed.iterdir()}
         self.assertTrue(described <= present,
                         f"describes files that are not there: {described - present}")
 
-    def test_the_tar_shards_are_not_described(self):
-        """Kaggle extracts archives, so no `.tar` exists on that mirror.
+    def test_the_shards_are_described_under_the_name_they_land_under(self):
+        """The shards are most of the file list and all of the data.
 
-        A resource entry naming one describes a file nobody can see.
+        They are named `.tar.bin` on Kaggle, because Kaggle unpacks anything
+        named `.tar`, so a resource entry naming the `.tar` describes a file
+        nobody can see and leaves the actual data unexplained.
         """
-        described = {r["path"] for r in publish_tier.kaggle_resources(self.packed)}
+        described = {r["path"]: r["description"]
+                     for r in publish_tier.kaggle_resources(self.packed)}
+        self.assertIn("pentimento-core-00000.tar.bin", described)
         self.assertNotIn("pentimento-core-00000.tar", described)
         self.assertFalse([p for p in described if p.endswith(".tar")])
+        self.assertIn("tar", described["pentimento-core-00000.tar.bin"],
+                      "a reader meeting `.tar.bin` needs to be told it is a tar")
+
+    def test_a_shard_already_staged_for_kaggle_keeps_its_name(self):
+        """This can run over the release directory or over a staged copy.
+
+        A second `.bin` on a name that already carries one describes a file
+        that is not there, which is the fault the renaming exists to avoid.
+        """
+        self.assertEqual(
+            publish_tier.kaggle_name("pentimento-core-00000.tar.bin"),
+            "pentimento-core-00000.tar.bin")
+        (self.packed / "pentimento-core-00000.tar").unlink()
+        (self.packed / "pentimento-core-00000.tar.bin").write_text(
+            "x", encoding="utf-8")
+        described = {r["path"] for r in publish_tier.kaggle_resources(self.packed)}
+        self.assertIn("pentimento-core-00000.tar.bin", described)
+        self.assertNotIn("pentimento-core-00000.tar.bin.bin", described)
 
     def test_a_file_that_stops_shipping_stops_being_described(self):
         (self.packed / "LICENCES.md").unlink()

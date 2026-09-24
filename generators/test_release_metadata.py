@@ -295,11 +295,13 @@ class LoaderTests(unittest.TestCase):
 
     def unpacked(self, name: str, *, samples: int = 3,
                  corrupt: bool = False) -> pathlib.Path:
-        """A shard as Kaggle serves it: a folder of the same members.
+        """A shard somebody has extracted: a folder of the same members.
 
-        Kaggle extracts archives on upload and offers no way to refuse, so a
-        mirror exists where no `.tar` file is present and `SHA256SUMS-covers`
-        names ten containers that are not there.
+        No mirror serves the corpus this way any more. The Kaggle copy did
+        until 2026-09-24, because Kaggle unpacks anything named `.tar`, and it
+        ships as `.tar.bin` now. Everyone who downloaded it before then, and
+        anyone who has run `tar xf` since, is holding one of these folders,
+        where `SHA256SUMS-covers` names containers that are not there.
         """
         import hashlib
 
@@ -362,10 +364,10 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(read(folder), read(tar_path))
 
     def test_a_dotfile_is_skipped_in_a_tar_as_well_as_a_folder(self):
-        """The card tells a reader to re-pack a folder with `tar cf ... .`
+        """`as_webdataset` tells a reader to re-pack a folder with `tar cf ... .`
 
         A `.DS_Store` in that folder goes straight into the tar, so treating
-        the two differently breaks the recovery the card recommends.
+        the two differently breaks the recovery the loader recommends.
         """
         folder = self.unpacked("repack")
         (folder / ".DS_Store").write_bytes(b"junk")
@@ -393,7 +395,7 @@ class LoaderTests(unittest.TestCase):
         self.assertNotIn("no samples were found", result.stderr)
 
     def test_verify_checks_images_against_their_own_records(self):
-        """SHA256SUMS names containers, so it cannot check this mirror.
+        """SHA256SUMS names containers, so it cannot check a folder.
 
         Each record carries the sha256 of the image beside it, which is a
         finer check than the container's: it names the file that is wrong.
@@ -409,9 +411,26 @@ class LoaderTests(unittest.TestCase):
         self.assertIn("1 mismatch", result.stdout)
 
     def test_verify_works_on_a_tar_too(self):
-        """A reader should not have to know which mirror they downloaded."""
+        """A reader should not have to know which of the two they are holding."""
         result = self.run_script("--verify", str(self.shard("ok.tar")))
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_it_reads_a_shard_named_tar_bin(self):
+        """The Kaggle copy names its shards `.tar.bin` so Kaggle stores them.
+
+        Every instruction shipped for that mirror, in the README, in the
+        dataset description and in `--help`, says the shards open like any
+        other because a tar is recognised by its contents. If that stopped
+        being true, the Kaggle copy would be unreadable by its own documented
+        command.
+        """
+        shard = self.shard("pentimento-core-00000.tar.bin")
+        result = self.run_script(str(shard))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 samples", result.stdout)
+        result = self.run_script("--verify", str(shard))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 image(s) checked, 0 mismatch", result.stdout)
 
     def test_several_unpacked_shards_under_one_folder_do_not_collide(self):
         """Every arm restarts its numbering at 00000.
@@ -431,7 +450,7 @@ class LoaderTests(unittest.TestCase):
                       "the key must carry the shard, or two arms share it")
 
     def test_a_stray_dotfile_does_not_break_the_read(self):
-        """A mirror or an operating system can leave one beside the data."""
+        """An operating system leaves one beside the data."""
         path = self.unpacked("withjunk")
         (path / ".DS_Store").write_bytes(b"junk")
         result = self.run_script(str(path))

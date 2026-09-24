@@ -166,11 +166,28 @@ KAGGLE_KEYWORDS = [
     "computer science",
 ]
 
-#: What each shipped file is, for Kaggle's per-file descriptions. Keyed by the
-#: name as it lands, and DELIBERATELY not covering the tar shards: Kaggle
-#: extracts archives on upload, so `pentimento-core-00000.tar` is a folder
-#: there and a resource entry naming the tar would describe a file that is not
-#: on the page.
+#: The suffix the shards carry on Kaggle, and why they carry it. Kaggle
+#: extracts anything whose name ends in `.tar` when it is uploaded and offers
+#: no way to refuse. The Core cover tier landed there as 20,014 loose files,
+#: and on 2026-09-24 Kaggle's own file listing returned HTTP 500 partway
+#: through enumerating them, so the data card stopped rendering altogether.
+#: Measured against a throwaway dataset: `.tar` is the only suffix Kaggle
+#: unpacks, and `.tar.bin` is stored intact while keeping `tar` legible in the
+#: name.
+KAGGLE_SHARD_SUFFIX = ".tar.bin"
+
+#: What a shard is, for the Kaggle file list. The shards are most of the files
+#: on that page and all of the data, so leaving them undescribed leaves a
+#: reader guessing at the only ones that matter.
+KAGGLE_SHARD_NOTE = ("One WebDataset shard: an ordinary tar file, named "
+                     f"`{KAGGLE_SHARD_SUFFIX}` so Kaggle stores it rather "
+                     "than unpacking it. Each sample is a PNG and a JSON "
+                     "record sharing a basename. `load_pentimento.py` and "
+                     "`webdataset` both open it directly.")
+
+#: What each shipped prose file is, for Kaggle's per-file descriptions. Keyed
+#: by the name as it lands. The shards are described too, by pattern rather
+#: than by name, because their names carry a serial number.
 KAGGLE_FILE_NOTES = {
     "README.md": "Start here. What the corpus is, how it is laid out, and the "
                  "warning that it is not comparable with BOSSbase.",
@@ -186,12 +203,12 @@ KAGGLE_FILE_NOTES = {
     "CITATION.cff": "Citation metadata. GitHub and Zenodo both render it.",
     "croissant.json": "ML Commons Croissant description of the corpus.",
     "licence-summary.json": "Counts per licence, derived from the manifest.",
-    "SHA256SUMS-covers": "Checksums for the ORIGINAL tar shards. Kaggle "
-                         "unpacks archives, so use `load_pentimento.py "
-                         "--verify` on this copy instead.",
-    "load_pentimento.py": "A reader that needs nothing installed. Takes a tar "
-                          "or an unpacked folder, and `--verify` checks every "
-                          "image against the sha256 in its own record.",
+    "SHA256SUMS-covers": "Checksums for the shards, named the way they land "
+                         "here. Run `sha256sum -c SHA256SUMS-covers` before "
+                         "you use the data.",
+    "load_pentimento.py": "A reader that needs nothing installed. Takes a "
+                          "shard whatever it is named, and `--verify` checks "
+                          "every image against the sha256 in its own record.",
 }
 
 
@@ -235,20 +252,38 @@ def kaggle_csv_schema(path: pathlib.Path) -> dict | None:
                        for name in header]}
 
 
+def kaggle_name(name: str) -> str:
+    """The name a packed file lands under on Kaggle.
+
+    Only the shards differ, and they differ so that Kaggle stores them instead
+    of unpacking them (see KAGGLE_SHARD_SUFFIX). Renaming here means the
+    description of a shard names the file a reader actually sees, whether this
+    runs over the release directory or over an already staged Kaggle copy.
+    """
+    if name.endswith(".tar"):
+        return name + ".bin"
+    return name
+
+
 def kaggle_resources(packed: pathlib.Path) -> list[dict]:
     """Per-file descriptions for the files that exist ON KAGGLE by name.
 
     Derived from what is actually in the packed directory rather than listed by
     hand, so a file that stops shipping stops being described. Kaggle's
     usability score counts described files, but the reason to do it is that a
-    reader landing on the file list otherwise has to guess which of twelve
-    things to open first.
+    reader landing on the file list otherwise has to guess which of them to
+    open first.
     """
     resources = []
     for name in sorted(p.name for p in packed.iterdir() if p.is_file()):
-        if name not in KAGGLE_FILE_NOTES:
+        landed = kaggle_name(name)
+        if landed.endswith(KAGGLE_SHARD_SUFFIX):
+            description = KAGGLE_SHARD_NOTE
+        elif name in KAGGLE_FILE_NOTES:
+            description = KAGGLE_FILE_NOTES[name]
+        else:
             continue
-        entry = {"path": name, "description": KAGGLE_FILE_NOTES[name]}
+        entry = {"path": landed, "description": description}
         if name.endswith(".csv"):
             entry["schema"] = kaggle_csv_schema(packed / name)
         resources.append(entry)
@@ -554,25 +589,35 @@ def cmd_prepare(args) -> int:
     # name for good. Costs nothing today; impossible to change later.
     kaggle_slug = f"pentimento-{tier.lower()}"
 
-    # Kaggle EXTRACTS archives on upload and offers no way to refuse, so the
-    # tar shards arrive here as folders of the same members. The bytes are
-    # unchanged, but `sha256sum -c SHA256SUMS-covers` names containers that no
-    # longer exist on this mirror, and the README's first instruction is that
-    # command. Saying so in the description is the only place a Kaggle user
-    # reliably reads before downloading.
+    # Kaggle EXTRACTS anything named `.tar` on upload and offers no way to
+    # refuse, so this copy ships with the shards named `.tar.bin` and arrives
+    # intact. An unfamiliar suffix on the files that hold the data is the sort
+    # of thing a reader assumes is a mistake, so the description says what it
+    # is and why: it is the one place a Kaggle user reliably reads before
+    # downloading.
+    #
+    # The rename itself is done by the release tooling when it stages this
+    # copy, not here. If that ever stops, the shards unpack again and both
+    # this paragraph and the per-file descriptions above describe files that
+    # are not on the page.
     kaggle_meta = {
         "title": f"Pentimento {tier} steganalysis covers",
         "id": f"{args.kaggle_user}/{kaggle_slug}",
         "licenses": [{"name": KAGGLE_LICENCE}],
         "subtitle": f"{summary['total']:,} permissively licensed 512x512 covers",
         "description": blurb + (
-            "\n\nOn Kaggle the tar shards are unpacked, because Kaggle extracts "
-            "archives on upload. The bytes are identical; the container is "
-            "gone. SHA256SUMS-covers names the shards, so use "
-            "`python load_pentimento.py --verify pentimento-"
-            f"{tier.lower()}-00000/` instead, which checks every image against "
-            "the sha256 in its own record. The loader reads a folder and a tar "
-            "the same way."
+            "\n\nThe shards here are named `.tar.bin` rather than `.tar`, and "
+            "that is deliberate. They are ordinary tar files: Kaggle extracts "
+            "anything whose name ends in `.tar` when it is uploaded, which "
+            "turns a handful of shards into one loose file per image and per "
+            "record, and the suffix is the whole of the difference. A tar "
+            "file is recognised by its contents rather than by its name, so "
+            "`load_pentimento.py` and "
+            "`webdataset` both open these directly, for example `python "
+            f"load_pentimento.py pentimento-{tier.lower()}-00000.tar.bin`. "
+            "SHA256SUMS-covers on this copy names the shards as they arrive, "
+            "so `sha256sum -c SHA256SUMS-covers` verifies the download here "
+            "just as it does on the other mirrors."
         ),
         "keywords": KAGGLE_KEYWORDS,
         # The corpus is versioned and rebuildable byte for byte rather than

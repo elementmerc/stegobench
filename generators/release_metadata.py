@@ -286,6 +286,14 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
                                   key=lambda kv: -kv[1])
     )
 
+    # The "Verifying a download" section below tells a Kaggle reader that
+    # `sha256sum -c SHA256SUMS-covers` works on that copy. It does, but only
+    # because the Kaggle release is staged with the shards renamed to
+    # `.tar.bin` and a checksum file generated against those names. That
+    # staging lives in the release tooling, not here, so if it ever stops
+    # renaming, this paragraph becomes the wrong instruction on the one mirror
+    # that used to have a documented workaround.
+    #
     # YAML FRONTMATTER, for HuggingFace.
     #
     # This file is uploaded to the repository root, where HuggingFace treats it
@@ -402,20 +410,29 @@ sha256sum -c SHA256SUMS-covers
 Do it before use: a shard that arrived truncated reads as a smaller corpus
 rather than as an error.
 
-**On Kaggle the shards are unpacked, and that command does not apply there.**
-Kaggle extracts archives when they are uploaded and offers no way to refuse,
-so `pentimento-{tier.lower()}-00000.tar` arrives as a folder of the same
-members under the same names. The bytes are the same; the container is gone.
-Verify that copy against each record's own checksum instead, which is a finer
-check because it names the file that is actually wrong:
+**On Kaggle the shards are named `.tar.bin`, and that command still works
+there.** Kaggle extracts anything whose name ends in `.tar` when it is
+uploaded and offers no way to refuse, so the Kaggle copy ships as
+`pentimento-{tier.lower()}-00000.tar.bin`: the same tar file, under a name
+Kaggle leaves alone. That copy's `SHA256SUMS-covers` names the shards the way
+they arrive, so `sha256sum -c` checks it exactly as it checks the others. The
+digests are identical on every mirror; only the filenames differ.
+
+The Internet Archive and HuggingFace copies are `.tar` as described above,
+and neither host alters them.
+
+Nothing else changes for a Kaggle reader. A tar file is recognised by its
+contents rather than by its name, so `load_pentimento.py` and `webdataset`
+both open a `.tar.bin` shard directly; the only difference is the filename
+you type:
 
 ```
-python load_pentimento.py --verify pentimento-{tier.lower()}-00000/
+python load_pentimento.py pentimento-{tier.lower()}-00000.tar.bin
 ```
 
-`load_pentimento.py` reads a folder and a tar the same way, so nothing else
-changes. The Internet Archive and HuggingFace copies are tar shards as
-described above.
+If you have already extracted a shard by hand, `load_pentimento.py` reads the
+resulting folder too, and `--verify` checks every image against the sha256 in
+its own record.
 
 Tiers nest. Nano is the first 200 covers of the same ordering Lite's first
 1,000 and Core's 10,000 follow, so you can develop against a small tier and
@@ -1162,10 +1179,12 @@ def loader() -> str:
     which is true and is not a starting point. Somebody who has just downloaded
     45 GB wants a file they can run.
 
-    It takes a DIRECTORY as readily as a tar, because one published mirror
-    unpacks the shards on upload and nothing can stop it. Anybody who has
-    simply extracted a shard is in the same position, so this is worth having
-    whatever Kaggle does.
+    It takes a DIRECTORY as readily as a tar, for the reader who extracted a
+    shard before reading it. That began as a workaround: the Kaggle copy used
+    to arrive unpacked, because Kaggle extracts anything named `.tar`. It
+    ships as `.tar.bin` now and arrives intact, so no mirror needs this any
+    more, but an extracted folder is still what somebody who ran `tar xf` is
+    holding, and every copy downloaded from Kaggle before 2026-09-24 is one.
     """
     return '''#!/usr/bin/env python3
 """Read Pentimento shards, with or without the webdataset package.
@@ -1174,14 +1193,18 @@ Two ways in. The first needs nothing beyond the standard library and is enough
 to look at the corpus; the second is what you would train on.
 
     python load_pentimento.py pentimento-core-00000.tar
-    python load_pentimento.py pentimento-core-00000/     # an unpacked shard
-    python load_pentimento.py --verify pentimento-core-00000/
+    python load_pentimento.py pentimento-core-00000.tar.bin  # the Kaggle copy
+    python load_pentimento.py pentimento-core-00000/     # a shard you extracted
+    python load_pentimento.py --verify pentimento-core-00000.tar
 
-Shards are ordinary tar files. Each sample is an image and a JSON record that
-share a basename, so a sample is whatever group of members has the same stem.
-That holds whether the members are in a tar or in a directory, so a shard that
-somebody has extracted, or that a mirror extracted on upload, reads the same
-way.
+Shards are ordinary tar files whatever they are named. The Kaggle copy is
+named `.tar.bin` so that Kaggle stores it rather than extracting it on upload;
+it opens here like any other, because a tar file is recognised by its contents.
+
+Each sample is an image and a JSON record that share a basename, so a sample
+is whatever group of members has the same stem. That holds whether the members
+are in a tar or in a directory, so a shard somebody has extracted reads the
+same way.
 """
 from __future__ import annotations
 
@@ -1194,12 +1217,13 @@ from collections.abc import Iterator
 
 
 def _noise(name: str) -> bool:
-    """Files an operating system or a mirror leaves beside the data.
+    """Files an operating system leaves beside the data.
 
-    Skipped from a tar as well as a folder. The card tells anyone holding an
-    unpacked shard they can re-pack it with `tar cf ... -C <folder> .`, and a
-    `.DS_Store` in that folder goes straight into the tar, so treating the two
-    differently breaks the recovery this file recommends.
+    Skipped from a tar as well as a folder. Anybody holding a shard they
+    extracted can re-pack it with `tar cf ... -C <folder> .`, which is what
+    `as_webdataset` below tells them to do, and a `.DS_Store` in that folder
+    goes straight into the tar, so treating the two differently breaks the
+    recovery this file recommends.
     """
     return pathlib.PurePosixPath(name).name.startswith(".")
 
@@ -1207,10 +1231,11 @@ def _noise(name: str) -> bool:
 def _members(shard: str) -> Iterator[tuple[str, bytes]]:
     """Yield (member name, bytes) from a tar OR from an unpacked directory.
 
-    One published mirror extracts archives when they are uploaded and offers
-    no way to refuse, so on that mirror a shard is a folder of the same
-    members under the same names. Reading both here means the rest of this
-    file, and anything built on it, never has to know which it got.
+    A shard somebody has extracted is a folder of the same members under the
+    same names, and extracted shards are in circulation: the Kaggle copy
+    arrived that way until 2026-09-24, because Kaggle unpacks anything named
+    `.tar`. Reading both here means the rest of this file, and anything built
+    on it, never has to know which it got.
     """
     path = pathlib.Path(shard)
     if path.is_dir():
@@ -1258,16 +1283,17 @@ def samples(shard: str) -> Iterator[tuple[str, bytes, dict]]:
         raise ValueError(
             f"{len(pending)} incomplete sample(s) in {shard}, first: "
             f"{sorted(pending)[0]}. A truncated download is the usual cause; "
-            f"check the shard against SHA256SUMS, or, where the mirror "
-            f"unpacked it, against each record's own sha256."
+            f"check the shard against SHA256SUMS, or, if you are holding a "
+            f"folder you extracted rather than a shard, against each record's "
+            f"own sha256."
         )
 
 
 def verify(shard: str) -> int:
     """Check every image against the sha256 in its own record.
 
-    `SHA256SUMS-covers` names the tar shards, so it cannot check a mirror that
-    unpacked them. It does not need to: every record carries the sha256 of the
+    `SHA256SUMS-covers` names shards, so it cannot check a folder somebody has
+    extracted. It does not need to: every record carries the sha256 of the
     image beside it, which is a finer check than the container's, because it
     names the file that is actually wrong.
     """
@@ -1306,11 +1332,14 @@ def as_webdataset(pattern: str):
     """The training path. Needs `pip install webdataset`.
 
     `pattern` is a brace expression over shards, for example
-    "pentimento-core-{00000..00009}.tar".
+    "pentimento-core-{00000..00009}.tar", or
+    "pentimento-core-{00000..00009}.tar.bin" on the Kaggle copy, whose shards
+    carry that suffix so that Kaggle stores them rather than extracting them.
+    WebDataset opens either, because a tar file is recognised by its contents.
 
-    This one needs real tar shards, so it does NOT work on a mirror that
-    unpacked them: there is nothing for the pattern to match. Use `samples()`
-    above, which reads either, or re-pack a folder with
+    It does need a shard, so it cannot read a folder somebody has extracted:
+    there is nothing for the pattern to match. Use `samples()` above, which
+    reads both, or re-pack the folder with
     `tar cf pentimento-core-00000.tar -C pentimento-core-00000 .`
 
     Split by cover before you do this, not after. A cover and its stego
@@ -1342,13 +1371,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="load_pentimento.py",
         description="Read Pentimento shards, with or without the webdataset "
-                    "package. Takes a tar shard or a folder holding the same "
-                    "members, so a mirror that unpacked the archives reads "
-                    "the same way.",
+                    "package. Takes a tar shard whatever it is named, "
+                    "including the Kaggle copy's `.tar.bin`, or a folder "
+                    "holding the same members.",
         epilog="examples:\\n"
                "  python load_pentimento.py pentimento-core-00000.tar\\n"
+               "  python load_pentimento.py pentimento-core-00000.tar.bin\\n"
                "  python load_pentimento.py pentimento-core-00000/\\n"
-               "  python load_pentimento.py --verify pentimento-core-00000/\\n"
+               "  python load_pentimento.py --verify pentimento-core-00000.tar\\n"
                "\\n"
                "Split by cover before training, never at random: every record "
                "names its cover under `source_png`, and SPLITS.md has the "
@@ -1356,11 +1386,12 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "shard",
-        help="a tar shard, or a folder holding one that has been unpacked")
+        help="a tar shard, named `.tar` or `.tar.bin`, or a folder holding "
+             "one that has been extracted")
     parser.add_argument(
         "--verify", action="store_true",
         help="check every image against the sha256 in its own record, and "
-             "report any that disagree. This works on an unpacked mirror, "
+             "report any that disagree. This works on a folder you extracted, "
              "where SHA256SUMS cannot, because the digest travels with the "
              "image rather than with the archive")
     args = parser.parse_args(argv)
