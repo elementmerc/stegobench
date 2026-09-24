@@ -490,6 +490,14 @@ def citation(version: str, today: str, tier: str = "Core") -> str:
     that, `creator: Daniel Iwugo` beside `license: CC-BY-4.0` reads to any
     machine as a claim of authorship over 10,000 other people's work, which is
     the exact over-claim this corpus exists to argue against.
+
+    The BOSSbase caution sits in the body of the abstract rather than at its
+    head, which is the one place in this project where it does not come first.
+    Zotero, Mendeley and EndNote render `abstract` verbatim into a
+    bibliography, so opening with it gave a reader a warning about a corpus
+    they had not downloaded before a word about the one they had. It stays in
+    the abstract because it is true and load-bearing; it just follows the
+    description now.
     """
     return f"""cff-version: 1.2.0
 message: "If you use this corpus, please cite it as below."
@@ -500,7 +508,6 @@ contact:
   - family-names: Iwugo
     given-names: Daniel
 abstract: >-
-  {NOT_COMPARABLE}
   A steganalysis corpus of permissively licensed cover photographs with matched
   stego pairs across adaptive spatial schemes, JPEG schemes and real end-user
   tools, kept as separate labelled arms rather than a blend, with per-file
@@ -508,6 +515,7 @@ abstract: >-
   The cover photographs are third-party works from Wikimedia Commons, each
   retaining its own licence and credited individually in ATTRIBUTION.csv; the
   corpus is the assembly, the labelling and the derived stego images.
+  {NOT_COMPARABLE}
 type: dataset
 version: "{version}"
 date-released: "{today}"

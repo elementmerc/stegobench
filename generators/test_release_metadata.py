@@ -133,6 +133,44 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(parsed[1][3], "Smith, John")
 
 
+class CitationTests(unittest.TestCase):
+    """The CFF record, which is prose a stranger reads outside this project.
+
+    Zotero, Mendeley and EndNote drop `abstract` into a bibliography entry
+    verbatim. The first version opened with the BOSSbase caution, so a reader
+    who had never heard of this corpus met a warning about a different one
+    before a word saying what they were holding.
+    """
+
+    def abstract(self, tier: str = "Core") -> str:
+        import yaml
+        return yaml.safe_load(
+            release_metadata.citation("1.0.0", "2026-09-21", tier))["abstract"]
+
+    def test_the_abstract_opens_by_describing_this_corpus(self):
+        first = self.abstract().split(". ")[0]
+        # A bibliography entry shows the head of the abstract and little else,
+        # so the opening sentence has to say what the thing is.
+        self.assertTrue(first.startswith("A steganalysis corpus of"), first)
+        self.assertNotIn("BOSSbase", first)
+
+    def test_the_bossbase_caution_is_still_in_the_abstract(self):
+        """Moved, not dropped.
+
+        Numbers measured here and numbers measured on BOSSbase cannot go in
+        the same table, and the citation record is the one artefact that
+        travels into a reference manager with no README beside it.
+        """
+        body = self.abstract()
+        self.assertIn(release_metadata.NOT_COMPARABLE, body)
+        self.assertGreater(body.index(release_metadata.NOT_COMPARABLE), 0)
+
+    def test_the_covers_are_still_declared_third_party(self):
+        # `creator: Daniel Iwugo` beside `license: CC-BY-4.0` reads as a claim
+        # of authorship over 10,000 other people's photographs without it.
+        self.assertIn("third-party works from Wikimedia Commons", self.abstract())
+
+
 class CroissantTests(unittest.TestCase):
     """The record Kaggle and HuggingFace index.
 
