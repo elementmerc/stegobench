@@ -517,6 +517,23 @@ mod local_roundtrip_tests {
     }
 
     #[test]
+    fn a_tool_that_never_answers_is_killed_rather_than_waited_on_for_ever() {
+        // The usual cause is a passphrase prompt on a terminal nobody is
+        // watching, which a round trip driven from a registry entry provokes
+        // easily. Unbounded, `doctor` hangs and reports nothing at all.
+        use std::time::Duration;
+        let mut sleeper = std::process::Command::new("sh");
+        sleeper.args(["-c", "sleep 30"]);
+        let started = std::time::Instant::now();
+        let outcome = roundtrip::bounded(sleeper, "sh", Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(10), "it waited");
+        match outcome {
+            Err(why) => assert!(why.contains("no answer in"), "got {why}"),
+            Ok(()) => panic!("a tool that never answered was reported as fine"),
+        }
+    }
+
+    #[test]
     fn an_entry_with_neither_an_image_nor_a_binary_is_skipped() {
         // Skipped and Failed stay distinct: nothing to run is not the same as
         // something that ran and did not work.
@@ -537,8 +554,10 @@ mod local_roundtrip_tests {
 
 /// Proving an embedder: what goes in must come back out.
 pub mod roundtrip {
+    use std::io::Read;
     use std::path::Path;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     use stegobench_core::registry::Entry;
 
@@ -549,11 +568,6 @@ pub mod roundtrip {
     pub const PAYLOAD: &[u8] =
         b"stegobench roundtrip fixture 2026: if you can read this, it survived.";
 
-    /// Hides the payload, recovers it, and compares the bytes.
-    ///
-    /// Byte comparison rather than a size check or a substring: a tool that
-    /// returns a truncated or padded payload has not worked, and every weaker
-    /// comparison has a way of passing when it should not.
     /// How the tool is reached, which decides both the argv and the paths.
     ///
     /// A container sees the scratch directory at `/work`; a local program sees
@@ -565,6 +579,88 @@ pub mod roundtrip {
         Local(Vec<String>),
     }
 
+    /// How long either phase is given before it is killed.
+    ///
+    /// A self-test is a smoke test on one small fixture, so anything past this
+    /// is a tool waiting on something that is never coming: a passphrase
+    /// prompt on a terminal nobody is watching is the usual one, and it is
+    /// exactly what a round trip driven from a registry entry can provoke.
+    /// Without a bound, `doctor` hangs for ever and reports nothing at all.
+    pub(crate) const PHASE_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// Run one phase and wait for it, but not for ever.
+    ///
+    /// Standard output goes nowhere and standard error is drained on its own
+    /// thread. Both matter: a tool that fills a pipe blocks on the write while
+    /// the parent waits for it to exit, which is the deadlock a naive timeout
+    /// introduces, and it would look exactly like the hang being fixed.
+    pub(crate) fn bounded(
+        mut command: Command,
+        label: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("could not run {label}: {e}"))?;
+        let mut pipe = child.stderr.take();
+        let (finished, drained) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(p) = pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf);
+            }
+            let _ = finished.send(buf);
+        });
+
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break Some(s),
+                Ok(None) => {}
+                Err(e) => return Err(format!("could not wait for {label}: {e}")),
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        // Bounded too, and for the same reason the wait above is. A tool that
+        // forks leaves a grandchild holding the write end of this pipe, so it
+        // stays open after the process we killed is gone, and joining on it
+        // would reintroduce the hang one line after fixing it. What we lose by
+        // not waiting is the tail of a message from a tool that has already
+        // failed; what we would lose by waiting is the whole check.
+        let stderr = drained
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default();
+        let tail = String::from_utf8_lossy(&stderr)
+            .trim()
+            .chars()
+            .take(160)
+            .collect::<String>();
+        match status {
+            Some(s) if s.success() => Ok(()),
+            Some(s) => Err(format!("exit {}: {tail}", s.code().unwrap_or(-1))),
+            None => Err(format!(
+                "no answer in {}s and was killed, which usually means it is \
+                 waiting on something nobody is going to type: {tail}",
+                timeout.as_secs()
+            )),
+        }
+    }
+
+    /// Hides the payload, recovers it, and compares the bytes.
+    ///
+    /// Byte comparison rather than a size check or a substring: a tool that
+    /// returns a truncated or padded payload has not worked, and every weaker
+    /// comparison has a way of passing when it should not.
     pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         let Some(rt) = &entry.roundtrip else {
             return Verified::Skipped("no roundtrip declared".into());
@@ -650,19 +746,7 @@ pub mod roundtrip {
             // The scratch directory, so a tool that writes a stray file beside
             // its output leaves it there rather than in the user's cwd.
             run.current_dir(work);
-            match run.output() {
-                Ok(o) if o.status.success() => Ok(()),
-                Ok(o) => Err(format!(
-                    "exit {}: {}",
-                    o.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&o.stderr)
-                        .trim()
-                        .chars()
-                        .take(160)
-                        .collect::<String>()
-                )),
-                Err(e) => Err(format!("could not run {}: {e}", command[0])),
-            }
+            bounded(run, &command[0], PHASE_TIMEOUT)
         };
 
         let container_phase = |image: &String, argv: &Vec<String>| -> Result<(), String> {
@@ -687,19 +771,9 @@ pub mod roundtrip {
             }
             args.push(image.clone());
             args.extend(argv.iter().map(&subst));
-            match Command::new("docker").args(&args).output() {
-                Ok(o) if o.status.success() => Ok(()),
-                Ok(o) => Err(format!(
-                    "exit {}: {}",
-                    o.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&o.stderr)
-                        .trim()
-                        .chars()
-                        .take(160)
-                        .collect::<String>()
-                )),
-                Err(e) => Err(format!("could not run the container: {e}")),
-            }
+            let mut run = Command::new("docker");
+            run.args(&args);
+            bounded(run, "the container", PHASE_TIMEOUT)
         };
 
         let phase = |argv: &Vec<String>| -> Result<(), String> {
