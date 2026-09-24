@@ -114,6 +114,7 @@ import pathlib
 import random
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -156,6 +157,15 @@ URL_REDIRECT_CAP = 5
 #: the whole budget on one host and never reach the repository link that is
 #: the reason this check exists.
 URL_CAP = 200
+#: A bound on the WHOLE check, not on each request. 200 addresses at the
+#: per-request timeout is over half an hour in the worst case, and it would be
+#: spent at the end of a release with nothing on screen. What the budget buys
+#: is a check that stops and reports what it settled, rather than one somebody
+#: kills because they cannot tell it apart from a hang.
+URL_BUDGET = 300.0
+#: How often the loop says it is alive, per baseline Section 2.1. A long loop
+#: that prints nothing is indistinguishable from a stuck one.
+URL_HEARTBEAT = 30.0
 #: A per-file read cap, so a corrupt or accidentally enormous document cannot
 #: pull the whole release into memory. Exceeding it is reported, not ignored.
 PROSE_BYTES_CAP = 8 << 20
@@ -909,7 +919,8 @@ def check_figures(docs: pathlib.Path, release: pathlib.Path,
 
 def check_links(release: pathlib.Path, report: Report,
                 fetch=fetch_status, cap: int = URL_CAP,
-                timeout: float = URL_TIMEOUT) -> None:
+                timeout: float = URL_TIMEOUT,
+                budget: float = URL_BUDGET) -> None:
     """Does every address in the shipped prose answer?
 
     `DATASHEET.md` went to three public mirrors telling photographers to open
@@ -971,7 +982,21 @@ def check_links(release: pathlib.Path, report: Report,
 
     chosen = _spread(list(seen), cap)
     dead, unreachable, unsettled, checked = [], [], [], 0
-    for url in chosen:
+    started = time.monotonic()
+    last_beat = started
+    unvisited = 0
+    for position, url in enumerate(chosen):
+        now = time.monotonic()
+        if now - started >= budget:
+            # Stop rather than run on. What has been settled so far is still
+            # worth reporting, and the addresses not reached are reported as
+            # not reached rather than quietly counting as fine.
+            unvisited = len(chosen) - position
+            break
+        if now - last_beat >= URL_HEARTBEAT:
+            print(f"    links: {position}/{len(chosen)} address(es) checked, "
+                  f"{now - started:.0f}s elapsed", flush=True)
+            last_beat = now
         status, how = fetch(url, timeout)
         checked += 1
         origin = ", ".join(seen[url][:2])
@@ -1022,6 +1047,14 @@ def check_links(release: pathlib.Path, report: Report,
     if len(seen) > len(chosen):
         tail += (f"; capped at {cap:,} of {len(seen):,} distinct address(es), "
                  f"spread across hosts")
+    if unvisited:
+        # Said out loud rather than folded into the cap note. Running out of
+        # time is a different statement from choosing a sample, and a reader
+        # who does not know the difference reads the clean line as covering
+        # addresses nothing looked at.
+        tail += (f"; {unvisited:,} address(es) were NOT reached because the "
+                 f"{budget:.0f}s budget ran out, so nothing is known about "
+                 f"them")
     report.note("links", f"{settled:,} address(es) across {len(documents)} "
                          f"published document(s) answer{tail}")
 

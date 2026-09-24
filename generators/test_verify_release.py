@@ -21,6 +21,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -672,6 +673,47 @@ class LinkCheckTests(unittest.TestCase):
         r = self.check()
         self.assertTrue(r.ok, r.failures)
         self.assertIn("links", r.notes)
+
+    def many_addresses(self, count: int = 20) -> None:
+        """A document with enough distinct addresses for a budget to bite.
+
+        The real one is ATTRIBUTION.md, which carries a Commons link per
+        credited photograph: 5,453 of them on the shipped corpus.
+        """
+        self.write("ATTRIBUTION.md", "\n".join(
+            f"- credit {n}: https://commons.example/file/{n}" for n in range(count)))
+
+    def slow_fetch(self, per_call: float = 0.02):
+        def crawl(url, timeout):
+            self.calls.append(url)
+            time.sleep(per_call)
+            return (200, "HEAD")
+        return crawl
+
+    def test_the_budget_stops_the_check_rather_than_running_to_the_cap(self):
+        # 200 addresses at the per-request timeout is over half an hour, spent
+        # at the end of a release with nothing on screen. A slow host must not
+        # be able to hold the gate open for that long.
+        self.many_addresses()
+        r = Report()
+        vr.check_links(self.release, r, fetch=self.slow_fetch(), budget=0.06)
+        self.assertLess(len(self.calls), 20, "it ran to the cap regardless")
+        self.assertTrue(r.ok, r.failures)
+
+    def test_addresses_the_budget_never_reached_are_not_counted_as_fine(self):
+        # The failure this prevents is the clean line covering addresses that
+        # nothing looked at, which is the same fault as a rate-limited run
+        # reading as proof.
+        self.many_addresses()
+        r = Report()
+        vr.check_links(self.release, r, fetch=self.slow_fetch(), budget=0.06)
+        self.assertIn("NOT reached", r.notes["links"])
+
+    def test_a_budget_that_is_never_hit_says_nothing_about_it(self):
+        # The note is read at the end of every release, so a line about a
+        # budget that did not bite is noise that trains people to skim.
+        r = self.check()
+        self.assertNotIn("NOT reached", r.notes["links"])
 
     def test_a_dead_address_is_caught_and_names_the_file_it_came_from(self):
         """A count alone is unactionable: the fix is editing a document, so the
