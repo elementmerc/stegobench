@@ -76,7 +76,11 @@ class TestPlan(Fixture):
         self.assertEqual(set(prepared.extras), set(kaggle_stage.PUBLISHED_EXTRAS))
         for name in kaggle_stage.PUBLISHED_EXTRAS:
             self.assertIn(name, prepared.staged)
-        self.assertIn("pentimento-core-00000.tar", prepared.staged)
+        # The SOURCE is a .tar and the STAGED name is not, because Kaggle
+        # unpacks .tar and nothing else.
+        self.assertIn("pentimento-core-00000.tar", prepared.shards)
+        self.assertIn("pentimento-core-00000.tar.bin", prepared.staged)
+        self.assertNotIn("pentimento-core-00000.tar", prepared.staged)
 
     def test_arm_shards_named_by_the_index_are_staged_too(self):
         packed = packed_release(self.root / "arms", arms=True)
@@ -175,9 +179,11 @@ class TestStage(Fixture):
 
     def test_staging_hard_links_rather_than_copying_on_one_filesystem(self):
         how = kaggle_stage.stage(self.packed, self.staging)
-        self.assertEqual(set(how.values()), {"link"})
+        # The checksum file is rewritten rather than linked, because its
+        # contents name the files a reader checks.
+        self.assertEqual(set(how.values()), {"link", "rewritten"})
         shard = "pentimento-core-00000.tar"
-        self.assertEqual((self.staging / shard).stat().st_ino,
+        self.assertEqual((self.staging / (shard + ".bin")).stat().st_ino,
                          (self.packed / shard).stat().st_ino)
 
     def test_staging_falls_back_to_copying_when_linking_fails(self):
@@ -187,9 +193,9 @@ class TestStage(Fixture):
         real_link, os.link = os.link, refuse
         self.addCleanup(lambda: setattr(os, "link", real_link))
         how = kaggle_stage.stage(self.packed, self.staging)
-        self.assertEqual(set(how.values()), {"copy"})
+        self.assertEqual(set(how.values()), {"copy", "rewritten"})
         shard = "pentimento-core-00000.tar"
-        self.assertEqual((self.staging / shard).read_bytes(),
+        self.assertEqual((self.staging / (shard + ".bin")).read_bytes(),
                          (self.packed / shard).read_bytes())
 
     def test_staging_twice_leaves_the_same_directory(self):
@@ -238,6 +244,128 @@ class TestCommandLine(Fixture):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 kaggle_stage.main(["--packed", str(self.packed)])
+
+
+class TheShardsKaggleWouldUnpack(unittest.TestCase):
+    """Kaggle extracts `.tar` and nothing else, so the shards land renamed.
+
+    The failure being prevented is not hypothetical and not small. Ten shards
+    became 20,014 loose files, Kaggle's own file listing then returned HTTP 500
+    partway through enumerating them, and the Data Card stopped rendering
+    entirely: a visitor was told the corpus was inaccessible while every byte
+    of it was fine. It was repaired by hand, and the toolchain did not know,
+    so the next sanctioned publish would have undone the repair silently.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.packed = packed_release(self.root / "core")
+        self.staging = self.root / "stage"
+
+    def checksums(self, body: str) -> None:
+        (self.packed / "SHA256SUMS-covers").write_text(body, encoding="utf-8")
+
+    def test_a_shard_lands_under_a_name_kaggle_leaves_alone(self):
+        kaggle_stage.stage(self.packed, self.staging)
+        self.assertTrue((self.staging / "pentimento-core-00000.tar.bin").is_file())
+        self.assertFalse((self.staging / "pentimento-core-00000.tar").exists())
+
+    def test_nothing_but_a_tar_is_renamed(self):
+        # Renaming anything else would be cost with no purchase, and a reader
+        # has to recognise what they downloaded.
+        kaggle_stage.stage(self.packed, self.staging)
+        for name in ("README.md", "CITATION.cff", "pentimento-core-index.json",
+                     "dataset-metadata.json"):
+            self.assertTrue((self.staging / name).is_file(), name)
+
+    def test_the_checksum_file_names_the_shards_as_they_arrive(self):
+        # The defect this closes: the shipped file named containers that were
+        # not on that mirror, so `sha256sum -c`, which the README gives as the
+        # FIRST thing to run, reported every shard missing on a download that
+        # was completely intact.
+        self.checksums("a" * 64 + "  pentimento-core-00000.tar\n"
+                       + "b" * 64 + "  README.md\n")
+        kaggle_stage.stage(self.packed, self.staging)
+        body = (self.staging / "SHA256SUMS-covers").read_text(encoding="utf-8")
+        self.assertIn("a" * 64 + "  pentimento-core-00000.tar.bin", body)
+        self.assertNotIn("  pentimento-core-00000.tar\n", body)
+        self.assertIn("b" * 64 + "  README.md", body)
+
+    def test_the_digests_are_not_touched_by_the_rename(self):
+        # The bytes of a shard are the same whatever it is called, so a
+        # rewritten line is the same claim said in a different name. A rename
+        # that altered a digest would be silent corruption of the one file
+        # whose job is detecting corruption.
+        self.checksums("c" * 64 + "  pentimento-core-00000.tar\n")
+        kaggle_stage.stage(self.packed, self.staging)
+        body = (self.staging / "SHA256SUMS-covers").read_text(encoding="utf-8")
+        self.assertEqual(body.split("  ")[0], "c" * 64)
+
+    def test_a_line_naming_something_this_mirror_does_not_carry_is_left_alone(self):
+        # The arms checksum file names shards a covers-only publish never
+        # sends. Inventing a .tar.bin for one of those would assert something
+        # about a file nobody can download here.
+        self.checksums("d" * 64 + "  pentimento-core-arms-00000.tar\n")
+        kaggle_stage.stage(self.packed, self.staging)
+        body = (self.staging / "SHA256SUMS-covers").read_text(encoding="utf-8")
+        self.assertIn("  pentimento-core-arms-00000.tar\n", body)
+        self.assertNotIn(".tar.bin", body)
+
+    def test_the_report_says_the_shards_were_renamed(self):
+        # An operator who never sees the rename happen cannot notice it
+        # stopping, and stopping is what broke the dataset last time.
+        prepared = kaggle_stage.plan(self.packed)
+        text = kaggle_stage.describe(prepared)
+        self.assertIn(".tar.bin", text)
+        self.assertIn("unpacks .tar", text)
+
+    def test_a_staged_shard_still_opens_as_a_tar(self):
+        # The rename is safe only because `tarfile` sniffs content rather than
+        # trusting the extension. If that stopped being true, every reader
+        # following the published instructions would be stuck, so it is
+        # asserted rather than assumed.
+        import tarfile
+
+        real = self.packed / "pentimento-core-00000.tar"
+        with tarfile.open(real, "w") as tar:
+            payload = b"\x89PNG\r\n\x1a\n" + bytes(16)
+            info = tarfile.TarInfo("00000.png")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+
+        kaggle_stage.stage(self.packed, self.staging)
+        landed = self.staging / "pentimento-core-00000.tar.bin"
+        with tarfile.open(landed) as tar:
+            self.assertEqual([m.name for m in tar], ["00000.png"])
+
+    def test_the_shard_the_notebook_opens_is_a_file_the_staging_carries(self):
+        # The two are generated by different programs and published together,
+        # so nothing but a test holds them to the same name. The live notebook
+        # pointed at a directory that no longer existed, and every cell after
+        # the first failed for anyone who ran it.
+        import kaggle_notebook
+
+        # The shared fixture writes placeholder bodies, and the notebook reads
+        # these two for real figures, so they are written properly here.
+        (self.packed / "licence-summary.json").write_text(json.dumps(
+            {"total": 10, "attribution_required": 5,
+             "attribution_required_pct": 50.0}), encoding="utf-8")
+        index = json.loads((self.packed / "pentimento-core-index.json")
+                           .read_text(encoding="utf-8"))
+        index["samples"] = 10
+        (self.packed / "pentimento-core-index.json").write_text(
+            json.dumps(index), encoding="utf-8")
+
+        notebook = kaggle_notebook.build(self.packed)
+        source = "\n".join("".join(c["source"]) for c in notebook["cells"])
+        staged = set(kaggle_stage.plan(self.packed).staged)
+        named = [n for n in staged if n.startswith("pentimento-core-000")]
+        self.assertTrue(named, "the staging carried no shard to name")
+        self.assertTrue(
+            any(n in source for n in named),
+            f"the notebook names none of the staged shards {sorted(named)}")
 
 
 if __name__ == "__main__":

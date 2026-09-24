@@ -31,10 +31,17 @@
 #      rather than from whatever happens to be on disk. Pointing it at the
 #      release directory itself published ia-metadata.json, which is an
 #      instruction file for the Internet Archive and no part of the corpus.
-#   2. Kaggle EXTRACTS archives on upload and gives no way to refuse, so the
-#      tar shards arrive as folders. That is expected, it is described in the
-#      dataset description, and `load_pentimento.py --verify` is what checks
-#      that copy. Do not try to defeat it.
+#   2. Kaggle EXTRACTS anything named `.tar` on upload and gives no way to
+#      refuse. This file used to say that was expected and not to fight it.
+#      Then it was measured: ten shards became 20,014 loose files, Kaggle's own
+#      file listing returned HTTP 500 partway through enumerating them, and the
+#      Data Card stopped rendering, so the page told visitors the corpus was
+#      inaccessible while every byte of it was fine.
+#
+#      It extracts `.tar` and nothing else, so the staging renames the shards
+#      to `.tar.bin` and they arrive whole. `kaggle_stage.py` carries the
+#      measurement. Nothing a reader runs has to care, because `tarfile` and
+#      `webdataset` both read a file by its content rather than its name.
 #
 # Usage:
 #   tools/release/publish-kaggle.sh            # dry run, the default

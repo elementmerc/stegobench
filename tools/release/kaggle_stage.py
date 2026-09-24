@@ -95,6 +95,41 @@ KAGGLE_CONTROL = "dataset-metadata.json"
 #: `PUBLISHED_EXTRAS` is required.
 OPTIONAL_EXTRAS = ("SHA256SUMS-arms",)
 
+#: WHY THE SHARDS ARRIVE UNDER A DIFFERENT NAME.
+#:
+#: Kaggle extracts uploaded archives and offers no way to refuse, so the Core
+#: cover tier landed as 20,014 loose files: ten shards expanded into 20,000
+#: images and sidecars. On 2026-09-24 that broke the dataset outright. Kaggle's
+#: own file listing returned HTTP 500 partway through enumerating them and the
+#: Data Card stopped rendering, so a visitor was told the data was
+#: inaccessible while the data was perfectly fine.
+#:
+#: Measured on a throwaway dataset, since deleted: Kaggle extracts `.tar` and
+#: nothing else. `.tar.bin`, `.bin`, `.shard` and `.tardata` were all stored
+#: intact. `.tar.bin` is the one used here because it keeps `tar` legible in
+#: the name while saying the file is a stored blob.
+#:
+#: The shipped reader needs no change: `tarfile` sniffs the content rather
+#: than trusting the extension, which was verified by reading a renamed shard
+#: end to end.
+KAGGLE_SHARD_SUFFIX = ".bin"
+
+#: The checksum files, which cannot be staged verbatim once the shards are
+#: renamed: they would name containers that are not on that mirror, which is
+#: the exact defect that made `sha256sum -c` fail on the Kaggle copy for
+#: months. They are rewritten instead, digests untouched and names corrected.
+CHECKSUM_EXTRAS = ("SHA256SUMS-covers", "SHA256SUMS-arms")
+
+
+def kaggle_name(name: str) -> str:
+    """What a staged file is called on Kaggle.
+
+    Only `.tar` moves, because only `.tar` is unpacked. Renaming anything else
+    would be a cost with no purchase, and a reader has to be able to recognise
+    what they downloaded.
+    """
+    return name + KAGGLE_SHARD_SUFFIX if name.endswith(".tar") else name
+
 
 class StagingRefused(Exception):
     """The release directory cannot be staged, and nothing has been staged.
@@ -117,14 +152,25 @@ class Plan:
     excluded: tuple[str, ...]
 
     @property
-    def staged(self) -> tuple[str, ...]:
-        """Every name that goes into the staging directory, sorted."""
+    def sources(self) -> tuple[str, ...]:
+        """Every name READ FROM the release directory, sorted.
+
+        Distinct from `staged`, because a shard is read as `.tar` and lands as
+        `.tar.bin`. Keeping the two apart is what stops a rename being applied
+        twice or looked for in the wrong directory.
+        """
         return tuple(sorted(self.indexes + self.shards + self.extras + self.control))
+
+    @property
+    def staged(self) -> tuple[str, ...]:
+        """Every name that goes INTO the staging directory, sorted."""
+        return tuple(sorted(kaggle_name(n) for n in self.sources))
 
     @property
     def published(self) -> tuple[str, ...]:
         """The staged names that become public files, so without the control file."""
-        return tuple(sorted(self.indexes + self.shards + self.extras))
+        return tuple(sorted(kaggle_name(n)
+                            for n in self.indexes + self.shards + self.extras))
 
 
 def _shard_names(index_path: pathlib.Path) -> list[str]:
@@ -243,6 +289,31 @@ def plan(packed: pathlib.Path) -> Plan:
     )
 
 
+def retarget_checksums(body: str, renamed: dict[str, str]) -> str:
+    """Point a `sha256sum -c` file at the names this mirror actually carries.
+
+    Digests are never touched. The bytes of a shard are identical whatever it
+    is called, so a rewritten line is the same claim about the same file, said
+    in the name a reader will type.
+
+    Only names in `renamed` move. A line naming something this staging does
+    not carry is left exactly as it was rather than guessed at: the arms
+    checksum file, for instance, names shards that a covers-only publish never
+    sends, and inventing a `.tar.bin` for one of those would assert something
+    about a file nobody can download here.
+    """
+    out = []
+    for line in body.splitlines():
+        # `sha256sum` writes two spaces between the digest and the name, and
+        # a name may itself contain spaces, so the split is bounded.
+        digest, sep, name = line.partition("  ")
+        if sep and name in renamed:
+            out.append(f"{digest}{sep}{renamed[name]}")
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n" if out else ""
+
+
 def stage(packed: pathlib.Path, staging: pathlib.Path,
           prepared: Plan | None = None) -> dict[str, str]:
     """Put exactly the planned set into `staging`, linked where possible.
@@ -264,35 +335,56 @@ def stage(packed: pathlib.Path, staging: pathlib.Path,
             else:
                 stale.unlink()
 
+    renamed = {n: kaggle_name(n) for n in prepared.shards}
     how: dict[str, str] = {}
-    for name in prepared.staged:
+    for name in prepared.sources:
         source = prepared.packed / name
-        destination = staging / name
+        landed = kaggle_name(name)
+        destination = staging / landed
         if destination.exists() or destination.is_symlink():
             destination.unlink()
+        if name in CHECKSUM_EXTRAS:
+            # Rewritten rather than linked, because its CONTENTS name the
+            # files a reader checks and those names have changed. Linking it
+            # would publish a checksum file listing containers that are not on
+            # this mirror, and a checksum file that cries wolf is worse than
+            # none: the reader who meets one either stops trusting the corpus
+            # or stops running the check.
+            destination.write_text(
+                retarget_checksums(source.read_text(encoding="utf-8"), renamed),
+                encoding="utf-8")
+            how[landed] = "rewritten"
+            continue
         try:
             os.link(source, destination)
-            how[name] = "link"
+            how[landed] = "link"
         except OSError:
             # Different filesystem, or a filesystem with no hard links. The
             # bytes are copied instead and the caller says so, because an
             # unexplained several-minute pause on a 3.3 GB tier reads as a
             # hang.
             shutil.copy2(source, destination)
-            how[name] = "copy"
+            how[landed] = "copy"
     return how
 
 
 def describe(prepared: Plan, how: dict[str, str] | None = None) -> str:
     """The report an operator reads before a publish, dry run or live."""
     lines = [f"staged from {prepared.packed}:"]
-    sample = ", ".join(prepared.shards[:2])
+    sample = ", ".join(kaggle_name(n) for n in prepared.shards[:2])
     if prepared.shards:
         lines.append(f"  {len(prepared.shards):>4} tar shard(s)  e.g. {sample}")
+        # Said in the report, not only in a comment. The rename is the whole
+        # reason this mirror stopped shattering into 20,000 files, and an
+        # operator who does not see it happen cannot notice it stopping.
+        lines.append(f"       renamed to *.tar{KAGGLE_SHARD_SUFFIX}, because "
+                     f"Kaggle unpacks .tar and nothing else")
     for name in prepared.indexes:
         lines.append(f"     1 pack index    {name}")
     for name in prepared.extras:
-        lines.append(f"       document      {name}")
+        note = ("  (rewritten to name the shards as they arrive)"
+                if name in CHECKSUM_EXTRAS else "")
+        lines.append(f"       document      {name}{note}")
     for name in prepared.control:
         lines.append(f"       control file  {name}  "
                      f"(Kaggle reads it, and does not upload it)")

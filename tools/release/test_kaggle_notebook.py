@@ -122,9 +122,32 @@ class FiguresComeFromTheReleaseTests(unittest.TestCase):
         self.assertIn("567 of 1,234 covers (45.9%)", text)
 
     def test_the_shard_count_is_the_one_in_the_index(self):
+        # The count, not the sentence around it. This used to assert "3 tar
+        # shards", which matched only because the prose said the shards were
+        # folders, so the wording and the figure were pinned by one string and
+        # correcting the wording looked like breaking the count.
         packed = packed_release(self.root / "core", shards=3)
         text = sources(kaggle_notebook.build(packed))
-        self.assertIn("3 tar shards", text)
+        self.assertIn("3 shards", text)
+
+    def test_the_notebook_opens_the_shard_under_the_name_kaggle_carries(self):
+        # It pointed at `pentimento-core-00000`, a directory that existed only
+        # while Kaggle was unpacking the shards. Every cell after the first
+        # failed for anybody who ran it, and the live notebook had to be
+        # patched by hand.
+        packed = packed_release(self.root / "core")
+        text = sources(kaggle_notebook.build(packed))
+        self.assertIn("pentimento-core-00000.tar.bin", text)
+        self.assertNotIn("'pentimento-core-00000')", text)
+
+    def test_the_notebook_does_not_tell_a_reader_the_shards_are_folders(self):
+        # True until 2026-09-24 and false since. A starter notebook is read
+        # more carefully than the card, so a stale explanation here costs more
+        # than one anywhere else on the page.
+        packed = packed_release(self.root / "core")
+        text = sources(kaggle_notebook.build(packed))
+        self.assertNotIn("are **folders**", text)
+        self.assertNotIn("the container is gone", text)
 
     def test_a_different_tier_names_its_own_shards(self):
         # Nano and Lite ship the same structure under a different prefix, and
