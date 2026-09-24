@@ -175,7 +175,7 @@ fail when they're absent.
 
 **Measured and working:** the corpus generators (deduplication, licence
 tracking, embedding, packing), and the scoring loop against an HTTP endpoint.
-The first corpus tier is complete: 35 stego arms and 4 clean ones, 344,348
+The first corpus tier is complete: 35 stego arms and 4 clean ones, 344,357
 pairs, built in a single 22 hour run with every arm resumable and every file
 checksummed.
 
