@@ -1,4 +1,4 @@
-# stegobench
+# Stegobench
 
 A reproducible benchmark for steganalysis: run detectors and embedders as
 sandboxed plugins, score them against a labelled corpus, and get back a
@@ -9,7 +9,7 @@ them. The corpora usually can't be redistributed, and the discipline that
 keeps a measurement honest (a clean image and its stego twin must differ in
 nothing but the payload, a cover and its stego twin must land on the same
 side of a train/test split) is described in a paper rather than enforced by
-the tool that produced the number. stegobench is an attempt at fixing both:
+the tool that produced the number. Stegobench is an attempt at fixing both:
 [Pentimento](https://github.com/elementmerc/pentimento) is the redistributable
 corpus, and this repository is the harness.
 

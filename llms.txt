@@ -1,4 +1,4 @@
-# stegobench
+# Stegobench
 
 > A reproducible benchmark for image and audio steganalysis. Build a labelled
 > corpus, run detectors over identical bytes, and report numbers somebody else

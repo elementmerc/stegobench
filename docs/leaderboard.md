@@ -77,7 +77,7 @@ image we can pull and run under the same sandboxing (`--network=none`,
   Demoted to Reported with a stated reason, not silently dropped, so the
   submitter knows what to fix rather than wondering why their entry
   disappeared.
-- **A composite or cross-corpus score.** There is no single "stegobench
+- **A composite or cross-corpus score.** There is no single "Stegobench
   score"; a submission that tries to report one has misunderstood the table.
   See "What the table will not do" below.
 
