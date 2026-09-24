@@ -431,7 +431,40 @@ class LoaderTests(unittest.TestCase):
     def test_it_explains_itself_when_called_wrong(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Pentimento", result.stderr)
+        self.assertIn("usage:", result.stderr)
+        self.assertIn("shard", result.stderr)
+
+    def test_help_prints_help_rather_than_a_traceback(self):
+        # `--help` is the first thing a stranger types at an unfamiliar
+        # script. Before there was an argument parser it fell through to
+        # `tarfile.open("--help")` and answered with twenty lines ending
+        # inside the standard library, which reads as a broken corpus.
+        result = self.run_script("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertIn("usage:", result.stdout)
+
+    def test_help_makes_verify_discoverable(self):
+        # It was documented in one section of the guide and found by luck
+        # everywhere else, which is not a discovery route.
+        result = self.run_script("--help")
+        self.assertIn("--verify", result.stdout)
+
+    def test_help_names_the_split_rule(self):
+        # The one thing a reader has to know before training, and the help
+        # text is read by people who never open SPLITS.md.
+        result = self.run_script("--help")
+        self.assertIn("source_png", result.stdout)
+        self.assertIn("SPLITS.md", result.stdout)
+
+    def test_the_documented_verify_invocation_still_parses(self):
+        # The published guide says `--verify <shard>`, in that order, and an
+        # argument parser that took the shard first would break every page
+        # already on three mirrors.
+        shard = self.shard("ok.tar")
+        result = self.run_script("--verify", str(shard))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class EndToEndTests(unittest.TestCase):

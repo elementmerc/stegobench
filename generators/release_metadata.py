@@ -1319,26 +1319,61 @@ def as_webdataset(pattern: str):
     )
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) == 3 and argv[1] == "--verify":
-        return verify(argv[2])
-    if len(argv) != 2:
-        print(__doc__, file=sys.stderr)
-        return 2
+def main(argv: list[str] | None = None) -> int:
+    """Argument parsing, deliberately through argparse.
+
+    `--help` is the first thing a stranger types at an unfamiliar script, and
+    hand-rolled argument handling sent it to `tarfile.open("--help")`, which
+    answered with twenty lines of traceback ending inside the standard
+    library. That reads as "I have broken it" before the reader has opened a
+    single file. It is also where `--verify` becomes discoverable: it was
+    documented in one section of the guide and found by luck everywhere else.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="load_pentimento.py",
+        description="Read Pentimento shards, with or without the webdataset "
+                    "package. Takes a tar shard or a folder holding the same "
+                    "members, so a mirror that unpacked the archives reads "
+                    "the same way.",
+        epilog="examples:\\n"
+               "  python load_pentimento.py pentimento-core-00000.tar\\n"
+               "  python load_pentimento.py pentimento-core-00000/\\n"
+               "  python load_pentimento.py --verify pentimento-core-00000/\\n"
+               "\\n"
+               "Split by cover before training, never at random: every record "
+               "names its cover under `source_png`, and SPLITS.md has the "
+               "rule.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "shard",
+        help="a tar shard, or a folder holding one that has been unpacked")
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="check every image against the sha256 in its own record, and "
+             "report any that disagree. This works on an unpacked mirror, "
+             "where SHA256SUMS cannot, because the digest travels with the "
+             "image rather than with the archive")
+    args = parser.parse_args(argv)
+
+    if args.verify:
+        return verify(args.shard)
+
     count = 0
-    for key, image, record in samples(argv[1]):
+    for key, image, record in samples(args.shard):
         if count == 0:
             print(f"first sample: {key}")
             print(f"  bytes      {len(image):,}")
             print(f"  licence    {record.get('licence') or record.get('cover_licence')}")
             print(f"  cover      {record.get('source_png', 'this IS a cover')}")
         count += 1
-    print(f"{count:,} samples in {argv[1]}")
+    print(f"{count:,} samples in {args.shard}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main())
 '''
 
 
