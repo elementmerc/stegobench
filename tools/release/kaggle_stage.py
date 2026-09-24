@@ -73,11 +73,18 @@ from dataclasses import dataclass
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "generators"))
 try:
     from release_metadata import PUBLISHED_EXTRAS  # noqa: E402
+    #: What a shard is called once Kaggle has it. Imported for the same reason
+    #: as the list above, and it matters more: this module renames the files
+    #: and `publish_tier` writes the descriptions that name them, so two copies
+    #: of the rule would put a description on a filename nobody can see. The
+    #: incident that forced the rename, and the measurement behind the chosen
+    #: suffix, are recorded beside the definition there.
+    from publish_tier import KAGGLE_SHARD_SUFFIX, kaggle_name  # noqa: E402
 except ImportError as exc:  # pragma: no cover - the import is the contract
     raise ImportError(
-        "the list of published files could not be imported from "
-        f"generators/release_metadata.py ({exc}). A hardcoded copy here would "
-        "drift from it, so this refuses to guess."
+        "the published-file list and the Kaggle naming rule could not be "
+        f"imported from generators/ ({exc}). Hardcoded copies here would "
+        "drift from them, so this refuses to guess."
     ) from exc
 
 #: The pack index ships, and its name carries the tier, so it is matched rather
@@ -95,40 +102,11 @@ KAGGLE_CONTROL = "dataset-metadata.json"
 #: `PUBLISHED_EXTRAS` is required.
 OPTIONAL_EXTRAS = ("SHA256SUMS-arms",)
 
-#: WHY THE SHARDS ARRIVE UNDER A DIFFERENT NAME.
-#:
-#: Kaggle extracts uploaded archives and offers no way to refuse, so the Core
-#: cover tier landed as 20,014 loose files: ten shards expanded into 20,000
-#: images and sidecars. On 2026-09-24 that broke the dataset outright. Kaggle's
-#: own file listing returned HTTP 500 partway through enumerating them and the
-#: Data Card stopped rendering, so a visitor was told the data was
-#: inaccessible while the data was perfectly fine.
-#:
-#: Measured on a throwaway dataset, since deleted: Kaggle extracts `.tar` and
-#: nothing else. `.tar.bin`, `.bin`, `.shard` and `.tardata` were all stored
-#: intact. `.tar.bin` is the one used here because it keeps `tar` legible in
-#: the name while saying the file is a stored blob.
-#:
-#: The shipped reader needs no change: `tarfile` sniffs the content rather
-#: than trusting the extension, which was verified by reading a renamed shard
-#: end to end.
-KAGGLE_SHARD_SUFFIX = ".bin"
-
 #: The checksum files, which cannot be staged verbatim once the shards are
 #: renamed: they would name containers that are not on that mirror, which is
 #: the exact defect that made `sha256sum -c` fail on the Kaggle copy for
 #: months. They are rewritten instead, digests untouched and names corrected.
 CHECKSUM_EXTRAS = ("SHA256SUMS-covers", "SHA256SUMS-arms")
-
-
-def kaggle_name(name: str) -> str:
-    """What a staged file is called on Kaggle.
-
-    Only `.tar` moves, because only `.tar` is unpacked. Renaming anything else
-    would be a cost with no purchase, and a reader has to be able to recognise
-    what they downloaded.
-    """
-    return name + KAGGLE_SHARD_SUFFIX if name.endswith(".tar") else name
 
 
 class StagingRefused(Exception):
@@ -377,7 +355,7 @@ def describe(prepared: Plan, how: dict[str, str] | None = None) -> str:
         # Said in the report, not only in a comment. The rename is the whole
         # reason this mirror stopped shattering into 20,000 files, and an
         # operator who does not see it happen cannot notice it stopping.
-        lines.append(f"       renamed to *.tar{KAGGLE_SHARD_SUFFIX}, because "
+        lines.append(f"       renamed to *{KAGGLE_SHARD_SUFFIX}, because "
                      f"Kaggle unpacks .tar and nothing else")
     for name in prepared.indexes:
         lines.append(f"     1 pack index    {name}")

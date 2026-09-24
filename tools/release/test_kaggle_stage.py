@@ -318,8 +318,12 @@ class TheShardsKaggleWouldUnpack(unittest.TestCase):
         # stopping, and stopping is what broke the dataset last time.
         prepared = kaggle_stage.plan(self.packed)
         text = kaggle_stage.describe(prepared)
-        self.assertIn(".tar.bin", text)
+        self.assertIn("renamed to *.tar.bin", text)
         self.assertIn("unpacks .tar", text)
+        # A bare `assertIn(".tar.bin")` passed while the line actually read
+        # `*.tar.tar.bin`, because the suffix constant means the whole
+        # extension in one module and only the added part in the other.
+        self.assertNotIn(".tar.tar", text)
 
     def test_a_staged_shard_still_opens_as_a_tar(self):
         # The rename is safe only because `tarfile` sniffs content rather than
