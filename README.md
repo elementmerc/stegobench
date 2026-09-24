@@ -191,10 +191,13 @@ corpus from the Rust binary). Both are in the command tree today so the
 vocabulary is fixed before anything depends on it, and both refuse clearly
 with exit code 8 rather than doing something partial.
 
-**Twelve tools are registered** under `plugins/registry/` today: five
-embedders (steghide, outguess, openstego, stegosuite, hstego) and seven
-detectors (Aletheia's SPA, RS and rich-model estimators, StegExpose, zsteg,
-plus Stegcore and StegaShield as subjects rather than references).
+**Thirteen tools are registered** under `plugins/registry/` today: six
+embedders (steghide, outguess, openstego, stegosuite, hstego, and Stegcore's
+embed side) and seven detectors (Aletheia's SPA, RS and rich-model estimators,
+StegExpose, zsteg, plus Stegcore and StegaShield as subjects rather than
+references). Stegcore appears twice because it does both jobs, and hiding a
+payload and judging one are different measurements that should not share an
+identifier.
 `stegoveritas` has never built against current dependencies and is
 deliberately not registered or listed anywhere as if it worked; see
 `DEFERRED.md` for the detail rather than a dead reference here.

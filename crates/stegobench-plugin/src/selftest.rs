@@ -397,6 +397,144 @@ mod tests {
     }
 }
 
+/// The round trip against a LOCAL program rather than a container.
+///
+/// Stegcore is registered as an embedder and is a binary rather than an image,
+/// so without these the one entry that takes this path is unproven on every
+/// machine that does not have the program installed, which is every machine in
+/// CI.
+#[cfg(all(test, unix))]
+mod local_roundtrip_tests {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use stegobench_core::registry::Entry;
+
+    use super::{roundtrip, Verified};
+
+    /// A stand-in embedder: `embed` concatenates a marker and the payload,
+    /// `extract` gives the payload back. Enough to exercise every branch of
+    /// the runner without installing a real tool.
+    fn fake_tool(dir: &Path, name: &str, body: &str) -> String {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).expect("script");
+        write!(f, "#!/bin/sh\nset -e\n{body}\n").expect("written");
+        let mut perms = f.metadata().expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path.display().to_string()
+    }
+
+    fn entry(command: &str) -> Entry {
+        toml::from_str(&format!(
+            "name = \"x\"\nkind = \"embedder\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [{command}]\n\
+             [roundtrip]\ncover = \"fixtures/clean.png\"\n\
+             embed_argv = [\"embed\", \"{{cover}}\", \"{{payload}}\", \"{{stego}}\"]\n\
+             extract_argv = [\"extract\", \"{{stego}}\", \"{{recovered}}\"]\n\
+             [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n"
+        ))
+        .expect("parses")
+    }
+
+    fn fixtures(dir: &Path) -> &Path {
+        std::fs::write(dir.join("clean.png"), b"\x89PNG\r\n\x1a\ncover bytes").expect("cover");
+        dir
+    }
+
+    #[test]
+    fn a_local_tool_that_returns_the_payload_passes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // A fixed-length marker rather than the cover's own bytes, so extract
+        // knows the offset without being handed the cover, which is the
+        // position a real extractor is in.
+        let tool = fake_tool(
+            tmp.path(),
+            "tool.sh",
+            "case \"$1\" in\n\
+             embed) { printf 'STEGO:'; cat \"$3\"; } > \"$4\" ;;\n\
+             extract) tail -c +7 \"$2\" > \"$3\" ;;\n\
+             esac",
+        );
+        let e = entry(&format!("{tool:?}"));
+        let fix = tempfile::tempdir().expect("fixtures");
+        match roundtrip::run(&e, fixtures(fix.path())) {
+            Verified::Passed => {}
+            other => panic!("expected Passed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_local_tool_that_writes_nothing_fails_rather_than_passing_quietly() {
+        // Exiting zero having written no stego file is the silent failure the
+        // whole check exists to catch, and it is easier to hit locally than in
+        // a container because there is no image to be missing first.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool = fake_tool(tmp.path(), "quiet.sh", "exit 0");
+        let e = entry(&format!("{tool:?}"));
+        let fix = tempfile::tempdir().expect("fixtures");
+        match roundtrip::run(&e, fixtures(fix.path())) {
+            Verified::Failed(r) => assert!(r.contains("wrote no stego file"), "got {r}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_local_tool_that_returns_the_wrong_bytes_fails() {
+        // A tool that truncates or pads has not worked, and every comparison
+        // weaker than byte equality has a way of passing when it should not.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool = fake_tool(
+            tmp.path(),
+            "lossy.sh",
+            "case \"$1\" in\n\
+             embed) cat \"$2\" \"$3\" > \"$4\" ;;\n\
+             extract) printf 'not the payload' > \"$3\" ;;\n\
+             esac",
+        );
+        let e = entry(&format!("{tool:?}"));
+        let fix = tempfile::tempdir().expect("fixtures");
+        match roundtrip::run(&e, fixtures(fix.path())) {
+            Verified::Failed(r) => assert!(r.contains("did not come back"), "got {r}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_that_is_not_installed_fails_naming_the_program() {
+        // Distinct from "wrote nothing": the reader has to know whether to
+        // install something or to report a bug against the tool.
+        let e = entry("\"definitely-not-installed-anywhere\"");
+        let fix = tempfile::tempdir().expect("fixtures");
+        match roundtrip::run(&e, fixtures(fix.path())) {
+            Verified::Failed(r) => {
+                assert!(r.contains("embed failed"), "got {r}");
+                assert!(r.contains("definitely-not-installed-anywhere"), "got {r}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entry_with_neither_an_image_nor_a_binary_is_skipped() {
+        // Skipped and Failed stay distinct: nothing to run is not the same as
+        // something that ran and did not work.
+        let e: Entry = toml::from_str(
+            "name = \"x\"\nkind = \"embedder\"\nlicence = \"MIT\"\n\
+             [roundtrip]\ncover = \"fixtures/clean.png\"\n\
+             embed_argv = [\"e\"]\nextract_argv = [\"x\"]\n\
+             [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n",
+        )
+        .expect("parses");
+        let fix = tempfile::tempdir().expect("fixtures");
+        match roundtrip::run(&e, fixtures(fix.path())) {
+            Verified::Skipped(r) => assert!(r.contains("no image and no binary"), "got {r}"),
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+}
+
 /// Proving an embedder: what goes in must come back out.
 pub mod roundtrip {
     use std::path::Path;
@@ -416,12 +554,36 @@ pub mod roundtrip {
     /// Byte comparison rather than a size check or a substring: a tool that
     /// returns a truncated or padded payload has not worked, and every weaker
     /// comparison has a way of passing when it should not.
+    /// How the tool is reached, which decides both the argv and the paths.
+    ///
+    /// A container sees the scratch directory at `/work`; a local program sees
+    /// it where it actually is. Substituting the wrong one produces a tool
+    /// that exits cleanly having written nothing, which is the failure this
+    /// check exists to catch and would be blamed on the tool.
+    enum Reach {
+        Container(String),
+        Local(Vec<String>),
+    }
+
     pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         let Some(rt) = &entry.roundtrip else {
             return Verified::Skipped("no roundtrip declared".into());
         };
-        let Some(image) = entry.image.as_ref().map(|i| i.reference.clone()) else {
-            return Verified::Skipped("roundtrip currently covers containerised tools".into());
+        // A binary entry is a program the operator installed themselves, which
+        // is a different statement from pulling a stranger's image, and it gets
+        // the different level of isolation the registry already describes: it
+        // runs as the user, unsandboxed. Refusing to check it would not make
+        // that safer, it would only mean nobody knows whether it works.
+        let reach = match (entry.image.as_ref(), entry.binary.as_ref()) {
+            (Some(image), _) => Reach::Container(image.reference.clone()),
+            (None, Some(binary)) if !binary.command.is_empty() => {
+                Reach::Local(binary.command.clone())
+            }
+            _ => {
+                return Verified::Skipped(
+                    "no image and no binary command to run the round trip with".into(),
+                )
+            }
         };
         let cover_src = fixtures_dir.join(rt.cover.trim_start_matches("fixtures/"));
         if !cover_src.is_file() {
@@ -451,13 +613,17 @@ pub mod roundtrip {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("bin");
-        let stego_name = format!("/work/stego.{ext}");
+        let base = match &reach {
+            Reach::Container(_) => "/work".to_string(),
+            Reach::Local(_) => work.display().to_string(),
+        };
+        let stego_name = format!("{base}/stego.{ext}");
 
         let subst = |a: &String| {
-            a.replace("{cover}", &format!("/work/{cover_name}"))
-                .replace("{payload}", "/work/payload.bin")
+            a.replace("{cover}", &format!("{base}/{cover_name}"))
+                .replace("{payload}", &format!("{base}/payload.bin"))
                 .replace("{stego}", &stego_name)
-                .replace("{recovered}", "/work/recovered.bin")
+                .replace("{recovered}", &format!("{base}/recovered.bin"))
                 .replace("{passphrase}", &rt.passphrase)
         };
 
@@ -477,7 +643,29 @@ pub mod roundtrip {
             })
             .unwrap_or_default();
 
-        let phase = |argv: &Vec<String>| -> Result<(), String> {
+        let local_phase = |command: &Vec<String>, argv: &Vec<String>| -> Result<(), String> {
+            let mut run = Command::new(&command[0]);
+            run.args(command[1..].iter().map(&subst));
+            run.args(argv.iter().map(&subst));
+            // The scratch directory, so a tool that writes a stray file beside
+            // its output leaves it there rather than in the user's cwd.
+            run.current_dir(work);
+            match run.output() {
+                Ok(o) if o.status.success() => Ok(()),
+                Ok(o) => Err(format!(
+                    "exit {}: {}",
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stderr)
+                        .trim()
+                        .chars()
+                        .take(160)
+                        .collect::<String>()
+                )),
+                Err(e) => Err(format!("could not run {}: {e}", command[0])),
+            }
+        };
+
+        let container_phase = |image: &String, argv: &Vec<String>| -> Result<(), String> {
             let mut args: Vec<String> = vec![
                 "run".into(),
                 "--rm".into(),
@@ -511,6 +699,13 @@ pub mod roundtrip {
                         .collect::<String>()
                 )),
                 Err(e) => Err(format!("could not run the container: {e}")),
+            }
+        };
+
+        let phase = |argv: &Vec<String>| -> Result<(), String> {
+            match &reach {
+                Reach::Container(image) => container_phase(image, argv),
+                Reach::Local(command) => local_phase(command, argv),
             }
         };
 

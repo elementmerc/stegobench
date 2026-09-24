@@ -1,0 +1,63 @@
+# Stegcore's embedder, which is the other half of the program registered as
+# `stegcore` under detectors/.
+#
+# WHY A SECOND FILE RATHER THAN ONE ENTRY DECLARING TWO KINDS
+#
+# A name is how `describe` finds an entry and how a result says what produced
+# it, so the registry refuses two files claiming one name. That refusal is
+# right, and it is also the answer here: a number produced by Stegcore hiding a
+# payload and a number produced by Stegcore judging one are different
+# measurements and should not share an identifier. The three Aletheia entries
+# already work this way, one estimator each.
+#
+# SAME SUBJECT STATUS AS THE DETECTOR ENTRY
+#
+# maintainer = "us" keeps it out of the ranking. A benchmark must not be built
+# out of the product it judges, and it reaches this tool through exactly this
+# file with no privileged path anywhere in the harness.
+name = "stegcore-embed"
+kind = "embedder"
+upstream = "https://github.com/The-Malware-Files/Stegcore"
+licence = "AGPL-3.0-or-later"
+maintainer = "us"
+notes = "Adaptive LSB with an authenticated cipher, so the payload is indistinguishable from random before it is placed. Unlike the classic tools here it encrypts by default, which is what a modern tool does and what makes it a harder arm rather than a fairer one."
+
+[binary]
+# Bare, because the round trip supplies `embed` and `extract`. The detector
+# entry's command carries `analyse --json` for the same reason in reverse:
+# there it is the only subcommand that entry ever runs.
+command = ["stegcore"]
+size_mb = 9
+version_args = ["--version"]
+
+[emits]
+output = "score"
+
+[accepts]
+# The formats Stegcore's own embed command names. The round trip proves one of
+# them; the rest are a claim this file makes and `score` will exercise.
+formats = ["png", "bmp", "jpeg", "webp", "wav", "flac"]
+
+[cost]
+seconds_per_image = 0.3
+peak_rss_mb = 260
+cores_per_worker = 1
+
+[roundtrip]
+# PNG, because it is the lossless case and an adaptive LSB payload does not
+# survive a JPEG re-encode. Proving the round trip on a format the tool cannot
+# be expected to hold a payload in would report a broken tool.
+cover = "fixtures/clean.png"
+# `--force` overwrites the staged output rather than refusing, and the
+# passphrase is given on the command line ONLY because this is a throwaway
+# fixture in a temporary directory: Stegcore's own help says a passphrase in
+# argv is readable by any local user through /proc, and that warning is right
+# for every use that is not this one.
+embed_argv = ["embed", "{cover}", "{payload}", "-o", "{stego}",
+              "--passphrase", "{passphrase}", "--force"]
+extract_argv = ["extract", "{stego}", "-o", "{recovered}",
+                "--passphrase", "{passphrase}"]
+
+[selftest]
+must_detect = "fixtures/lsb-0.4bpp.png"
+must_clear = "fixtures/clean.png"
