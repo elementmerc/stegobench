@@ -43,6 +43,7 @@ CREDENTIALS="${CREDENTIALS:-$HOME/catastrophic/pentimento.env}"
 KAGGLE="${KAGGLE:-$HOME/stegobench-venv/bin/kaggle}"
 KAGGLE_USER="${KAGGLE_USER:-elementmerc}"
 LOGS="${LOGS:-$HOME/pentimento/logs}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ -d "$PACKED" ] || { echo "error: no packed release at $PACKED" >&2; exit 1; }
 [ -x "$KAGGLE" ] || { echo "error: no kaggle client at $KAGGLE" >&2; exit 1; }
@@ -72,6 +73,18 @@ python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['description'])"
 echo "==========================================="
 echo
 
+# THE NOTEBOOK IS BUILT BEFORE THE DRY-RUN EXIT, ON PURPOSE. A dry run that
+# skipped it would report success and leave the generator's first real
+# exercise for the live run, which is when the line is already busy.
+#
+# It goes to a temporary directory rather than into $PACKED, because Kaggle
+# versions that whole directory and anything stray in it goes public.
+KERNEL="$(mktemp -d)"
+trap 'rm -rf "$KERNEL"' EXIT
+echo "=== starter notebook ==="
+python3 "$HERE/kaggle_notebook.py" --packed "$PACKED" --out "$KERNEL"
+echo
+
 if [ "${1:-}" != "--live" ]; then
   echo "DRY RUN. Nothing will be sent. Pass --live to publish."
   echo
@@ -82,6 +95,9 @@ if [ "${1:-}" != "--live" ]; then
   echo "      ATTRIBUTION.csv into its own CSV dialect, and that file is"
   echo "      covered by SHA256SUMS-covers, so every reader's checksum fails"
   echo "      on a file nothing is wrong with."
+  echo
+  echo "  and, from $KERNEL:"
+  echo "  kaggle kernels push"
   exit 0
 fi
 
@@ -101,3 +117,20 @@ echo
 echo "Now check the description actually changed, because the upload"
 echo "succeeding says nothing about the prose:"
 echo "  kaggle datasets metadata -p /tmp $SLUG && cat /tmp/dataset-metadata.json"
+
+# The notebook goes out in the same run as the data, for the same reason this
+# file exists at all: it quotes the corpus back at the reader, so a new data
+# version leaves it quoting the old one, and pushing it by hand is the
+# mechanism that left a corrected description on disk while the public page
+# carried the old copy.
+echo
+echo "=== pushing the starter notebook ==="
+(
+  set -a
+  # shellcheck disable=SC1090
+  . "$CREDENTIALS"
+  set +a
+  export KAGGLE_USERNAME="${KAGGLE_USERNAME:-$KAGGLE_USER}"
+  cd "$KERNEL"
+  "$KAGGLE" kernels push
+) 2>&1 | tee -a "$LOGS/publish-kaggle.log"

@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+"""Build the starter notebook that ships beside the Kaggle dataset.
+
+WHY A GENERATOR RATHER THAN A CHECKED-IN .ipynb
+-----------------------------------------------
+The notebook quotes the corpus back at the reader: how many covers, how many
+require a credit line, what an arm is called. Those are exactly the figures
+this project refuses to let anybody type, because a README once carried
+"5,429 covers require attribution" over a corpus holding 5,453 and nothing
+could catch it. A notebook is prose with a run button; it goes stale the same
+way and it is read more carefully than the card.
+
+So every number in it is read from the packed release at build time.
+
+WHY IT MATTERS BEYOND ACCURACY
+------------------------------
+Kaggle scores a dataset's usability across completeness, credibility and
+compatibility, and a public notebook is one of the credibility components. It
+is also, in practice, the first thing a Kaggle user clicks: the file list for
+this corpus is ten folders of PNGs and a handful of documents, and a notebook
+is the only artefact on the page that shows what to DO with them.
+
+THE THING IT HAS TO GET RIGHT
+-----------------------------
+Kaggle unpacks tar archives on upload, so on that mirror there are no shards.
+A notebook demonstrating `webdataset` would fail on the platform it is
+published to. This one uses `load_pentimento.py`, which reads a folder and a
+tar alike, and it says why.
+
+Usage::
+
+    python3 tools/release/kaggle_notebook.py --packed ~/pentimento/release/core \\
+        --out /tmp/kernel
+    cd /tmp/kernel && kaggle kernels push
+"""
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+import pathlib
+import re
+import sys
+
+
+class ReleaseIncomplete(Exception):
+    """The packed release is missing something the notebook has to quote.
+
+    Its own exception rather than a bare KeyError or StopIteration, because
+    this is run at the end of a release and the reader needs to be told which
+    file is absent and which step writes it, not handed a traceback ending
+    inside `glob`.
+    """
+
+
+#: Cells need an `id`. nbformat warns about their absence today and says it
+#: becomes a hard error, so the notebook would stop running on a future image
+#: with nothing in this repository having changed.
+_COUNTER = itertools.count(1)
+
+
+def code(*lines: str) -> dict:
+    return {"cell_type": "code", "id": f"c{next(_COUNTER)}",
+            "execution_count": None, "metadata": {},
+            "outputs": [], "source": _lines(lines)}
+
+
+def text(*lines: str) -> dict:
+    return {"cell_type": "markdown", "id": f"m{next(_COUNTER)}",
+            "metadata": {}, "source": _lines(lines)}
+
+
+def _lines(lines) -> list[str]:
+    """Notebook sources are lists of lines, each keeping its newline."""
+    body = "\n".join(lines)
+    return [line + "\n" for line in body.split("\n")][:-1] + [body.split("\n")[-1]]
+
+
+def build(packed: pathlib.Path, slug: str) -> dict:
+    """The notebook, with every figure read from the packed release."""
+    summary_path = packed / "licence-summary.json"
+    if not summary_path.is_file():
+        raise ReleaseIncomplete(
+            f"no licence-summary.json in {packed}. Every attribution figure in "
+            f"the notebook is read from it, and a notebook that guesses at how "
+            f"many covers need a credit line is worse than no notebook.")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    indexes = sorted(packed.glob("pentimento-*-index.json"))
+    if not indexes:
+        raise ReleaseIncomplete(
+            f"no pentimento-*-index.json in {packed}. The index names the tier "
+            f"and its shards, which is what the notebook tells the reader to "
+            f"open. Run pack_tier.py before building the notebook.")
+    if len(indexes) > 1:
+        raise ReleaseIncomplete(
+            f"{packed} holds {len(indexes)} pack indexes "
+            f"({', '.join(p.name for p in indexes)}). One directory is one "
+            f"tier, and a notebook built from whichever sorted first would "
+            f"quote one tier's figures over another tier's shards.")
+    index = json.loads(indexes[0].read_text(encoding="utf-8"))
+
+    covers = index.get("samples", summary["total"])
+    shards = len(index.get("shards", []))
+    required = summary["attribution_required"]
+    pct = summary["attribution_required_pct"]
+    tier = index.get("tier", "Core")
+    prefix = f"pentimento-{tier.lower()}"
+    first = f"{prefix}-00000"
+
+    cells = [
+        text(
+            f"# Pentimento {tier}: first look",
+            "",
+            f"{covers:,} permissively licensed cover photographs, each carrying "
+            "its own licence and its own checksum.",
+            "",
+            "**This is a JPEG-decompressed spatial corpus. It is NOT comparable "
+            "to BOSSbase, whose covers were never JPEG compressed.** Detector "
+            "numbers measured here and numbers measured on BOSSbase cannot go "
+            "in the same table.",
+            "",
+            "### One thing to know before you start",
+            "",
+            "Kaggle extracts archives when a dataset is uploaded, and gives no "
+            f"way to refuse. So the {shards} tar shards are **folders** here, "
+            f"`{first}/` and so on, holding the same members under the same "
+            "names. The bytes are identical; the container is gone.",
+            "",
+            "That means two things. `sha256sum -c SHA256SUMS-covers` names "
+            "shards that are not on this copy, so use the per-record check "
+            "below instead. And `webdataset` has nothing to glob, so this "
+            "notebook uses the loader that ships with the corpus, which reads "
+            "a folder and a tar the same way.",
+        ),
+        text(
+            "## What is on the page",
+            "",
+            "Kaggle mounts an attached dataset under `/kaggle/input`, named "
+            "after its slug. This finds it rather than assuming the name, "
+            "because a notebook that hard-codes the path fails with "
+            "`FileNotFoundError` the moment the mount is called anything else, "
+            "and that failure says nothing useful about why.",
+        ),
+        code(
+            "import os",
+            "",
+            "# Found by looking for a file the corpus is known to contain,",
+            "# rather than by assuming where Kaggle mounts it. Measured on",
+            "# 2026-09-24: the mount was /kaggle/input/datasets, not",
+            "# /kaggle/input/pentimento-core, so guessing the path from the",
+            "# slug failed. A marker file is true wherever it ends up.",
+            "MARKER = 'load_pentimento.py'",
+            "",
+            "ROOT = None",
+            "for here, dirs, files in os.walk('/kaggle/input'):",
+            "    if MARKER in files:",
+            "        ROOT = here",
+            "        break",
+            "",
+            "if ROOT is None:",
+            "    raise SystemExit(",
+            "        'Could not find the corpus under /kaggle/input. Attach '",
+            "        'Pentimento Core with \"Add Input\" on the right, then run '",
+            "        'this again. Found: ' + str(os.listdir('/kaggle/input')))",
+            "",
+            "print('reading from', ROOT)",
+            "print('\\n'.join(sorted(os.listdir(ROOT))[:20]))",
+        ),
+        text(
+            "## Reading samples",
+            "",
+            "`load_pentimento.py` ships with the corpus and needs nothing "
+            "installed. A sample is an image and a JSON record sharing a "
+            "basename, so the record travels with the pixels rather than "
+            "living in a separate table that can drift from them.",
+        ),
+        code(
+            "import sys",
+            "sys.path.insert(0, ROOT)",
+            "from load_pentimento import samples",
+            "",
+            f"shard = os.path.join(ROOT, {first!r})",
+            "for key, image, record in samples(shard):",
+            "    print(key, len(image), 'bytes')",
+            "    print('  licence   ', record['licence'])",
+            "    print('  artist    ', record.get('artist'))",
+            "    print('  needs credit', record['attribution_required'])",
+            "    break",
+        ),
+        text(
+            "## Verifying what you downloaded",
+            "",
+            "Every record carries the sha256 of the image beside it, which is a "
+            "finer check than a checksum over the shard: it names the file that "
+            "is actually wrong rather than the container holding it.",
+        ),
+        code(
+            "from load_pentimento import verify",
+            "",
+            "verify(shard)   # 0 mismatches, or it names the file",
+        ),
+        text(
+            "## The credit lines",
+            "",
+            f"**{required:,} of {covers:,} covers ({pct}%) require attribution.** "
+            "Every one carries a ready-made credit line, so complying is a "
+            "lookup rather than a research task.",
+            "",
+            "Reproduce `attribution` verbatim. Do not rebuild it from the other "
+            "columns: rebuilding a credit line from parts is how mirrors end up "
+            "asserting licences their sources never granted.",
+        ),
+        code(
+            "import csv",
+            "",
+            "with open(os.path.join(ROOT, 'ATTRIBUTION.csv'), newline='') as fh:",
+            "    rows = list(csv.DictReader(fh))",
+            "",
+            f"print(len(rows), 'covers need a credit line')",
+            "print(rows[0]['attribution'])",
+        ),
+        text(
+            "## Before you train on it",
+            "",
+            "**Split by cover, never by image.** A cover and its stego versions "
+            "are far more alike than any two unrelated photographs, so a random "
+            "split puts a cover in training and its own stego copy in test, and "
+            "the classifier learns the photograph rather than the payload. Every "
+            "sample record names its cover under `source_png`; partition on "
+            "that. `SPLITS.md` on this page gives the rule.",
+            "",
+            "Results in the steganalysis literature differ by several accuracy "
+            "points on the choice of split alone, same network and same "
+            "algorithm, so this is not a detail.",
+            "",
+            "### Where the stego images are",
+            "",
+            "This dataset is the **covers**. The 35 stego arms and 4 clean arms "
+            "are on the Internet Archive and HuggingFace, kept as separate "
+            "labelled arms rather than blended, because the ranking of embedding "
+            "schemes inverts when the cover source changes.",
+        ),
+    ]
+
+    return {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python",
+                           "name": "python3"},
+            "language_info": {"name": "python"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--packed", required=True,
+                        help="the packed cover release directory")
+    parser.add_argument("--out", required=True,
+                        help="directory to write the kernel into")
+    parser.add_argument("--title", default="Pentimento Core: first look")
+    args = parser.parse_args(argv)
+
+    packed = pathlib.Path(args.packed)
+    if not packed.is_dir():
+        print(f"no packed release at {packed}", file=sys.stderr)
+        return 1
+
+    card = packed / "dataset-metadata.json"
+    if not card.is_file():
+        print(f"no dataset-metadata.json in {packed}; run publish_tier.py "
+              f"prepare first, because the notebook has to name the dataset "
+              f"it attaches to and that is where the slug lives.",
+              file=sys.stderr)
+        return 1
+    slug = json.loads(card.read_text(encoding="utf-8"))["id"]
+    owner = slug.split("/")[0]
+
+    out = pathlib.Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        notebook = build(packed, slug)
+    except ReleaseIncomplete as e:
+        print(e, file=sys.stderr)
+        return 1
+    (out / "pentimento-first-look.ipynb").write_text(
+        json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
+
+    # The kernel is attached to the dataset by slug, so a notebook that names
+    # the wrong one runs against nothing. Both come from the same card.
+    #
+    # The id is DERIVED FROM THE TITLE rather than written separately. Kaggle
+    # slugifies the title and warns when the two disagree, then publishes under
+    # the title's slug, so an id chosen by hand leaves the tool talking about
+    # one URL and the platform serving another.
+    dataset_name = slug.split("/")[-1]
+    kernel_slug = args.title.lower()
+    kernel_slug = re.sub(r"[^a-z0-9]+", "-", kernel_slug).strip("-")
+    (out / "kernel-metadata.json").write_text(json.dumps({
+        "id": f"{owner}/{kernel_slug}",
+        "title": args.title,
+        "code_file": "pentimento-first-look.ipynb",
+        "language": "python",
+        "kernel_type": "notebook",
+        "is_private": "false",
+        "enable_gpu": "false",
+        "enable_internet": "false",
+        "dataset_sources": [slug],
+        "competition_sources": [],
+        "kernel_sources": [],
+    }, indent=2) + "\n", encoding="utf-8")
+
+    print(f"wrote {out}/pentimento-first-look.ipynb")
+    print(f"      {out}/kernel-metadata.json  attached to {slug}")
+    print(f"\npush it with:\n  cd {out} && kaggle kernels push")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
