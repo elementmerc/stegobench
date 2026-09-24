@@ -96,8 +96,10 @@ if [ "${1:-}" != "--live" ]; then
   echo "      covered by SHA256SUMS-covers, so every reader's checksum fails"
   echo "      on a file nothing is wrong with."
   echo
-  echo "  and, from $KERNEL:"
-  echo "  kaggle kernels push"
+  echo "  and it would push the starter notebook built above. That was built"
+  echo "  into a temporary directory which this run deletes on the way out,"
+  echo "  so there is nothing to cd into: building it here is the check that"
+  echo "  the generator works, and --live builds it again and pushes it."
   exit 0
 fi
 
