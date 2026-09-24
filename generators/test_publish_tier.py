@@ -17,11 +17,14 @@ measurement.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import publish_tier  # noqa: E402
 from publish_tier import obligation_class, strictest_obligation  # noqa: E402
 
 
@@ -75,6 +78,90 @@ class StrictestTests(unittest.TestCase):
     def test_duplicates_are_reported_once(self):
         _, uncovered = strictest_obligation(["CC BY-SA 3.0"] * 5)
         self.assertEqual(uncovered, ["CC BY-SA 3.0"])
+
+
+class KaggleCardTests(unittest.TestCase):
+    """The card is what a reader meets before they download anything.
+
+    The live dataset scored 0.47 on Kaggle's own usability measure with no
+    keywords, no stated update frequency and no file descriptions, which means
+    it was reachable only by somebody who already knew its name.
+    """
+
+    def setUp(self):
+        self.packed = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.packed)
+        for name in ("README.md", "LICENCES.md",
+                     "load_pentimento.py", "pentimento-core-00000.tar"):
+            (self.packed / name).write_text("x", encoding="utf-8")
+        (self.packed / "ATTRIBUTION.csv").write_text(
+            "file,licence,licence_url,artist,title,source,attribution\n",
+            encoding="utf-8")
+
+    def test_every_described_file_actually_ships(self):
+        described = {r["path"] for r in publish_tier.kaggle_resources(self.packed)}
+        present = {p.name for p in self.packed.iterdir()}
+        self.assertTrue(described <= present,
+                        f"describes files that are not there: {described - present}")
+
+    def test_the_tar_shards_are_not_described(self):
+        """Kaggle extracts archives, so no `.tar` exists on that mirror.
+
+        A resource entry naming one describes a file nobody can see.
+        """
+        described = {r["path"] for r in publish_tier.kaggle_resources(self.packed)}
+        self.assertNotIn("pentimento-core-00000.tar", described)
+        self.assertFalse([p for p in described if p.endswith(".tar")])
+
+    def test_a_file_that_stops_shipping_stops_being_described(self):
+        (self.packed / "LICENCES.md").unlink()
+        described = {r["path"] for r in publish_tier.kaggle_resources(self.packed)}
+        self.assertNotIn("LICENCES.md", described)
+
+    def test_every_description_says_something(self):
+        for resource in publish_tier.kaggle_resources(self.packed):
+            self.assertGreater(len(resource["description"]), 30, resource["path"])
+
+    def test_the_csv_columns_are_described_from_its_own_header(self):
+        schema = publish_tier.kaggle_csv_schema(self.packed / "ATTRIBUTION.csv")
+        names = [f["name"] for f in schema["fields"]]
+        self.assertEqual(names[0], "file")
+        self.assertIn("attribution", names)
+        for field in schema["fields"]:
+            self.assertTrue(field["description"].strip(), field["name"])
+
+    def test_an_undescribed_column_is_refused_rather_than_shipped(self):
+        """A published column nobody explains is one a reader guesses at."""
+        (self.packed / "ATTRIBUTION.csv").write_text(
+            "file,mystery\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            publish_tier.kaggle_csv_schema(self.packed / "ATTRIBUTION.csv")
+        self.assertIn("mystery", str(caught.exception))
+
+    def test_the_csv_resource_carries_its_schema(self):
+        entry = [r for r in publish_tier.kaggle_resources(self.packed)
+                 if r["path"] == "ATTRIBUTION.csv"][0]
+        self.assertIn("schema", entry)
+
+    def test_the_keywords_are_from_kaggle_vocabulary_not_our_own_words(self):
+        """Kaggle rejects the WHOLE update if one keyword is off its list.
+
+        Measured against the live API on 2026-09-24: every word that actually
+        describes this corpus, including "steganalysis" and "steganography",
+        is refused. A keyword added here because it reads well silently
+        breaks the next metadata push.
+        """
+        refused = {"steganalysis", "steganography", "image forensics",
+                   "cover source mismatch", "digital forensics",
+                   "cybersecurity", "photography", "image processing",
+                   "security"}
+        self.assertFalse(refused & set(publish_tier.KAGGLE_KEYWORDS))
+        self.assertGreaterEqual(len(publish_tier.KAGGLE_KEYWORDS), 5)
+
+    def test_the_licence_is_the_form_the_update_endpoint_accepts(self):
+        """Create took "CC-BY-4.0"; update answers "invalid license" to it."""
+        self.assertEqual(publish_tier.KAGGLE_LICENCE,
+                         "Attribution 4.0 International (CC BY 4.0)")
 
 
 if __name__ == "__main__":

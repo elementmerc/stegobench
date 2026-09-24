@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
 import hashlib
 import json
 import os
@@ -132,7 +133,7 @@ COLLECTION_LICENCE_URL = "https://creativecommons.org/licenses/by/4.0/"
 #: where the licence field is the primary machine-readable signal and the only
 #: thing a filter reads. Per-file licences remain in the manifest, which is
 #: where "mixed" is actually expressed.
-KAGGLE_LICENCE = "CC-BY-4.0"
+KAGGLE_LICENCE = "Attribution 4.0 International (CC BY 4.0)"
 
 #: `opensource_media` is the Internet Archive's audio/video/image bucket, and
 #: these items are `mediatype: data`. Filed there, a dataset is reachable by
@@ -140,6 +141,118 @@ KAGGLE_LICENCE = "CC-BY-4.0"
 #: would look in. Collection membership is an admin-side change on IA and
 #: awkward to correct once an item exists.
 IA_COLLECTION = "datasets"
+
+#: Kaggle search tags. Editorial rather than derived, which is why they live here
+#: as a named constant instead of being typed into a web form once and forgotten.
+#: Kaggle's own usability score counts their presence, and without them the
+#: dataset is reachable only by somebody who already knows its name.
+KAGGLE_KEYWORDS = [
+    # Kaggle validates keywords against a CONTROLLED VOCABULARY and rejects the
+    # whole update if one is not in it. Measured against the live API on
+    # 2026-09-24: "steganalysis", "steganography", "image forensics",
+    # "cover source mismatch", "digital forensics", "cybersecurity",
+    # "photography", "image processing" and "security" are all REFUSED, which
+    # is most of what this corpus actually is. These are the closest terms the
+    # vocabulary does carry.
+    #
+    # "binary classification" is the most honest of them: a steganalysis
+    # detector decides stego or clean, and that is the task this corpus is for.
+    "computer vision",
+    "image",
+    "classification",
+    "binary classification",
+    "deep learning",
+    "neural networks",
+    "computer science",
+]
+
+#: What each shipped file is, for Kaggle's per-file descriptions. Keyed by the
+#: name as it lands, and DELIBERATELY not covering the tar shards: Kaggle
+#: extracts archives on upload, so `pentimento-core-00000.tar` is a folder
+#: there and a resource entry naming the tar would describe a file that is not
+#: on the page.
+KAGGLE_FILE_NOTES = {
+    "README.md": "Start here. What the corpus is, how it is laid out, and the "
+                 "warning that it is not comparable with BOSSbase.",
+    "LICENCES.md": "The full licensing statement, and why the collection is "
+                   "CC BY 4.0 when individual files are looser.",
+    "ATTRIBUTION.csv": "One row per cover that requires a credit line, with a "
+                       "ready-made attribution string. Join on `file`.",
+    "ATTRIBUTION.md": "The same credit lines as prose, grouped by licence.",
+    "DATASHEET.md": "Datasheet for Datasets (Gebru et al.): provenance, "
+                    "collection process, intended uses and known limits.",
+    "SPLITS.md": "How to split without leaking a cover across the boundary. "
+                 "Read before training; a random split inflates every result.",
+    "CITATION.cff": "Citation metadata. GitHub and Zenodo both render it.",
+    "croissant.json": "ML Commons Croissant description of the corpus.",
+    "licence-summary.json": "Counts per licence, derived from the manifest.",
+    "SHA256SUMS-covers": "Checksums for the ORIGINAL tar shards. Kaggle "
+                         "unpacks archives, so use `load_pentimento.py "
+                         "--verify` on this copy instead.",
+    "load_pentimento.py": "A reader that needs nothing installed. Takes a tar "
+                          "or an unpacked folder, and `--verify` checks every "
+                          "image against the sha256 in its own record.",
+}
+
+
+#: What each column of `ATTRIBUTION.csv` means. Kaggle's usability score counts
+#: column descriptions, and this is the only tabular file the corpus ships, but
+#: the reason to write them is that this CSV is how a user discharges a legal
+#: obligation: somebody has to know which column to put in their paper.
+KAGGLE_CSV_COLUMNS = {
+    "file": "The cover's filename inside the shards, e.g. `00001.png`. Join "
+            "on this. Every stego sample names its cover here under "
+            "`source_png`.",
+    "licence": "The licence THIS photograph carries, which may be looser than "
+               "the collection's CC BY 4.0. This is the authoritative one.",
+    "licence_url": "The deed for that licence.",
+    "artist": "The photographer, as Wikimedia Commons records them.",
+    "title": "The file's page title on Wikimedia Commons.",
+    "source": "The Commons page for the original photograph.",
+    "attribution": "The ready-made credit line. Reproduce this verbatim and "
+                   "the obligation is discharged; do not rebuild it from the "
+                   "other columns.",
+}
+
+
+def kaggle_csv_schema(path: pathlib.Path) -> dict | None:
+    """Column descriptions for a shipped CSV, from its own header row.
+
+    Read from the file rather than listed here, so a column that is added,
+    renamed or dropped cannot leave a description attached to something else.
+    Refuses loudly instead of describing a column it has no words for.
+    """
+    with path.open(encoding="utf-8", newline="") as handle:
+        header = next(csv.reader(handle), [])
+    unknown = [name for name in header if name not in KAGGLE_CSV_COLUMNS]
+    if unknown:
+        raise ValueError(
+            f"{path.name} has column(s) with no description: {unknown}. Add "
+            f"them to KAGGLE_CSV_COLUMNS; a published column nobody explains "
+            f"is one a reader has to guess at.")
+    return {"fields": [{"name": name, "description": KAGGLE_CSV_COLUMNS[name],
+                        "type": "string"}
+                       for name in header]}
+
+
+def kaggle_resources(packed: pathlib.Path) -> list[dict]:
+    """Per-file descriptions for the files that exist ON KAGGLE by name.
+
+    Derived from what is actually in the packed directory rather than listed by
+    hand, so a file that stops shipping stops being described. Kaggle's
+    usability score counts described files, but the reason to do it is that a
+    reader landing on the file list otherwise has to guess which of twelve
+    things to open first.
+    """
+    resources = []
+    for name in sorted(p.name for p in packed.iterdir() if p.is_file()):
+        if name not in KAGGLE_FILE_NOTES:
+            continue
+        entry = {"path": name, "description": KAGGLE_FILE_NOTES[name]}
+        if name.endswith(".csv"):
+            entry["schema"] = kaggle_csv_schema(packed / name)
+        resources.append(entry)
+    return resources
 
 
 def bencode(value) -> bytes:
@@ -461,6 +574,12 @@ def cmd_prepare(args) -> int:
             "the sha256 in its own record. The loader reads a folder and a tar "
             "the same way."
         ),
+        "keywords": KAGGLE_KEYWORDS,
+        # The corpus is versioned and rebuildable byte for byte rather than
+        # refreshed on a cadence. Kaggle's default, "not specified", reads as
+        # nobody having thought about it; this says the true thing.
+        "expectedUpdateFrequency": "never",
+        "resources": kaggle_resources(packed),
     }
     (packed / "dataset-metadata.json").write_text(json.dumps(kaggle_meta, indent=2) + "\n", encoding="utf-8")
 
