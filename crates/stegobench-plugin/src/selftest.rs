@@ -140,9 +140,15 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
         }
     }
 
-    let out = match Command::new("docker").args(&args).output() {
+    // Bounded, like every other invocation. A container that never answers
+    // is the same stuck run as a binary that never answers, and it is the more
+    // likely of the two: an image doing first-run work on a cold cache has no
+    // way to say so.
+    let mut docker = Command::new("docker");
+    docker.args(&args);
+    let out = match crate::exec::captured(docker, "the container", crate::exec::ITEM_TIMEOUT) {
         Ok(out) => out,
-        Err(e) => return Reading::Failed(format!("could not run the container: {e}")),
+        Err(e) => return Reading::Failed(e),
     };
 
     // Some tools answer in a file rather than on stdout. Reading an empty or
@@ -192,13 +198,19 @@ fn run_binary(entry: &Entry, fixture: &Path) -> Reading {
     let mut argv: Vec<String> = bin.command[1..].to_vec();
     argv.extend(invoke.argv.iter().map(|a| a.replace("{file}", &file)));
 
-    match Command::new(&path).args(&argv).output() {
+    let mut program_cmd = Command::new(&path);
+    program_cmd.args(&argv);
+    match crate::exec::captured(program_cmd, program, crate::exec::ITEM_TIMEOUT) {
         Ok(out) => parsers::parse(
             &invoke.parser,
             &String::from_utf8_lossy(&out.stdout),
             &String::from_utf8_lossy(&out.stderr),
         ),
-        Err(e) => Reading::Failed(format!("could not run {program}: {e}")),
+        // Passed through rather than wrapped. The message already names the
+        // tool and says what happened, and "could not run X: X gave no answer"
+        // reports a timeout as a launch failure, which sends the reader to the
+        // wrong problem.
+        Err(e) => Reading::Failed(e),
     }
 }
 
@@ -254,13 +266,17 @@ fn run_host_adapter(entry: &Entry, fixture: &Path) -> Reading {
             cmd.env(k, v);
         }
     }
-    match cmd.output() {
+    match crate::exec::captured(cmd, &program, crate::exec::ITEM_TIMEOUT) {
         Ok(out) => parsers::parse(
             &invoke.parser,
             &String::from_utf8_lossy(&out.stdout),
             &String::from_utf8_lossy(&out.stderr),
         ),
-        Err(e) => Reading::Failed(format!("could not run {program}: {e}")),
+        // Passed through rather than wrapped. The message already names the
+        // tool and says what happened, and "could not run X: X gave no answer"
+        // reports a timeout as a launch failure, which sends the reader to the
+        // wrong problem.
+        Err(e) => Reading::Failed(e),
     }
 }
 
@@ -554,10 +570,9 @@ mod local_roundtrip_tests {
 
 /// Proving an embedder: what goes in must come back out.
 pub mod roundtrip {
-    use std::io::Read;
     use std::path::Path;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::process::Command;
+    use std::time::Duration;
 
     use stegobench_core::registry::Entry;
 
@@ -590,70 +605,22 @@ pub mod roundtrip {
 
     /// Run one phase and wait for it, but not for ever.
     ///
-    /// Standard output goes nowhere and standard error is drained on its own
-    /// thread. Both matter: a tool that fills a pipe blocks on the write while
-    /// the parent waits for it to exit, which is the deadlock a naive timeout
-    /// introduces, and it would look exactly like the hang being fixed.
-    pub(crate) fn bounded(
-        mut command: Command,
-        label: &str,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("could not run {label}: {e}"))?;
-        let mut pipe = child.stderr.take();
-        let (finished, drained) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(p) = pipe.as_mut() {
-                let _ = p.read_to_end(&mut buf);
-            }
-            let _ = finished.send(buf);
-        });
-
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break Some(s),
-                Ok(None) => {}
-                Err(e) => return Err(format!("could not wait for {label}: {e}")),
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-
-        // Bounded too, and for the same reason the wait above is. A tool that
-        // forks leaves a grandchild holding the write end of this pipe, so it
-        // stays open after the process we killed is gone, and joining on it
-        // would reintroduce the hang one line after fixing it. What we lose by
-        // not waiting is the tail of a message from a tool that has already
-        // failed; what we would lose by waiting is the whole check.
-        let stderr = drained
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_default();
-        let tail = String::from_utf8_lossy(&stderr)
+    /// The waiting is shared with every other plugin invocation (see
+    /// `crate::exec`), because it is the part that goes wrong and it goes
+    /// wrong identically wherever it is written. What is local here is only
+    /// what a failed PHASE means: a non-zero exit is this phase failing,
+    /// rather than an answer for a parser to interpret.
+    pub(crate) fn bounded(command: Command, label: &str, timeout: Duration) -> Result<(), String> {
+        let out = crate::exec::captured(command, label, timeout)?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let tail = String::from_utf8_lossy(&out.stderr)
             .trim()
             .chars()
             .take(160)
             .collect::<String>();
-        match status {
-            Some(s) if s.success() => Ok(()),
-            Some(s) => Err(format!("exit {}: {tail}", s.code().unwrap_or(-1))),
-            None => Err(format!(
-                "no answer in {}s and was killed, which usually means it is \
-                 waiting on something nobody is going to type: {tail}",
-                timeout.as_secs()
-            )),
-        }
+        Err(format!("exit {}: {tail}", out.status.code().unwrap_or(-1)))
     }
 
     /// Hides the payload, recovers it, and compares the bytes.
