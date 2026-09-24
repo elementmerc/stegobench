@@ -661,9 +661,63 @@ def put_internetarchive(packed: pathlib.Path, name: str, item: str,
             raise UploadError(f"{name}: could not reach the archive, {e.reason}") from e
 
 
+#: How many times a network-level failure is retried, and the first delay.
+#: A 48 GB upload over a domestic line runs for most of a day, and a reset in
+#: that window is not an exception, it is the weather.
+RETRIES = 5
+RETRY_BACKOFF = 4.0
+
+
+def with_retries(attempt, what: str, log, retries: int = RETRIES):
+    """Run `attempt`, retrying only what a retry can actually fix.
+
+    A CONNECTION-level failure means the request did not complete: the peer
+    reset it, the name did not resolve, the socket timed out. Trying again is
+    the right answer and the only one that gets a day-long upload finished.
+
+    An HTTP error is NOT retried. The server answered; it said no. Repeating a
+    401 or a 400 just says no more slowly, and for a destination that creates
+    public artefacts a blind retry is how one bad request becomes five.
+
+    Added 2026-09-24 after `[Errno 104] Connection reset by peer` killed the
+    live publish 127 files into the 770-file arms step, having already lost a
+    separate run eight hours earlier. Nothing in the uploader retried anything.
+    """
+    delay = RETRY_BACKOFF
+    for remaining in range(retries, -1, -1):
+        try:
+            return attempt()
+        except (urllib.error.HTTPError, UploadError) as e:
+            # UploadError from _hf_api already wraps an HTTP answer. Only the
+            # ones carrying no status came from the connection layer.
+            if isinstance(e, UploadError) and e.status is None and remaining:
+                pass
+            else:
+                raise
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+            if not remaining:
+                raise
+        log(f"    {what}: connection failed, retrying in {delay:.0f}s "
+            f"({remaining} attempt(s) left)")
+        time.sleep(delay)
+        delay *= 2
+    raise UploadError(f"{what}: gave up after {retries} retries")
+
+
 def _hf_api(url: str, token: str, body: bytes | None = None,
             method: str = "GET", content_type: str | None = None,
-            accept: str | None = None, what: str = "hugging face") -> dict:
+            accept: str | None = None, what: str = "hugging face",
+            expect_json: bool = True) -> dict:
+    """One HuggingFace request. `expect_json=False` where the body is ignored.
+
+    Every body was parsed as JSON whether or not any caller read it, so an
+    endpoint answering 200 with something else took the whole run down. That
+    is what killed the live publish on 2026-09-24 at 02:22, 98 files into the
+    45 GB arms step: the git LFS `verify` endpoint returned a non-JSON body,
+    the upload it was confirming had already succeeded, and nothing reads its
+    return value. Eight hours of line time were lost to a parse of something
+    nobody wanted.
+    """
     request = urllib.request.Request(url, data=body, method=method)
     request.add_header("authorization", f"Bearer {token}")
     if content_type:
@@ -673,7 +727,19 @@ def _hf_api(url: str, token: str, body: bytes | None = None,
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
             raw = response.read()
-        return json.loads(raw) if raw else {}
+        # Whitespace is not a body. `if raw` was true for b"\n".
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            if expect_json:
+                raise UploadError(
+                    f"{what}: answered successfully with a body that is not "
+                    f"JSON, which this call needs: "
+                    f"{raw[:200].decode('utf-8', 'replace')!r}") from e
+            return {}
     except urllib.error.HTTPError as e:
         detail = e.read()[:300].decode("utf-8", "replace").strip()
         raise UploadError(f"{what}: {e.code} {e.reason}. {detail}",
@@ -912,10 +978,12 @@ def put_huggingface(packed: pathlib.Path, name: str, repo: str,
 
         verify = actions.get("verify")
         if verify:
+            # Confirms the object landed. Nothing reads what it answers, and
+            # it does not always answer JSON.
             _hf_api(verify["href"], token,
                     body=json.dumps({"oid": oid, "size": size}).encode(),
                     method="POST", content_type="application/vnd.git-lfs+json",
-                    what=f"{name}: hugging face verify")
+                    what=f"{name}: hugging face verify", expect_json=False)
 
     _hf_commit(repo, token, [{"key": "lfsFile", "value": {
         "path": name, "algo": "sha256", "oid": oid, "size": size}}],
@@ -1131,7 +1199,13 @@ def main(argv: list[str] | None = None) -> int:
     for position, name in enumerate(pending, 1):
         log(f"[{position}/{len(pending)}] {name}")
         try:
-            send(packed, name, args.item, creds, budget, log)
+            # Per FILE, because that is the unit the state file already makes
+            # idempotent: a completed file is skipped on the next pass, and a
+            # half-sent one is simply sent again. Both destinations key stored
+            # objects by digest, so a repeat costs bandwidth and nothing else.
+            with_retries(
+                lambda: send(packed, name, args.item, creds, budget, log),
+                name, log)
         except UploadError as e:
             print(f"\n{e}", file=sys.stderr)
             print("The state file records what did land, so a re-run resumes "

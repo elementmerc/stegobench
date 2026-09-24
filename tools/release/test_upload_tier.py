@@ -654,3 +654,116 @@ class HuggingFaceRepoGuards(unittest.TestCase):
 
     def test_a_part_with_no_card_declares_nothing(self):
         self.assertIsNone(upload_tier.huggingface_repo_declared(self.packed))
+
+
+class ApiBodiesThatAreNotJson(unittest.TestCase):
+    """A 200 with an unparseable body killed a 45 GB upload 98 files in.
+
+    The request had succeeded. The object was stored. Only the parse of a
+    body nothing reads failed, and it took the whole run with it.
+    """
+
+    def call(self, payload, **kwargs):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        original = upload_tier.urllib.request.urlopen
+        upload_tier.urllib.request.urlopen = lambda r, timeout=None: Response(payload)
+        try:
+            return upload_tier._hf_api("https://x/y", "t", **kwargs)
+        finally:
+            upload_tier.urllib.request.urlopen = original
+
+    def test_a_body_that_is_not_json_is_tolerated_where_it_is_ignored(self):
+        self.assertEqual(self.call(b"OK\n", expect_json=False), {})
+
+    def test_whitespace_is_not_a_body(self):
+        """`if raw` was true for a newline, so it went to the JSON parser."""
+        self.assertEqual(self.call(b"\n"), {})
+        self.assertEqual(self.call(b"   "), {})
+
+    def test_a_caller_that_needs_json_still_fails_loud(self):
+        with self.assertRaises(upload_tier.UploadError) as caught:
+            self.call(b"<html>gateway</html>")
+        self.assertIn("not JSON", str(caught.exception))
+
+    def test_real_json_still_parses(self):
+        self.assertEqual(self.call(b'{"private": true}'), {"private": True})
+
+
+class Retries(unittest.TestCase):
+    """A day-long upload meets a connection reset. That is the weather.
+
+    Two runs died to one each: a non-JSON body on 2026-09-24 at 02:22, and
+    `[Errno 104] Connection reset by peer` at 11:21, 127 files into 770.
+    Nothing in the uploader retried anything.
+    """
+
+    def setUp(self):
+        self.lines = []
+        self.slept = []
+        self.real_sleep = upload_tier.time.sleep
+        upload_tier.time.sleep = self.slept.append
+        self.addCleanup(setattr, upload_tier.time, "sleep", self.real_sleep)
+
+    def log(self, message):
+        self.lines.append(message)
+
+    def test_a_connection_reset_is_retried_and_succeeds(self):
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            if len(calls) < 3:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return "landed"
+
+        self.assertEqual(upload_tier.with_retries(attempt, "shard", self.log),
+                         "landed")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(self.slept), 2)
+
+    def test_the_backoff_grows(self):
+        def attempt():
+            raise ConnectionResetError(104, "reset")
+
+        with self.assertRaises(ConnectionResetError):
+            upload_tier.with_retries(attempt, "shard", self.log, retries=3)
+        self.assertEqual(self.slept, [4.0, 8.0, 16.0])
+
+    def test_an_http_refusal_is_not_retried(self):
+        """The server answered. Repeating a 401 says no more slowly."""
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            raise upload_tier.UploadError("nope", status=401)
+
+        with self.assertRaises(upload_tier.UploadError):
+            upload_tier.with_retries(attempt, "shard", self.log)
+        self.assertEqual(len(calls), 1, "an HTTP refusal was retried")
+        self.assertEqual(self.slept, [])
+
+    def test_a_connection_level_upload_error_is_retried(self):
+        """`_hf_api` wraps URLError as UploadError with no status."""
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            if len(calls) < 2:
+                raise upload_tier.UploadError("could not reach it, reset")
+            return "landed"
+
+        self.assertEqual(upload_tier.with_retries(attempt, "shard", self.log),
+                         "landed")
+        self.assertEqual(len(calls), 2)
+
+    def test_it_gives_up_rather_than_looping_for_ever(self):
+        def attempt():
+            raise ConnectionResetError(104, "reset")
+
+        with self.assertRaises(ConnectionResetError):
+            upload_tier.with_retries(attempt, "shard", self.log, retries=2)
