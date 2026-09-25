@@ -1,0 +1,83 @@
+# Pentimento Core v1: the corpus this harness was built to score.
+#
+# Registered like any other, and held to the same evidence rules, which matters
+# more here than anywhere else in this directory. A benchmark that records its
+# own dataset by a softer standard than everybody else's has not got a standard.
+# So the licence below names what was read and when, the same way ALASKA2's and
+# REVEAL's do, and the redistribution field is answered separately from the
+# licence for the same reason.
+#
+# The first sentence to say about it is the one that keeps a number honest: it
+# is a JPEG-decompressed spatial corpus and it is NOT comparable to BOSSbase.
+id = "pentimento-core"
+name = "Pentimento Core v1"
+description = """
+10,000 cover photographs and 344,357 matched stego pairs across 35 stego arms \
+and 4 clean ones, where every stego image and its clean twin come from one \
+photograph through one encoder and differ only in the payload. Every cover was \
+a JPEG before it was cropped, so the 8x8 block lattice survives into the \
+spatial images and thresholds calibrated here do not transfer unchanged to a \
+never-compressed corpus such as BOSSbase.\
+"""
+citation = """
+Iwugo, D. (2026). Pentimento Core v1: a steganalysis corpus with its licences \
+attached. https://archive.org/details/pentimento-core-v1\
+"""
+
+[licence]
+status = "verified"
+spdx = "CC-BY-4.0"
+url = "https://creativecommons.org/licenses/by/4.0/legalcode"
+verified_on = "2026-09-25"
+source = """
+The corpus's own licence guide and README, read on that date. The guide states \
+that the collection is published under CC BY 4.0, gives the breakdown of the \
+seven licences the covers actually carry, and states that CC BY 4.0 is the \
+strictest obligation present rather than the loosest, so complying with it \
+satisfies every file in the set.\
+"""
+redistribution = "permitted"
+redistribution_reason = """
+CC BY 4.0 permits redistribution, and the corpus is published to three public \
+mirrors by its own maintainer. The condition is credit: 5,453 of the 10,000 \
+covers require attribution, and a ready-made credit line ships in every record \
+and as ATTRIBUTION.md and ATTRIBUTION.csv beside the shards.\
+"""
+attribution_required = true
+share_alike = false
+note = """
+Individual covers carry CC0, public domain, and CC BY at versions 1.0 through \
+4.0. A file's own record may name something looser than the collection's \
+grant, and a reader may rely on that instead. Nothing in the set is share \
+alike, which is why that flag is false rather than unstated.\
+"""
+
+[obtain]
+url = "https://archive.org/details/pentimento-core-v1"
+requires_acceptance = false
+instructions = """
+Published to the Internet Archive as pentimento-core-v1, to HuggingFace as \
+the-malware-files/pentimento-core, and to Kaggle under elementmerc as the \
+covers only. The Kaggle shards are named .tar.bin because Kaggle unpacks a \
+.tar and nothing else, and unpacking shatters the dataset into 20,014 loose \
+files.
+
+Shards are tar archives, so a tier has to be extracted before `stegobench \
+score` can read it. `load_pentimento.py` ships beside the shards and reads \
+either shape.\
+"""
+
+[properties]
+base_images = 10000
+formats = ["png", "jpg"]
+paired = true
+size_mb = 48000
+size_note = """
+The Core tier. Nano (200 covers, 1.0 GB) and Lite (1,000, 4.8 GB) are strict \
+prefixes of it over one fixed ordering, so a smaller tier is a larger one's \
+first n covers byte for byte, and the train and test split is decided once as \
+a property of the cover and inherited downward. Without that nesting, somebody \
+trains on Lite, evaluates on Core, and every figure they publish is inflated \
+by an amount nobody can recover afterwards.\
+"""
+
