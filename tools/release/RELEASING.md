@@ -301,13 +301,15 @@ names `release.yml` gives its assets.
   has none of GNU tar's determinism flags, so the macOS tarball's metadata can
   differ between two builds of the same commit. The Linux archives are
   reproducible and every archive is covered by `SHA256SUMS`.
-- **`LICENSE` isn't inside the published crates.** Each crate declares
-  `AGPL-3.0-or-later` and ships the README, but the licence text itself lives
-  only at the repository root, which Cargo won't package from outside a crate
-  directory. Shipping it needs a copy per crate.
 - **The Linux aarch64 build cross-links** with the GNU aarch64 toolchain as the
   link driver while Rust supplies the musl objects. It's the part of the
   workflow most worth watching on a first run.
+- **`flake.nix` carries no `flake.lock`,** so `nix run` resolves whatever
+  `nixos-unstable` happens to be that day. That's the same mutable reference
+  this project's registry refuses from everybody else's containers, and it
+  should not survive to a tag. Generating the lock needs Nix and the network,
+  so it has to happen on a machine with both: run `nix flake lock` and commit
+  the result.
 - **`flake.nix` has never been built.** It was written on a machine with no Nix
   and no network, so it is conventional rather than verified. Run one real
   `nix build .#stegobench` and one `nix run .` before the first tag; the
