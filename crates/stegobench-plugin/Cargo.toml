@@ -7,9 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/stegobench-plugin"
+keywords = ["steganalysis", "plugin", "sandbox", "detector", "benchmark"]
+categories = ["development-tools::testing", "science"]
 
 [dependencies]
-stegobench-core = { path = "../stegobench-core" }
+stegobench-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -14,8 +14,22 @@ rust-version = "1.98"
 license = "AGPL-3.0-or-later"
 authors = ["Daniel Iwugo"]
 repository = "https://github.com/elementmerc/stegobench"
+homepage = "https://github.com/elementmerc/stegobench"
+# One README for four crates, inherited rather than copied. An inherited
+# `readme` resolves against the workspace root and Cargo packages a copy into
+# each crate, so crates.io renders the same page the repository shows and there
+# is no second copy to drift from the first.
+readme = "README.md"
 
 [workspace.dependencies]
+# The in-workspace crates carry a path and a version together. The path is what
+# a local build resolves against; the version is what crates.io resolves
+# against, and a path dependency without one cannot be published at all. Both
+# live here so the four crates can only ever be released at one version.
+stegobench-core = { path = "crates/stegobench-core", version = "0.1.0" }
+stegobench-metrics = { path = "crates/stegobench-metrics", version = "0.1.0" }
+stegobench-plugin = { path = "crates/stegobench-plugin", version = "0.1.0" }
+
 # Kept deliberately small. Every entry here runs with our privileges and is
 # reviewed like any other design decision (baseline Section 5). Anything that
 # three lines of our own code would replace does not get added.

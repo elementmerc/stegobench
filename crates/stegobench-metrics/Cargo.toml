@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/stegobench-metrics"
+keywords = ["roc", "auc", "metrics", "detection", "benchmark"]
+categories = ["science", "mathematics", "algorithms"]
 
 # No dependencies, deliberately. These are pure functions over two slices, and
 # a metric with a dependency graph is a metric somebody has to audit before

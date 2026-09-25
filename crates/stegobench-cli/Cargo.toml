@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+documentation = "https://docs.rs/stegobench-cli"
+keywords = ["steganalysis", "steganography", "benchmark", "forensics", "cli"]
+categories = ["command-line-utilities", "science", "multimedia::images"]
 
 [lib]
 name = "stegobench_cli"
@@ -28,9 +33,9 @@ clap.workspace = true
 clap_complete = "4"
 
 [dependencies]
-stegobench-core = { path = "../stegobench-core" }
-stegobench-metrics = { path = "../stegobench-metrics" }
-stegobench-plugin = { path = "../stegobench-plugin" }
+stegobench-core.workspace = true
+stegobench-metrics.workspace = true
+stegobench-plugin.workspace = true
 clap.workspace = true
 clap_complete = "4"
 serde.workspace = true

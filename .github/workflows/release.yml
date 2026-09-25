@@ -1,0 +1,398 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# NOTHING HAS EVER BEEN RELEASED FROM THIS REPOSITORY
+#
+# This file is the first release path, and it is written for a project where
+# publishing is close to one way: a corpus somebody has downloaded cannot be
+# recalled, and a crates.io name cannot be unpublished. So the shape here is
+# deliberately cautious. Every expensive step runs behind a pre-flight that can
+# refuse, the release is created as a DRAFT for a human to read before it is
+# visible, and the crates.io job is present but switched off.
+#
+# WHY A DRAFT AND NOT A LIVE RELEASE
+#
+# This project has already been bitten twice by a publish step that returned
+# success while the public page was wrong: an Archive page carried a wrong
+# cover count for four days. A draft costs one click and buys a reading of the
+# artefact list, the checksums and the notes before anybody can download them.
+# `tools/release/RELEASING.md` is the checklist for that reading.
+#
+# WHY THE BINARIES ARE BUILT AND NOT CROSS-COMPILED IN A CONTAINER
+#
+# `cross` would be the obvious answer and it pulls Docker images by mutable
+# tag, which is the exact thing the plugin registry refuses to accept from
+# anybody else. Native runners plus rustup targets keep every input either
+# pinned by hash or supplied by the runner image.
+#
+# The one genuine cross-compile is Linux aarch64, which links with the GNU
+# cross toolchain as a link driver while Rust supplies the musl objects itself.
+# That combination is the part of this file most likely to need attention on
+# its first real run. A GitHub arm64 runner would remove the cross-link
+# entirely, but those are free only on a public repository, and a release path
+# that stops working the moment the repo's visibility changes is worse than a
+# cross-link that has to be watched once.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # A tag is a one way door, so a manual run is deliberately not offered: there
+  # is no safe way to invoke this without a tag to name the artefacts after.
+
+# Read-only by default. Exactly one job below widens this, and it is the one
+# that uploads.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a release in flight. A half-uploaded draft is worse than a
+  # duplicate run, and duplicate runs are cheap.
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Pre-flight, refuse before anything expensive builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.facts.outputs.version }}
+      codename: ${{ steps.facts.outputs.codename }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The annotated tag's message carries the codename, and a shallow
+          # checkout does not bring the tag object along.
+          fetch-depth: 0
+      - name: The tag, the workspace version and the codename must agree
+        id: facts
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "stegobench-cli") | .version')"
+          if [ "v${version}" != "${tag}" ]; then
+            echo "::error::Tag ${tag} does not match workspace version ${version}." >&2
+            echo "Bump the workspace version or retag. See tools/release/RELEASING.md." >&2
+            exit 1
+          fi
+
+          # Baseline Section 22: a release carries a codename the operator
+          # picked. `pre-push` already refuses to push a tag without one, so
+          # reaching here without it means the tag arrived some other way.
+          message="$(git for-each-ref "refs/tags/${tag}" --format='%(contents)')"
+          codename="$(printf '%s\n' "${message}" | sed -n 's/^Codename:[[:space:]]*//p' | head -n 1)"
+          if [ -z "${codename}" ]; then
+            echo "::error::Tag ${tag} carries no 'Codename:' line in its message." >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "codename=${codename}" >> "${GITHUB_OUTPUT}"
+          echo "Releasing ${tag} (${codename})."
+      - name: The CHANGELOG must already describe this version
+        run: |
+          set -euo pipefail
+          version="${{ steps.facts.outputs.version }}"
+          # Matches either heading shape the baseline allows, `## [1.0.0]` or
+          # `## v1.0.0 — Codename`, because the release notes are the CHANGELOG
+          # entry rather than a second copy written at tag time.
+          if ! grep -qE "^## .*${version}" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for ${version}." >&2
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      # One platform failing is information about that platform. Let the others
+      # finish so the first run says which ones work rather than only the first
+      # one that did not.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            # musl-gcc is the link driver for the native musl build. Static by
+            # default on a musl target, which is the whole point: one binary
+            # that runs on any Linux, including a distroless container.
+            apt: musl-tools
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            apt: gcc-aarch64-linux-gnu
+          - os: macos-latest
+            # Not a rustup target. Both Apple architectures are built and then
+            # joined with lipo, so one download works on Intel and Apple
+            # silicon and nobody has to know which Mac they have.
+            target: universal-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install the pinned toolchain
+        # rustup ships on the runner and `rust-toolchain.toml` pins the
+        # version, so the toolchain is pinned without a third-party action in
+        # the way. Same reasoning as ci.yml.
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Add the target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          else
+            rustup target add "${{ matrix.target }}"
+          fi
+
+      - name: Install the cross toolchain
+        if: matrix.apt != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ${{ matrix.apt }}
+
+      - name: Build
+        shell: bash
+        env:
+          # Rust supplies the musl C runtime for aarch64 itself; the GNU cross
+          # gcc is only the link driver. Nothing in this workspace links a C
+          # library, which is what makes that safe here and would not make it
+          # safe in a workspace that did.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
+            cargo build --release --locked -p stegobench-cli --target aarch64-apple-darwin
+            cargo build --release --locked -p stegobench-cli --target x86_64-apple-darwin
+          else
+            cargo build --release --locked -p stegobench-cli --target "${{ matrix.target }}"
+          fi
+
+      - name: Ask the binary what it is
+        # Cheap proof that what was built actually starts. Skipped where the
+        # runner cannot execute what it just produced, because a test that
+        # silently does not run is worse than no test.
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
+            ./target/aarch64-apple-darwin/release/stegobench --version
+          elif [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            ./target/${{ matrix.target }}/release/stegobench.exe --version
+          else
+            ./target/${{ matrix.target }}/release/stegobench --version
+          fi
+
+      - name: Assemble the archive
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name="stegobench-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+
+          case "${{ matrix.target }}" in
+            universal-apple-darwin)
+              lipo -create -output "dist/${name}/stegobench" \
+                target/aarch64-apple-darwin/release/stegobench \
+                target/x86_64-apple-darwin/release/stegobench
+              lipo -info "dist/${name}/stegobench"
+              ;;
+            x86_64-pc-windows-msvc)
+              cp "target/${{ matrix.target }}/release/stegobench.exe" "dist/${name}/"
+              ;;
+            *)
+              cp "target/${{ matrix.target }}/release/stegobench" "dist/${name}/"
+              ;;
+          esac
+
+          cp README.md LICENSE CHANGELOG.md "dist/${name}/"
+
+          # build.rs mirrors the generated pages to target/man/. They are
+          # generated from the same command tree the binary parses against, so
+          # shipping them costs nothing and cannot drift. Windows has no man
+          # page reader, so it gets the archive without them.
+          if [ -d target/man ] && [ "${{ matrix.target }}" != "x86_64-pc-windows-msvc" ]; then
+            cp -R target/man "dist/${name}/man"
+          fi
+
+          cd dist
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            # 7-Zip ships on the Windows runner image and is on PATH in the
+            # Git Bash shell this step runs under.
+            7z a -tzip "${name}.zip" "${name}" > /dev/null
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            # Sorted, ownerless and with a fixed timestamp, so two builds of
+            # the same commit produce the same bytes rather than bytes that
+            # differ only in metadata nobody reads.
+            tar --sort=name --owner=0 --group=0 --numeric-owner \
+                --mtime="@0" \
+                -czf "${name}.tar.gz" "${name}"
+          else
+            # macOS ships bsdtar, which has none of those flags. Rather than
+            # install GNU tar to reach a property nothing downstream checks,
+            # the macOS archive is an ordinary one and is honestly not
+            # byte-reproducible. The checksum in SHA256SUMS still identifies
+            # exactly the bytes that were published.
+            tar -czf "${name}.tar.gz" "${name}"
+          fi
+          rm -rf "${name}"
+          ls -l
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: SBOM
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-cyclonedx
+        # Pinned to an exact version, unlike the audit tools in ci.yml. An
+        # advisory scanner has to stay current to read a format it does not
+        # control; an SBOM generator does not, and a release artefact that
+        # changes shape because a tool updated between two tags is a release
+        # artefact nobody can compare.
+        run: cargo install cargo-cyclonedx --locked --version 0.5.9
+      - name: Generate one SBOM per published crate
+        run: |
+          set -euo pipefail
+          # One pass over the workspace. cargo-cyclonedx writes a BOM next to
+          # every member's Cargo.toml, so the collection below names the file
+          # after the directory it came out of rather than trusting a filename
+          # the tool is free to change between versions.
+          cargo cyclonedx --format json --all --spec-version 1.5
+          mkdir -p sbom
+          for crate in stegobench-core stegobench-metrics stegobench-plugin stegobench-cli; do
+            src="$(find "crates/${crate}" -maxdepth 1 -name '*.json' -print -quit)"
+            if [ -z "${src}" ]; then
+              echo "::error::cargo-cyclonedx produced no SBOM for ${crate}." >&2
+              exit 1
+            fi
+            cp "${src}" "sbom/${crate}.cdx.json"
+          done
+          ls -l sbom
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom
+          path: sbom/*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft the GitHub Release
+    needs: [preflight, build, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      # The only job in this file that can write anything, and it writes one
+      # thing: a draft release.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: staging
+          merge-multiple: true
+      - name: Checksum every artefact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staging -type f -exec mv {} dist/ \;
+          cd dist
+          # Sorted so two runs over the same set produce the same file, and
+          # relative names so `sha256sum -c SHA256SUMS` works wherever a user
+          # unpacks them.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+            | LC_ALL=C sort \
+            | xargs -d '\n' sha256sum > SHA256SUMS
+          cat SHA256SUMS
+      - name: The release notes are the CHANGELOG entry, not a second copy
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          awk -v ver="${version}" '
+            index($0, "## ") == 1 {
+              if (found) { exit }
+              if (index($0, ver)) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::Extracted empty release notes for ${version} from CHANGELOG.md." >&2
+            exit 1
+          fi
+          cat notes.md
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          CODENAME: ${{ needs.preflight.outputs.codename }}
+        run: |
+          set -euo pipefail
+          # --verify-tag refuses to invent a tag if the ref went away between
+          # the push and this step.
+          gh release create "${TAG}" \
+            --draft \
+            --verify-tag \
+            --title "${TAG} — ${CODENAME}" \
+            --notes-file notes.md \
+            dist/*
+          gh release view "${TAG}" --json assets --jq '.assets[].name'
+
+  crates-io:
+    name: Publish to crates.io
+    needs: [preflight, release]
+    runs-on: ubuntu-latest
+    # THE FIRST PUBLISH IS DONE BY HAND, DELIBERATELY
+    #
+    # A crate name cannot be unpublished and a published version cannot be
+    # replaced, so the first four names this project ever claims get a human
+    # watching the terminal rather than a job that ran while nobody was
+    # looking. Turning this on is a one line change once v1.0.0 is on
+    # crates.io and the shape of the publish is known to be right.
+    #
+    # `tools/release/RELEASING.md` carries the manual sequence, which is the
+    # same four crates in the same order for the same reason: Cargo refuses a
+    # crate whose path dependencies are not on the registry yet.
+    if: false
+    permissions:
+      # Trusted Publishing: crates.io trades this repository's OIDC identity
+      # for a short-lived token, so there is no CARGO_REGISTRY_TOKEN stored
+      # anywhere to leak or rotate.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
+        id: auth
+      - name: Publish, in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        # One workspace publish rather than four invocations: Cargo works out
+        # the order itself and will not leave two of the four on the registry
+        # if the third is rejected.
+        run: cargo publish --workspace --locked
