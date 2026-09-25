@@ -436,6 +436,7 @@ dependencies = [
  "stegobench-metrics",
  "stegobench-plugin",
  "tempfile",
+ "thiserror",
  "toml",
 ]
 
