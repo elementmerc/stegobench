@@ -155,6 +155,13 @@ pub struct Sample {
     /// cover and is inherited through [`Sample::cover`]; a caller enforcing
     /// by-cover discipline joins rather than reads it here.
     pub split: Option<String>,
+    /// The digest the record states for its own image, exactly as written.
+    ///
+    /// A claim, not a measurement: nothing here opens the image to check it.
+    /// It is carried so a caller can identify a corpus by what its manifest
+    /// says, which is the only identification available for a directory
+    /// somebody extracted from a shard and then moved.
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -464,13 +471,14 @@ impl Samples {
             (Some(_), []) => Err(SampleError::RecordWithoutImage { id }),
             (Some(rec), [image]) => {
                 let value = read_record(&self.current_dir.join(rec))?;
-                let (role, cover, split) = describe(&id, &value)?;
+                let (role, cover, split, digest) = describe(&id, &value)?;
                 Ok(Some(Sample {
                     id,
                     image: self.current_dir.join(image),
                     role,
                     cover,
                     split,
+                    digest,
                 }))
             }
             (Some(_), _) => Err(SampleError::AmbiguousImage {
@@ -576,11 +584,10 @@ fn read_record(path: &Path) -> Result<serde_json::Value, SampleError> {
     })
 }
 
-/// What the record says: which side, which cover, which split.
-fn describe(
-    id: &str,
-    value: &serde_json::Value,
-) -> Result<(Role, Option<String>, Option<String>), SampleError> {
+/// What the record says: which side, which cover, which split, which digest.
+type Described = (Role, Option<String>, Option<String>, Option<String>);
+
+fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleError> {
     let object = value.as_object().ok_or_else(|| SampleError::BadRecord {
         id: id.to_string(),
         problem: "the record is not a JSON object. A sample record describes \
@@ -648,7 +655,18 @@ fn describe(
         }
     };
 
-    Ok((role, cover, split))
+    // Taken exactly as written and judged nowhere here. A record states the
+    // digest of its own image, so it is a claim by whoever built the corpus
+    // rather than a measurement, and this module's job is to report what the
+    // corpus says. A caller computing a corpus-wide digest from these is
+    // identifying the manifest rather than verifying the bytes, and the result
+    // document has a separate field to say which of the two it did.
+    let digest = match object.get("sha256") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        _ => None,
+    };
+
+    Ok((role, cover, split, digest))
 }
 
 /// A cover name is a bare basename and is checked as one.
@@ -872,6 +890,25 @@ mod tests {
         let got = collect(dir.path());
         assert_eq!(got[0].role, Role::Stego);
         assert_eq!(got[0].cover.as_deref(), Some("09710.png"));
+    }
+
+    #[test]
+    fn the_digest_a_record_states_is_carried_through_exactly_as_written() {
+        // A caller names a corpus by what its records declare, so the field is
+        // reported rather than judged. A record with nothing to declare says
+        // None, which is what stops a partly digested corpus being given a
+        // digest that would name less than it appears to.
+        let dir = TempDir::new().unwrap();
+        pair(dir.path(), "a/000000", "png", "");
+        assert_eq!(
+            collect(dir.path())[0].digest.as_deref(),
+            Some(&*"a".repeat(64))
+        );
+
+        let bare = TempDir::new().unwrap();
+        fs::write(bare.path().join("b.png"), b"x").unwrap();
+        fs::write(bare.path().join("b.json"), "{}").unwrap();
+        assert_eq!(collect(bare.path())[0].digest, None);
     }
 
     #[test]

@@ -23,6 +23,7 @@
 //! bites, and a reader of this file should meet that fact here rather than
 //! discover it at ten times the scale.
 
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -219,7 +220,7 @@ where
             // saying otherwise would be the harness vouching for bytes it
             // never saw arrive.
             source: CorpusSource::Supplied,
-            digest: String::new(),
+            digest: checks.digest.clone().unwrap_or_default(),
             pairs: labels.len() as u64,
             split: None,
         },
@@ -362,6 +363,15 @@ struct Checks {
     /// the two images could not be read or is in a format this does not
     /// measure.
     unreadable: u64,
+    /// A name for this corpus's content, or `None` where it cannot have one.
+    ///
+    /// Computed over every record's own stated digest, in corpus order, so two
+    /// people holding the same corpus compute the same value and a result can
+    /// say which bytes it was measured on. It identifies the MANIFEST rather
+    /// than the bytes: nothing here reopens an image to check the claim, which
+    /// is why `corpus.source` sits beside it and says whether the harness
+    /// fetched the corpus or was handed it.
+    digest: Option<String>,
 }
 
 /// What a cover contributes to both checks, gathered in one pass.
@@ -407,9 +417,25 @@ struct Cover {
 fn check(request: &Request) -> Result<Checks, ScoreError> {
     let mut covers: HashMap<String, Cover> = HashMap::new();
     let mut any_split = false;
+    let mut digest = Sha256::new();
+    let mut every_record_declares_one = true;
+    let mut seen = 0u64;
 
     for sample in Samples::open(request.corpus)? {
         let sample = sample?;
+
+        // Folded into a walk that was happening anyway. The order is the
+        // corpus order, which is sorted by id and therefore the same on every
+        // machine, so two people with the same corpus get the same digest.
+        seen += 1;
+        digest.update(sample.id.as_bytes());
+        digest.update(b"\0");
+        match &sample.digest {
+            Some(d) => digest.update(d.as_bytes()),
+            None => every_record_declares_one = false,
+        }
+        digest.update(b"\n");
+
         if sample.role != Role::Clean {
             continue;
         }
@@ -438,6 +464,12 @@ fn check(request: &Request) -> Result<Checks, ScoreError> {
         pairing_breaks: Violations::default(),
         compared: 0,
         unreadable: 0,
+        // A digest over a corpus where some records state no digest of their
+        // own would be a name for the file list rather than for the content,
+        // and the field it goes in is read as the second thing. Better to
+        // carry nothing than to carry a name that means less than it looks.
+        digest: (every_record_declares_one && seen > 0)
+            .then(|| format!("sha256:{:x}", digest.finalize())),
     };
 
     for sample in Samples::open(request.corpus)? {
@@ -1112,6 +1144,80 @@ mod tests {
         let checks = check(&request(&root, None)).expect("checked");
         assert_eq!(checks.pairing_breaks.count, 12);
         assert_eq!(checks.pairing_breaks.examples.len(), MAX_EXAMPLES);
+    }
+
+    /// A corpus whose records state the digests the test chooses.
+    fn digested(root: &Path, digests: &[&str]) {
+        std::fs::create_dir_all(root).expect("corpus");
+        for (i, d) in digests.iter().enumerate() {
+            let role = if i == 0 { "clean" } else { "stego" };
+            std::fs::write(root.join(format!("i{i}.png")), png(64, 64, 8, 2, i)).unwrap();
+            let sha = if d.is_empty() {
+                String::new()
+            } else {
+                format!(r#","sha256":"{d}""#)
+            };
+            std::fs::write(
+                root.join(format!("i{i}.json")),
+                format!(r#"{{"role":"{role}"{sha}}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_same_corpus_in_two_places_gets_the_same_digest() {
+        // The point of the field. A corpus extracted from a shard and moved is
+        // still the same corpus, and a digest that changed with the path would
+        // name the directory rather than the data.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let here = tmp.path().join("here");
+        let there = tmp.path().join("somewhere/else/entirely");
+        digested(&here, &["aa", "bb", "cc"]);
+        digested(&there, &["aa", "bb", "cc"]);
+        let a = check(&request(&here, None)).expect("checked").digest;
+        let b = check(&request(&there, None)).expect("checked").digest;
+        assert!(a.is_some(), "no digest was computed");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn one_changed_record_changes_the_corpus_digest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        digested(&a, &["aa", "bb", "cc"]);
+        digested(&b, &["aa", "bb", "cd"]);
+        assert_ne!(
+            check(&request(&a, None)).expect("checked").digest,
+            check(&request(&b, None)).expect("checked").digest
+        );
+    }
+
+    #[test]
+    fn a_corpus_missing_one_digest_carries_none_at_all() {
+        // A digest over a partly digested corpus names the file list, and the
+        // field is read as naming the content. Carrying nothing is the smaller
+        // lie, which is to say it is not one.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "", "cc"]);
+        assert_eq!(check(&request(&root, None)).expect("checked").digest, None);
+    }
+
+    #[test]
+    fn the_digest_reaches_the_result_document() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        let entry = sizing_detector(tmp.path());
+        let (result, _) = score(&entry, &request(&root, None), |_| {}).expect("scored");
+        assert!(
+            result.corpus.digest.starts_with("sha256:"),
+            "{:?}",
+            result.corpus.digest
+        );
+        result.validate().expect("valid");
     }
 
     #[test]
