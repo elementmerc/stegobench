@@ -1,0 +1,82 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# Where a release goes, and what a live page has to say before it counts as
+# published.
+#
+# WHY THIS FILE EXISTS
+#
+# An upload that returns success says nothing about what the public page shows.
+# This project has been bitten twice: an Internet Archive page carried a wrong
+# cover count for four days, and a corrected Kaggle description sat on disk
+# while the live page served the old one. Both were "published" by a step that
+# exited zero.
+#
+# So every destination is written down here with a condition a machine can
+# check against the page a stranger would actually load, and
+# `verify_published.py` checks them after a release and on a schedule. Drift
+# and takedowns then surface within a day rather than whenever somebody
+# happens to look.
+#
+# `{version}` is substituted with the release version, without a leading v.
+#
+# `required = false` marks a destination that does not exist yet. Those are
+# reported and do not fail the run, so this file can describe the intended set
+# of channels before they are all live. Flipping one to required is what makes
+# a channel load-bearing, and it should happen in the commit that first
+# publishes to it.
+
+[[channel]]
+id = "github-release"
+what = "The tagged release, with the binaries, SBOM, checksums and signatures"
+url = "https://github.com/elementmerc/stegobench/releases/tag/v{version}"
+must_contain = ["SHA256SUMS", "stegobench-v{version}-x86_64-unknown-linux-musl.tar.gz"]
+required = false
+
+[[channel]]
+id = "crates-io-cli"
+what = "The stegobench command on crates.io"
+url = "https://crates.io/api/v1/crates/stegobench-cli"
+json_path = "crate.max_version"
+must_equal = "{version}"
+required = false
+
+[[channel]]
+id = "crates-io-core"
+what = "The schemas crate, which other people are meant to depend on"
+url = "https://crates.io/api/v1/crates/stegobench-core"
+json_path = "crate.max_version"
+must_equal = "{version}"
+required = false
+
+[[channel]]
+id = "docs-rs-core"
+what = "Rendered API documentation, which fails silently when a build breaks"
+url = "https://docs.rs/stegobench-core/{version}/stegobench_core/"
+must_contain = ["stegobench_core"]
+required = false
+
+[[channel]]
+id = "pentimento-internet-archive"
+what = "The corpus item. Close to immutable once uploaded, so worth watching"
+url = "https://archive.org/metadata/pentimento-core-v1"
+json_path = "metadata.identifier"
+must_equal = "pentimento-core-v1"
+required = false
+
+[[channel]]
+id = "pentimento-huggingface"
+what = "The corpus on HuggingFace, which versions through git"
+url = "https://huggingface.co/api/datasets/the-malware-files/pentimento-core"
+json_path = "id"
+must_equal = "the-malware-files/pentimento-core"
+required = false
+
+[[channel]]
+id = "docs-site"
+what = "The documentation site. A dead docs link is the first thing a reader hits"
+url = "https://elementmerc.github.io/stegobench/"
+must_contain = ["Stegobench"]
+required = false

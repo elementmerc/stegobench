@@ -265,16 +265,39 @@ names `release.yml` gives its assets.
 
 ## After publishing
 
-- [ ] `cargo install stegobench-cli` on a machine that has never built this
-      project, and run `stegobench doctor`. An install that works only where
-      the source tree already is isn't an install.
-- [ ] Every URL in the release notes and the shipped `README.md` answers 200.
+- [ ] Run the post-publish verifier, which does most of the rest of this list
+      from outside:
+
+      ```sh
+      python3 tools/release/verify_published.py --version 1.0.0 \
+          --out distribution.json
+      ```
+
+      It loads every destination in `tools/release/channels.toml` the way a
+      stranger would and checks that the live page states this release. That
+      is a different question from whether the upload succeeded, and this
+      project has been wrong about it twice: an Internet Archive page carried
+      a wrong cover count for four days, and a corrected Kaggle description
+      sat on disk while the live page served the old one. Both were published
+      by a step that exited zero.
+
+      It writes `distribution.json` whatever the verdict, since a record of a
+      failed check is more useful than no record, and the exit code carries
+      the verdict. Channels marked `required = false` are reported and do not
+      fail the run, so flip one to required in the commit that first publishes
+      to it.
+
 - [ ] `docs.rs` built all four crates. A failed docs build is silent on the
       release page and loud on the crate page.
 - [ ] The crates.io page for each crate shows the right licence, the right
-      description, and the README.
-- [ ] Record the release in the distribution ledger with channel, URL,
-      version, digest and timestamp.
+      description, and the README. The verifier checks the version; it cannot
+      see whether the page reads well.
+- [ ] `cargo install stegobench-cli` on a machine that has never built this
+      project, and run `stegobench doctor`.
+- [ ] Schedule the verifier. A channel can go wrong long after the release: a
+      dataset is taken down, a mirror expires, a docs build starts failing
+      silently. Nightly turns "somebody noticed eventually" into "we knew
+      within a day".
 
 ## Known gaps, stated rather than discovered
 
