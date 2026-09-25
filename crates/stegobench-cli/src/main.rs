@@ -505,11 +505,124 @@ fn cmd_help(topic: Option<&str>) -> Output {
     }
 }
 
-/// Subcommands whose behaviour is scoped and planned but not yet built.
+/// What a run would cost, without running it.
 ///
-/// They exist in the tree from the first release so the vocabulary is fixed
-/// before anyone depends on it, and they exit 8 with the reason rather than
-/// pretending to work.
+/// It takes the command as you would type it, rather than its own flags, so
+/// there is no second set of arguments to keep in step with `score`. The same
+/// parser reads both, which means a plan cannot silently describe a different
+/// run from the one that would happen.
+fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
+    if command.is_empty() {
+        return Output::err(
+            exit::USAGE,
+            "plan takes the command you would run, for example:\n  \
+             stegobench plan score --corpus ./pentimento-nano --detector zsteg"
+                .to_string(),
+        );
+    }
+    let argv = std::iter::once("stegobench".to_string()).chain(command.iter().cloned());
+    let parsed = match Cli::try_parse_from(argv) {
+        Ok(c) => c,
+        Err(e) => {
+            return Output::err(
+                exit::USAGE,
+                format!("that is not a command this can plan:\n{e}"),
+            )
+        }
+    };
+    let Command::Score {
+        corpus,
+        detector,
+        limit,
+        timeout,
+        ..
+    } = &parsed.command
+    else {
+        return Output::err(
+            exit::USAGE,
+            "only `score` can be planned today. Nothing else here runs long \
+             enough to be worth estimating."
+                .to_string(),
+        );
+    };
+
+    let reg = match load_registry(registry_dir) {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let Some(entry) = reg.entries.get(detector) else {
+        return Output::err(
+            exit::USAGE,
+            format!("no tool named {detector:?} is registered."),
+        );
+    };
+
+    // Counted rather than guessed from the directory size. Walking the corpus
+    // is the only way to know how many scorable samples it holds, and an
+    // estimate built on a guess is the thing a plan exists to replace.
+    let mut items: u64 = 0;
+    for sample in match stegobench_core::samples::Samples::open(corpus) {
+        Ok(s) => s,
+        Err(e) => return Output::err(exit::FAILURE, e.to_string()),
+    } {
+        if let Err(e) = sample {
+            return Output::err(exit::FAILURE, e.to_string());
+        }
+        items += 1;
+        if limit.is_some_and(|n| items >= n) {
+            break;
+        }
+    }
+
+    let per_image = entry.cost.seconds_per_image;
+    let seconds = per_image.map(|s| s * items as f64);
+    // One JSON line per answer, measured at roughly sixty bytes on the real
+    // records this writes.
+    let records_mb = (items as f64 * 60.0) / 1_048_576.0;
+
+    let mut value = serde_json::Map::new();
+    value.insert("items".into(), serde_json::json!(items));
+    value.insert("detector".into(), serde_json::json!(detector));
+    value.insert("seconds_per_image".into(), serde_json::json!(per_image));
+    value.insert("estimated_seconds".into(), serde_json::json!(seconds));
+    value.insert("records_mb".into(), serde_json::json!(records_mb));
+    value.insert(
+        "worst_case_seconds".into(),
+        serde_json::json!(items * timeout),
+    );
+
+    let duration = match seconds {
+        Some(s) => format!("about {}", human_duration(s)),
+        // Said rather than defaulted. A tool with no measured rate cannot be
+        // estimated, and inventing a number here would be the plan lying
+        // about the one thing it is for.
+        None => format!(
+            "unknown: {detector:?} declares no seconds_per_image, so nothing \
+             here can estimate how long it takes"
+        ),
+    };
+    Output::ok(
+        serde_json::Value::Object(value),
+        format!(
+            "{items} item(s) to score with {detector}. Time: {duration}. \
+             Records file: about {records_mb:.1} MB. Worst case, if every \
+             item hit the {timeout}s deadline: {}.",
+            human_duration((items * timeout) as f64)
+        ),
+    )
+}
+
+/// Seconds as something a person can judge a decision against.
+fn human_duration(seconds: f64) -> String {
+    if seconds < 90.0 {
+        return format!("{seconds:.0} seconds");
+    }
+    if seconds < 5_400.0 {
+        return format!("{:.0} minutes", seconds / 60.0);
+    }
+    format!("{:.1} hours", seconds / 3_600.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_score(
     registry_dir: &Path,
@@ -600,24 +713,13 @@ fn cmd_score(
     )
 }
 
-fn not_yet(what: &str, tracked_as: &str) -> Output {
-    Output::err(
-        exit::ENVIRONMENT_UNFIT,
-        format!(
-            "`{what}` is not built yet in this release.\n\
-             It is scoped as {tracked_as}. This command exists now so the \
-             vocabulary is settled before anything depends on it."
-        ),
-    )
-}
-
 fn run(cli: &Cli) -> Output {
     match &cli.command {
         Command::Schema { name } => cmd_schema(name),
         Command::Validate { file } => cmd_validate(file),
         Command::List { kind } => cmd_list(&cli.registry, kind),
         Command::Describe { name } => cmd_describe(&cli.registry, name),
-        Command::Plan { .. } => not_yet("plan", "V10, needs the governor"),
+        Command::Plan { command } => cmd_plan(&cli.registry, command),
         Command::Doctor {
             fixtures,
             no_selftest,
@@ -1032,13 +1134,6 @@ mod tests {
         assert_eq!(cmd_validate(&p).code, exit::SCHEMA_INVALID);
     }
 
-    #[test]
-    fn unbuilt_commands_refuse_clearly_rather_than_pretending() {
-        let out = not_yet("score", "needs the plugin host");
-        assert_eq!(out.code, exit::ENVIRONMENT_UNFIT);
-        assert!(out.human.contains("not built yet"));
-    }
-
     /// Drives the binary's own code to every exit code the contract in
     /// `stegobench_core::exit` names, or records plainly why a given code
     /// cannot be reached yet.
@@ -1070,11 +1165,14 @@ mod tests {
         assert_eq!(cmd_schema("not-a-real-schema").code, exit::USAGE);
         assert_eq!(cmd_help(Some("not-a-real-topic")).code, exit::USAGE);
 
-        // 3: pre-flight refusal. NOT YET REACHABLE: needs the governor
-        // (`plan`/`score`), neither of which is built. See exit::PREFLIGHT_REFUSED.
+        // 3: pre-flight refusal. NOT YET REACHABLE: nothing refuses a run
+        // before starting it on grounds of capacity or fitness yet.
+        // See exit::PREFLIGHT_REFUSED.
 
-        // 4: plugin failure. NOT YET REACHABLE: needs `score` running a real
-        // plugin, which is not built. See exit::PLUGIN_FAILED.
+        // 4: plugin failure. Reachable now that `score` runs: an embedder
+        // asked to tell two images apart is refused through this code. It is
+        // driven in the score module's own tests, which can build a corpus
+        // and a registry entry without this test constructing both.
 
         // 5: verify mismatch. NOT YET REACHABLE: there is no `verify`
         // subcommand yet (04-cli-surface.md names one; it is not in
@@ -1091,17 +1189,12 @@ mod tests {
         // 7: licence refusal. NOT YET REACHABLE: no corpus-licence gate
         // exists yet. See exit::LICENCE_REFUSED.
 
-        // 8: environment unfit. `not_yet` is the code path Command::Plan and
-        // Command::Score actually use today. `cmd_doctor` reaches the same
-        // code independently when a registered tool is missing or broken,
-        // but is not additionally exercised here: it needs a real registry
-        // directory relative to the process's working directory, which a
-        // unit test cannot assume without constructing one, and doing that
-        // honestly is worth its own test rather than a shortcut in this one.
-        assert_eq!(
-            not_yet("plan", "V10, needs the governor").code,
-            exit::ENVIRONMENT_UNFIT
-        );
+        // 8: environment unfit. NO LONGER REACHABLE FROM A STUB: every
+        // command in the tree is built, so the `not_yet` helper that used to
+        // return this code is gone rather than kept as scaffolding nothing
+        // stands on. `cmd_doctor` still reaches it when a registered tool is
+        // missing or broken, and that wants its own test with a real registry
+        // directory rather than a shortcut here.
 
         // 130: interrupted. NOT YET REACHABLE from a unit test: this is a
         // signal-handler exit path (SIGINT/SIGTERM), which needs a real

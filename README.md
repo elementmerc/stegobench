@@ -19,11 +19,9 @@ Two halves, at different stages:
 
 - **A Rust command-line tool** (`stegobench`) that reads a registry of
   detectors, embedders and corpora, checks whether this machine can run them,
-  and scores a corpus against them. `schema`, `validate`, `list`, `describe`,
-  `doctor`, `score`, `completions` and `help` are built and tested. `plan`, a
-  cost estimate before you commit to a long run, is in the command tree and
-  documented but not built yet: running it today exits with a message saying
-  exactly that, rather than pretending to work.
+  and scores a corpus against them. Every command in the tree is built and
+  tested: `schema`, `validate`, `list`, `describe`, `doctor`, `plan`, `score`,
+  `completions` and `help`.
 - **Python generators** (`generators/`) that build a labelled corpus:
   fetching covers with provenance, embedding stego arms, packing shards, and
   scoring against a detector's HTTP endpoint. This half is older, working,
@@ -198,9 +196,17 @@ in the result, because a directory carries no digest anybody can check and no
 arm anybody can name, which makes the number comparable with itself and
 nothing else. Scoring a registered tier is the next piece of work.
 
-**Not built yet:** `stegobench plan`, the cost estimate. It is in the command
-tree so the vocabulary is fixed before anything depends on it, and it refuses
-clearly with exit code 8 rather than doing something partial.
+**`stegobench plan` estimates before you commit.** It takes the command you
+would run, rather than its own flags, so a plan cannot describe a different
+run from the one that would happen:
+
+```sh
+stegobench plan score --corpus ./pentimento-nano --detector zsteg
+```
+
+It counts the corpus rather than guessing from its size, and where a tool
+declares no measured rate it says the time is unknown instead of inventing
+one, which would be the estimate lying about the only thing it is for.
 
 **Thirteen tools are registered** under `plugins/registry/` today: six
 embedders (steghide, outguess, openstego, stegosuite, hstego, and Stegcore's

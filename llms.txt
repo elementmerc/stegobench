@@ -51,10 +51,12 @@ progress still reaches a terminal.
   same command run again continues rather than restarting. It reads an
   unpacked corpus directory, and marks every such run `custom`, because a
   directory carries no digest anybody can check.
-- `stegobench plan`: **scoped in the command tree but not yet built.** It
-  parses today and exits 8 with a message naming what it is waiting on,
-  rather than pretending to run. Do not treat that non-zero exit as a bug in
-  your invocation; it is the command being honest about not existing yet.
+- `stegobench plan <command>`: what that command would cost, without running
+  it. Takes the command as you would type it, so
+  `stegobench plan score --corpus D --detector N`. Reports the item count, the
+  estimated time where the tool declares a rate, and the worst case if every
+  item hits the deadline. Where no rate is declared it says so rather than
+  inventing a figure.
 
 ## Exit codes (a contract, not incidental)
 
