@@ -38,13 +38,30 @@ input, while the clean half of the pair had been written at quality 95. The \
 detector was not finding hidden data, it was finding a quality difference.
 
 A `result-v1` document declares its pairing as one of:
-  single-variable   clean and stego differ only in the payload (the goal)
+  single-variable   no second variable was found (the goal)
   confounded        they differ in something else too, kept as a demonstration
+  unverified        nothing could be compared, so neither is claimed
 
-`stegobench` cannot always prove pairing holds; where it can check (matching \
-dimensions, matching format, matching quantisation tables where applicable) \
-it does, and refuses a build that fails the check rather than shipping a \
-corpus that would quietly flatter every detector run against it.
+The positive claim cannot be proved after the fact. Proving it would mean \
+decoding both images and comparing every pixel, and even that would miss a \
+cover re-encoded before the payload went in. What CAN be proved is the \
+refutation, and `stegobench score` does it: for every stego image that names \
+the cover it came from, it reads both headers and compares format, width, \
+height, bit depth and channel count. Any disagreement means something other \
+than the payload changed, and the run is marked confounded and says which \
+images and how they differ.
+
+Read single-variable as \"looked and found nothing\", which is why the third \
+value exists. A corpus whose stego images name no cover, or whose images this \
+cannot read, comes back unverified rather than quietly reading as the good \
+case: a benchmark that claims a rule held after checking nothing is the exact \
+failure this tool was built to stop.
+
+A confounded corpus is still scored, which a split violation is not. A second \
+variable is a real property of some arms and is kept on purpose to show what \
+it does, so the run happens and the result carries the fact. A cover leaking \
+across the train and test boundary makes the number wrong while it still \
+looks right, so that one refuses.
 ";
 
 const SPLITS: &str = "\
@@ -87,8 +104,10 @@ Each manifest row also carries `attribution` (who to credit) and \
 `source_url` (where the file came from), so a publisher can generate a \
 correct credit list mechanically instead of by hand. `stegobench validate` \
 refuses a manifest row that is missing a licence or a licence URL, and \
-`stegobench describe <corpus>` prints the licence breakdown so a reader does \
-not have to open the manifest to find out what they are agreeing to.
+`stegobench describe <corpus>` prints the terms a corpus is registered under, \
+including whether anybody has verified them and whether republication is \
+permitted, so a reader can find out what they are agreeing to before they \
+download anything.
 
 None of this is a substitute for reading the actual terms of a specific \
 licence before redistributing anything; it is what stops the tool itself \

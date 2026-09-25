@@ -91,9 +91,9 @@ must_clear = "fixtures/clean.png"          # and clear this
 Both fixtures under `[selftest]` are required. A tool that answers "stego" to
 everything, or "clean" to everything, would otherwise pass a one-sided check;
 `stegobench doctor` runs both directions before believing a tool works. See
-`stegobench help plugins` for the full reasoning, and an existing entry under
-`plugins/registry/` (`steghide.toml` is a short one) for a worked example
-with a container that needs an embed/extract round trip proven too.
+`stegobench help plugins` for the full reasoning, and an existing entry
+(`plugins/registry/embedders/steghide.toml` is a short one) for a worked
+example with a container that needs an embed/extract round trip proven too.
 
 ## Registering a corpus
 
@@ -164,12 +164,14 @@ python3 generators/score_arms.py --corpus arms/ \
 There's deliberately no default `--endpoint`. A benchmark that ships one
 address as a default scores against whatever happens to answer on it.
 
-`requirements-optional.txt` holds four things each needed for exactly one
-purpose: Aletheia for the reference detector and its rich-model features,
-matplotlib for charts, `lir` for a cross-check against an independent
-likelihood-ratio implementation, and the Hansken SDK for the extraction
-plugin. Nothing in the core needs them, and tests that do skip rather than
-fail when they're absent.
+`requirements-optional.txt` holds one thing per purpose: matplotlib for
+charts, `lir` for a cross-check against an independent likelihood-ratio
+implementation, `mlcroissant` for validating the dataset record, `webdataset`
+for reading a packed shard, and the Hansken SDK for the extraction plugin. It
+also tells you where to get Aletheia, the reference detector, which isn't on
+PyPI under that name and has to be installed from source. Nothing in the core
+needs any of them, and tests that do skip rather than fail when they're
+absent.
 
 ## Status: what's measured, what isn't
 
@@ -191,6 +193,15 @@ goes, then emits a validated `result-v1` document. The run resumes: if it is
 interrupted, running the same command again picks up where it stopped rather
 than starting over, and it refuses to continue if the corpus changed under the
 records rather than filing answers against the wrong images.
+
+It also checks the two rules rather than declaring them. A corpus that puts a
+cover and its stego twin on opposite sides of a train and test split stops the
+run instead of producing an inflated number nobody could spot afterwards. And
+for every stego image that names the cover it came from, the headers of both
+are compared: a difference in format, size, bit depth or channel count means
+something other than the payload changed, and the result says so and names the
+images. Matching headers prove nothing on their own, so the result distinguishes
+"looked and found nothing" from "could not look".
 
 Two honest limits on it today. It reads an UNPACKED corpus directory, so a
 packed tier has to be extracted first. And every such run is marked `custom`
@@ -217,9 +228,9 @@ StegExpose, zsteg, plus Stegcore and StegaShield as subjects rather than
 references). Stegcore appears twice because it does both jobs, and hiding a
 payload and judging one are different measurements that should not share an
 identifier.
-`stegoveritas` has never built against current dependencies and is
-deliberately not registered or listed anywhere as if it worked; see
-`DEFERRED.md` for the detail rather than a dead reference here.
+`stegoveritas` has never built against current dependencies here, so it is
+deliberately not registered and not listed anywhere as if it worked. It stays
+out until it builds, rather than sitting in the registry as a dead reference.
 
 **stegoveritas, F5, jsteg and jphide are not present.** They're candidates
 for later, not silently dropped: naming them here rather than letting a

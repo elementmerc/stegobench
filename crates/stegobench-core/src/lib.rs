@@ -10,6 +10,7 @@
 //! that the definition of a result never depends on how a result was obtained.
 
 pub mod corpus;
+pub mod header;
 pub mod manifest;
 pub mod registry;
 pub mod result;
@@ -17,6 +18,7 @@ pub mod run;
 pub mod samples;
 
 pub use corpus::{CorpusEntry, LicenceStatus, Redistribution};
+pub use header::{Format, Geometry, HeaderError, Shape};
 pub use manifest::{ManifestV1, MANIFEST_SCHEMA_ID};
 pub use registry::{Entry, Kind, Registry};
 pub use result::{Result1, RESULT_SCHEMA_ID};

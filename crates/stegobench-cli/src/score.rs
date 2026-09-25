@@ -28,10 +28,12 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
     Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Metrics,
-    PluginRef, Provenance, Result1, SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
+    Pairing, PluginRef, Provenance, Result1, SplitDiscipline, Subject, SubjectKind,
+    RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
@@ -155,17 +157,44 @@ where
     // that leaks a cover across the boundary produces a confident wrong
     // answer, and producing it first and mentioning the problem afterwards is
     // how a bad number gets quoted.
-    let (discipline, violations) = split_discipline(request)?;
-    if !violations.is_empty() {
+    let checks = check(request)?;
+    if !checks.split_leaks.is_empty() {
         return Err(ScoreError::SplitLeaks {
             path: request.corpus.display().to_string(),
-            count: violations.len(),
-            examples: violations
-                .into_iter()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join("; "),
+            count: checks.split_leaks.count,
+            examples: checks.split_leaks.examples(),
         });
+    }
+
+    // A confounded corpus is reported rather than refused, which is the
+    // opposite of what a split leak gets, and the difference is deliberate.
+    // A leak makes a number wrong while looking right. A second variable
+    // between the clean and stego halves is a real property of some arms, kept
+    // on purpose to demonstrate what it does, so the run happens and the
+    // document says what it measured.
+    match checks.pairing {
+        Pairing::Confounded => progress(&format!(
+            "WARNING: {} stego image(s) differ from their cover in more than \
+             the payload, for example: {}. This run measures that difference \
+             as well as the payload, and the result says so",
+            checks.pairing_breaks.count,
+            checks.pairing_breaks.examples()
+        )),
+        Pairing::Unverified => progress(
+            "the pairing rule could not be checked: no stego image here names \
+             a cover this could read alongside it. The result says unverified \
+             rather than claiming the rule held",
+        ),
+        Pairing::SingleVariable => {
+            if checks.unreadable > 0 {
+                progress(&format!(
+                    "{} of {} stego image(s) could not be compared with their \
+                     cover, so the pairing check covered the rest",
+                    checks.unreadable,
+                    checks.unreadable + checks.compared
+                ));
+            }
+        }
     }
 
     let auc = stegobench_metrics::roc_auc(&scores, &labels).unwrap_or(0.5);
@@ -227,8 +256,8 @@ where
             host: None,
         },
         declarations: Declarations {
-            split_discipline: discipline,
-            pairing: stegobench_core::result::Pairing::SingleVariable,
+            split_discipline: checks.split,
+            pairing: checks.pairing,
             // Always custom, and this is the honest answer rather than a
             // placeholder. A directory of samples is not a registered tier: it
             // carries no digest anybody can check and no arm anybody can name,
@@ -289,76 +318,216 @@ impl Iterator for Feed {
     }
 }
 
-/// Does this corpus keep a cover and its stego twin on the same side?
+/// How many example violations are kept to show the user.
 ///
-/// The claim `result-v1` carries as `split_discipline`, checked rather than
-/// asserted. It is the one of the two reliability claims that files on disk
-/// can actually prove: a split label travels with a cover, and a stego image
-/// names the cover it was made from, so a stego image carrying a DIFFERENT
-/// split from its own cover is a corpus that will leak a photograph across the
-/// train and test boundary.
+/// The count is exact and the examples are capped, which is the only shape
+/// that works: a corpus built by a broken script fails on every one of its
+/// 344,357 rows, and a list of them would put the whole corpus in memory to
+/// print three lines of it.
+const MAX_EXAMPLES: usize = 3;
+
+/// A tally of one kind of corpus defect, with a few examples kept to show.
+#[derive(Default)]
+struct Violations {
+    count: usize,
+    examples: Vec<String>,
+}
+
+impl Violations {
+    fn note(&mut self, what: String) {
+        self.count += 1;
+        if self.examples.len() < MAX_EXAMPLES {
+            self.examples.push(what);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn examples(&self) -> String {
+        self.examples.join("; ")
+    }
+}
+
+/// What the corpus turned out to be, as opposed to what it claims.
+struct Checks {
+    split: SplitDiscipline,
+    split_leaks: Violations,
+    pairing: Pairing,
+    pairing_breaks: Violations,
+    /// Stego images whose cover could be found and compared.
+    compared: u64,
+    /// Stego images naming a cover that could not be compared, because one of
+    /// the two images could not be read or is in a format this does not
+    /// measure.
+    unreadable: u64,
+}
+
+/// What a cover contributes to both checks, gathered in one pass.
+struct Cover {
+    split: Option<String>,
+    shape: Option<Shape>,
+}
+
+/// Checks the two reliability claims the result document carries.
 ///
-/// Violating it inflates every number computed from the corpus and is
-/// invisible in the output, which is exactly why the harness must not take it
-/// on trust.
+/// SPLIT DISCIPLINE, WHICH FILES ON DISK CAN PROVE
+///
+/// A split label travels with a cover, and a stego image names the cover it was
+/// made from, so a stego image carrying a DIFFERENT split from its own cover is
+/// a corpus that will leak a photograph across the train and test boundary.
+/// Violating it inflates every number computed from the corpus and is invisible
+/// in the output, which is exactly why the harness must not take it on trust.
+///
+/// PAIRING, WHERE ONLY THE NEGATIVE IS PROVABLE
+///
+/// The rule is that a clean image and its stego twin differ in nothing but the
+/// payload. Nothing short of decoding both images could prove that, and even
+/// that would miss a cover re-encoded before the payload went in. The reachable
+/// half is the refutation: if the two differ in format, width, height, bit depth
+/// or channel count, then something other than the payload changed, and the
+/// number about to be computed is measuring that too.
+///
+/// So this returns `SingleVariable` where every comparable pair matched,
+/// `Confounded` where any did not, and `Unverified` where nothing could be
+/// compared. The third answer is the point. A benchmark that says "single
+/// variable" having looked at nothing is making the unchecked claim this
+/// project exists to stop repeating.
 ///
 /// WHAT THIS HOLDS IN MEMORY, AND WHY THAT IS BOUNDED
 ///
-/// One entry per COVER that carries a split, not one per sample. A Core tier
-/// is 10,000 covers against 344,357 samples, so this is an order of magnitude
-/// below the corpus and bounded by a number the corpus states rather than by
-/// anything this code chooses. The alternative, sorting the whole corpus by
-/// cover, would cost more and buy nothing.
-fn split_discipline(request: &Request) -> Result<(SplitDiscipline, Vec<String>), ScoreError> {
-    let mut split_of_cover: HashMap<String, String> = HashMap::new();
-    let mut stego: Vec<(String, String, String)> = Vec::new();
+/// One entry per COVER, not one per sample, and the stego rows are streamed
+/// against it rather than gathered. A Core tier is 10,000 covers against
+/// 344,357 samples, so this is an order of magnitude below the corpus and
+/// bounded by a number the corpus states rather than by anything this code
+/// chooses. It costs a second walk of the directory tree, because a cover can
+/// sort after the arm that used it and the map has to be complete before any
+/// row is judged against it.
+fn check(request: &Request) -> Result<Checks, ScoreError> {
+    let mut covers: HashMap<String, Cover> = HashMap::new();
     let mut any_split = false;
 
     for sample in Samples::open(request.corpus)? {
         let sample = sample?;
-        match sample.role {
-            Role::Clean => {
-                if let Some(split) = sample.split {
-                    any_split = true;
-                    if let Some(name) = sample.image.file_name().and_then(|n| n.to_str()) {
-                        split_of_cover.insert(name.to_string(), split);
-                    }
-                }
-            }
-            Role::Stego => {
-                // A stego row with no split of its own inherits its cover's,
-                // which is the corpus doing the right thing by construction
-                // and cannot be a violation. Only a row that states one can
-                // contradict.
-                if let (Some(cover), Some(split)) = (sample.cover, sample.split) {
-                    any_split = true;
-                    stego.push((sample.id, cover, split));
-                }
-            }
+        if sample.role != Role::Clean {
+            continue;
         }
+        any_split |= sample.split.is_some();
+        let Some(name) = sample.image.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        covers.insert(
+            name.to_string(),
+            Cover {
+                split: sample.split,
+                // An unreadable cover is not a corpus defect this should refuse
+                // over. The sample reader has already accepted the file, the
+                // detector will be asked about it regardless, and the honest
+                // consequence is that this pair cannot be compared rather than
+                // that the run cannot happen.
+                shape: header::read(&sample.image).ok(),
+            },
+        );
     }
 
-    let mut violations = Vec::new();
-    for (id, cover, split) in stego {
-        if let Some(cover_split) = split_of_cover.get(&cover) {
-            if cover_split != &split {
-                violations.push(format!(
-                    "{id} is in the {split} split while its cover {cover} is in \
-                     the {cover_split} split"
+    let mut checks = Checks {
+        split: SplitDiscipline::NotApplicable,
+        split_leaks: Violations::default(),
+        pairing: Pairing::Unverified,
+        pairing_breaks: Violations::default(),
+        compared: 0,
+        unreadable: 0,
+    };
+
+    for sample in Samples::open(request.corpus)? {
+        let sample = sample?;
+        if sample.role != Role::Stego {
+            continue;
+        }
+        let Some(cover_name) = sample.cover else {
+            continue;
+        };
+        let Some(cover) = covers.get(&cover_name) else {
+            continue;
+        };
+
+        // A stego row with no split of its own inherits its cover's, which is
+        // the corpus doing the right thing by construction and cannot be a
+        // violation. Only a row that states one can contradict.
+        if let (Some(split), Some(cover_split)) = (&sample.split, &cover.split) {
+            any_split = true;
+            if split != cover_split {
+                checks.split_leaks.note(format!(
+                    "{} is in the {split} split while its cover {cover_name} is \
+                     in the {cover_split} split",
+                    sample.id
                 ));
             }
         }
+
+        match (cover.shape, header::read(&sample.image).ok()) {
+            (Some(cover_shape), Some(stego_shape)) => match difference(cover_shape, stego_shape) {
+                None => checks.compared += 1,
+                Some(what) => {
+                    checks.compared += 1;
+                    checks
+                        .pairing_breaks
+                        .note(format!("{} and its cover {cover_name} {what}", sample.id));
+                }
+            },
+            _ => checks.unreadable += 1,
+        }
     }
 
-    let discipline = if !any_split {
-        // Not a failure. A directory of loose samples with no split labels is
-        // an ordinary thing to score, and saying "not applicable" is a
-        // different statement from saying the discipline was checked and held.
-        SplitDiscipline::NotApplicable
+    if any_split {
+        checks.split = SplitDiscipline::ByCover;
+    }
+    checks.pairing = if !checks.pairing_breaks.is_empty() {
+        Pairing::Confounded
+    } else if checks.compared > 0 {
+        Pairing::SingleVariable
     } else {
-        SplitDiscipline::ByCover
+        Pairing::Unverified
     };
-    Ok((discipline, violations))
+    Ok(checks)
+}
+
+/// The first way two images differ other than in their payload, in words.
+///
+/// Ordered so the reader is told the most fundamental difference rather than
+/// the first one an arbitrary field order happens to reach: a PNG against a
+/// JPEG is a different fact from a PNG one pixel wider than another.
+fn difference(cover: Shape, stego: Shape) -> Option<String> {
+    if cover.format != stego.format {
+        return Some(format!(
+            "are different formats: {} against {}",
+            cover.format.name(),
+            stego.format.name()
+        ));
+    }
+    let (Some(c), Some(s)) = (cover.geometry, stego.geometry) else {
+        return None;
+    };
+    if (c.width, c.height) != (s.width, s.height) {
+        return Some(format!(
+            "are different sizes: {} by {} against {} by {}",
+            c.width, c.height, s.width, s.height
+        ));
+    }
+    if c.depth != s.depth {
+        return Some(format!(
+            "have different bit depths: {} against {}",
+            c.depth, s.depth
+        ));
+    }
+    if c.channels != s.channels {
+        return Some(format!(
+            "have different channel counts: {} against {}",
+            c.channels, s.channels
+        ));
+    }
+    None
 }
 
 /// Scores and labels, joined by position.
@@ -481,10 +650,28 @@ mod tests {
         assert_eq!(iso8601(4_102_444_800), "2100-01-01T00:00:00Z");
     }
 
+    /// A PNG that is a real header and nothing after it.
+    ///
+    /// The pairing check reads headers, so a fixture of eight magic bytes would
+    /// exercise only the branch where nothing can be compared. `padding` puts
+    /// bytes after the header without changing what the header says, which is
+    /// what a payload does to a file's size.
+    fn png(width: u32, height: u32, depth: u8, colour: u8, padding: usize) -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&width.to_be_bytes());
+        v.extend_from_slice(&height.to_be_bytes());
+        v.extend_from_slice(&[depth, colour, 0, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v.extend_from_slice(&vec![0u8; padding]);
+        v
+    }
+
     fn corpus(root: &Path, clean: usize, stego: usize) {
         std::fs::create_dir_all(root).expect("corpus");
         for i in 0..clean {
-            std::fs::write(root.join(format!("c{i:03}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            std::fs::write(root.join(format!("c{i:03}.png")), png(32, 32, 8, 2, 0)).unwrap();
             std::fs::write(
                 root.join(format!("c{i:03}.json")),
                 r#"{"role":"clean","sha256":"0"}"#,
@@ -492,7 +679,9 @@ mod tests {
             .unwrap();
         }
         for i in 0..stego {
-            std::fs::write(root.join(format!("s{i:03}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            // Same header, more bytes. A payload changes the file, not its
+            // shape, which is the whole premise of the pairing check.
+            std::fs::write(root.join(format!("s{i:03}.png")), png(32, 32, 8, 2, 64)).unwrap();
             std::fs::write(
                 root.join(format!("s{i:03}.json")),
                 r#"{"role":"stego","source_png":"c000.png","sha256":"0"}"#,
@@ -639,7 +828,7 @@ mod tests {
         std::fs::create_dir_all(root).expect("corpus");
         for i in 0..3 {
             let split = if i == 0 { "test" } else { "train" };
-            std::fs::write(root.join(format!("c{i}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            std::fs::write(root.join(format!("c{i}.png")), png(32, 32, 8, 2, 0)).unwrap();
             std::fs::write(
                 root.join(format!("c{i}.json")),
                 format!(r#"{{"role":"clean","split":"{split}","sha256":"0"}}"#),
@@ -648,7 +837,7 @@ mod tests {
 
             // The leak puts the stego twin of cover 0 on the other side.
             let stego_split = if leak && i == 0 { "train" } else { split };
-            std::fs::write(root.join(format!("s{i}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            std::fs::write(root.join(format!("s{i}.png")), png(32, 32, 8, 2, 64)).unwrap();
             std::fs::write(
                 root.join(format!("s{i}.json")),
                 format!(
@@ -664,9 +853,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         split_corpus(&root, false);
-        let (discipline, violations) = split_discipline(&request(&root, None)).expect("checked");
-        assert!(violations.is_empty(), "{violations:?}");
-        assert_eq!(discipline, SplitDiscipline::ByCover);
+        let checks = check(&request(&root, None)).expect("checked");
+        assert!(
+            checks.split_leaks.is_empty(),
+            "{}",
+            checks.split_leaks.examples()
+        );
+        assert_eq!(checks.split, SplitDiscipline::ByCover);
     }
 
     #[test]
@@ -679,9 +872,13 @@ mod tests {
         let root = tmp.path().join("corpus");
         split_corpus(&root, true);
 
-        let (_, violations) = split_discipline(&request(&root, None)).expect("checked");
-        assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("c0.png"), "{violations:?}");
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.split_leaks.count, 1);
+        assert!(
+            checks.split_leaks.examples().contains("c0.png"),
+            "{}",
+            checks.split_leaks.examples()
+        );
 
         let entry = sizing_detector(tmp.path());
         let err = score(&entry, &request(&root, None), |_| {}).expect_err("refused");
@@ -696,9 +893,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         corpus(&root, 2, 2);
-        let (discipline, violations) = split_discipline(&request(&root, None)).expect("checked");
-        assert!(violations.is_empty());
-        assert_eq!(discipline, SplitDiscipline::NotApplicable);
+        let checks = check(&request(&root, None)).expect("checked");
+        assert!(checks.split_leaks.is_empty());
+        assert_eq!(checks.split, SplitDiscipline::NotApplicable);
     }
 
     #[test]
@@ -709,21 +906,212 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("c0.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(root.join("c0.png"), png(32, 32, 8, 2, 0)).unwrap();
         std::fs::write(
             root.join("c0.json"),
             r#"{"role":"clean","split":"test","sha256":"0"}"#,
         )
         .unwrap();
-        std::fs::write(root.join("s0.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(root.join("s0.png"), png(32, 32, 8, 2, 64)).unwrap();
         std::fs::write(
             root.join("s0.json"),
             r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
         )
         .unwrap();
-        let (discipline, violations) = split_discipline(&request(&root, None)).expect("checked");
-        assert!(violations.is_empty(), "{violations:?}");
-        assert_eq!(discipline, SplitDiscipline::ByCover);
+        let checks = check(&request(&root, None)).expect("checked");
+        assert!(
+            checks.split_leaks.is_empty(),
+            "{}",
+            checks.split_leaks.examples()
+        );
+        assert_eq!(checks.split, SplitDiscipline::ByCover);
+    }
+
+    /// A corpus of one pair, where the test chooses what the stego image is.
+    fn pair(root: &Path, stego_image: &[u8]) {
+        std::fs::create_dir_all(root).expect("corpus");
+        std::fs::write(root.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(root.join("c0.json"), r#"{"role":"clean","sha256":"0"}"#).unwrap();
+        std::fs::write(root.join("s0.png"), stego_image).unwrap();
+        std::fs::write(
+            root.join("s0.json"),
+            r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_stego_image_shaped_like_its_cover_is_reported_as_single_variable() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        pair(&root, &png(64, 64, 8, 2, 128));
+        let checks = check(&request(&root, None)).expect("checked");
+        assert!(checks.pairing_breaks.is_empty());
+        assert_eq!(checks.compared, 1);
+        assert_eq!(checks.pairing, Pairing::SingleVariable);
+    }
+
+    #[test]
+    fn a_stego_image_a_different_size_from_its_cover_is_confounded() {
+        // The failure the check exists for. A resized stego half means the
+        // detector is being asked to tell two SIZES apart, and it will do it
+        // well, and the number will look like detection.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        pair(&root, &png(63, 64, 8, 2, 0));
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.pairing, Pairing::Confounded);
+        assert_eq!(checks.pairing_breaks.count, 1);
+        assert!(
+            checks.pairing_breaks.examples().contains("different sizes"),
+            "{}",
+            checks.pairing_breaks.examples()
+        );
+    }
+
+    #[test]
+    fn a_stego_image_in_another_format_is_confounded_and_says_which_two() {
+        // The real case that voided a measurement round: one half written as
+        // JPEG against a clean half that was not.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        jpeg.extend_from_slice(&64u16.to_be_bytes());
+        jpeg.extend_from_slice(&64u16.to_be_bytes());
+        jpeg.push(3);
+        jpeg.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+        pair(&root, &jpeg);
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.pairing, Pairing::Confounded);
+        let seen = checks.pairing_breaks.examples();
+        assert!(seen.contains("PNG") && seen.contains("JPEG"), "{seen}");
+    }
+
+    #[test]
+    fn a_stego_image_of_another_bit_depth_or_channel_count_is_confounded() {
+        for stego in [png(64, 64, 16, 2, 0), png(64, 64, 8, 6, 0)] {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let root = tmp.path().join("corpus");
+            pair(&root, &stego);
+            let checks = check(&request(&root, None)).expect("checked");
+            assert_eq!(checks.pairing, Pairing::Confounded);
+        }
+    }
+
+    #[test]
+    fn a_confounded_corpus_is_scored_and_the_document_says_so() {
+        // Deliberately the opposite of what a split leak gets. A second
+        // variable is a real property of some arms, kept on purpose to show
+        // what it does, so the run happens and the result carries the fact.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..2 {
+            std::fs::write(root.join(format!("c{i}.png")), png(64, 64, 8, 2, i)).unwrap();
+            std::fs::write(
+                root.join(format!("c{i}.json")),
+                r#"{"role":"clean","sha256":"0"}"#,
+            )
+            .unwrap();
+            std::fs::write(root.join(format!("s{i}.png")), png(48, 48, 8, 2, 64 + i)).unwrap();
+            std::fs::write(
+                root.join(format!("s{i}.json")),
+                format!(r#"{{"role":"stego","source_png":"c{i}.png","sha256":"0"}}"#),
+            )
+            .unwrap();
+        }
+
+        let entry = sizing_detector(tmp.path());
+        let mut warnings = Vec::new();
+        let (result, _) = score(&entry, &request(&root, None), |line| {
+            warnings.push(line.to_string())
+        })
+        .expect("scored");
+        assert_eq!(result.declarations.pairing, Pairing::Confounded);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("WARNING")),
+            "the run said nothing about it: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_corpus_nothing_can_be_compared_in_says_unverified() {
+        // Three ways to end up here, and none of them may read as the rule
+        // holding: unreadable images, stego rows that name no cover, and a
+        // cover this cannot measure.
+        let tmp = tempfile::tempdir().expect("tmp");
+
+        let unreadable = tmp.path().join("unreadable");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        std::fs::write(unreadable.join("c0.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(
+            unreadable.join("c0.json"),
+            r#"{"role":"clean","sha256":"0"}"#,
+        )
+        .unwrap();
+        std::fs::write(unreadable.join("s0.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(
+            unreadable.join("s0.json"),
+            r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
+        )
+        .unwrap();
+        let checks = check(&request(&unreadable, None)).expect("checked");
+        assert_eq!(checks.pairing, Pairing::Unverified);
+        assert_eq!(checks.unreadable, 1);
+        assert_eq!(checks.compared, 0);
+
+        let unlinked = tmp.path().join("unlinked");
+        std::fs::create_dir_all(&unlinked).unwrap();
+        std::fs::write(unlinked.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(unlinked.join("c0.json"), r#"{"role":"clean","sha256":"0"}"#).unwrap();
+        std::fs::write(unlinked.join("s0.png"), png(64, 64, 8, 2, 1)).unwrap();
+        std::fs::write(unlinked.join("s0.json"), r#"{"role":"stego","sha256":"0"}"#).unwrap();
+        let checks = check(&request(&unlinked, None)).expect("checked");
+        assert_eq!(checks.pairing, Pairing::Unverified);
+        assert_eq!(checks.compared, 0);
+    }
+
+    #[test]
+    fn a_format_this_cannot_measure_is_compared_as_far_as_its_format_and_no_further() {
+        // Two BMPs of unknown size are not evidence that they match, but they
+        // are evidence that neither is a JPEG. Claiming more than that would
+        // be the unchecked claim in a smaller costume.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("c0.bmp"), b"BM\x40\x00\x40\x00").unwrap();
+        std::fs::write(root.join("c0.json"), r#"{"role":"clean","sha256":"0"}"#).unwrap();
+        std::fs::write(root.join("s0.bmp"), b"BM\x20\x00\x20\x00").unwrap();
+        std::fs::write(
+            root.join("s0.json"),
+            r#"{"role":"stego","source_png":"c0.bmp","sha256":"0"}"#,
+        )
+        .unwrap();
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.compared, 1);
+        assert_eq!(checks.pairing, Pairing::SingleVariable);
+    }
+
+    #[test]
+    fn the_count_of_violations_is_exact_while_the_examples_are_capped() {
+        // A corpus built by a broken script fails on every row. The count has
+        // to be the real one and the list must not grow with the corpus.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(root.join("c0.json"), r#"{"role":"clean","sha256":"0"}"#).unwrap();
+        for i in 0..12 {
+            std::fs::write(root.join(format!("s{i:02}.png")), png(48, 48, 8, 2, i)).unwrap();
+            std::fs::write(
+                root.join(format!("s{i:02}.json")),
+                r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
+            )
+            .unwrap();
+        }
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.pairing_breaks.count, 12);
+        assert_eq!(checks.pairing_breaks.examples.len(), MAX_EXAMPLES);
     }
 
     #[test]

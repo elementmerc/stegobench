@@ -19,6 +19,15 @@ the parts that are deliberately not finished.
   writes a validated `result-v1` document. The run resumes after an
   interruption, and refuses to continue if the corpus changed under the
   records rather than filing answers against the wrong images.
+- `stegobench score` checks the two reliability rules rather than declaring
+  them. A corpus that puts a cover and its stego twin on opposite sides of a
+  train and test split stops the run, because that inflates every number and
+  the inflation is invisible afterwards.
+- Pairing is checked as far as two files on disk allow: for every stego image
+  that names its cover, the two headers are compared for format, size, bit
+  depth and channel count, and a difference marks the run confounded and names
+  the images. A run that could compare nothing says so rather than reading as
+  the good case.
 - `stegobench score` reads an unpacked corpus directory, and marks every such
   run `custom`, because a directory carries no digest anybody can check.
 - `stegobench plan` estimates what a run would cost. It takes the command you

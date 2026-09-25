@@ -274,10 +274,26 @@ pub enum Pairing {
     /// reliability of the method: two measurement rounds have been voided here
     /// by a second variable, when outguess re-encoded at quality 75 against a
     /// clean half written at 95.
+    ///
+    /// **Read this as "no second variable was found", not as proof there is
+    /// none.** Two files on disk cannot prove the positive claim; proving it
+    /// would mean decoding both images and diffing the pixel arrays, and even
+    /// that would miss a cover re-encoded before the payload went in. What the
+    /// harness does is the reachable half: it compares the format, size, bit
+    /// depth and channel count of every stego image against the cover it names,
+    /// and any disagreement is a second variable it can point at.
     SingleVariable,
     /// Clean and stego differ in something else as well, and the arm is kept
     /// deliberately as a demonstration of what that does.
     Confounded,
+    /// Nothing could be compared, so neither of the above is claimed.
+    ///
+    /// A corpus whose stego rows never name their covers, or whose images this
+    /// cannot read, leaves the question open. Recording that plainly is the
+    /// point: a benchmark that answers "single variable" when it looked at
+    /// nothing is making exactly the unchecked claim this project exists to
+    /// stop repeating.
+    Unverified,
 }
 
 impl Result1 {

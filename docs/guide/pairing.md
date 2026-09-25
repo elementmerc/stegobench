@@ -61,6 +61,32 @@ payload:
 
 Run it before trusting any number from an arm whose tool re-encodes.
 
+## What the harness checks when it scores
+
+`stegobench score` doesn't take the pairing claim on trust. For every stego
+image that names the cover it came from, it reads the first few bytes of both
+files and compares four things: the format, the width and height, the bit depth
+and the channel count.
+
+That only ever proves the bad news. Matching headers don't prove two images
+differ in nothing but the payload; you'd have to decode both and compare every
+pixel, and even that would miss a cover that was re-encoded before the payload
+went in. Mismatched headers do prove something else changed, and a detector
+scored on that corpus is partly measuring the something else.
+
+So the result says one of three things, and the third one matters:
+
+| Value | What it means |
+|---|---|
+| `single-variable` | Every pair that could be compared matched. Read it as "looked and found nothing", not as proof |
+| `confounded` | At least one stego image differs from its cover in format, size, depth or channels. The run still happens and names the images |
+| `unverified` | Nothing could be compared: no stego image names a cover, or the files couldn't be read |
+
+A confounded corpus is scored rather than refused, because some arms are
+confounded on purpose to demonstrate exactly what that does to a number. A
+cover leaking across the train and test boundary is refused, because that one
+makes the number wrong while it still looks right.
+
 ## Splits are the same problem
 
 A cover and its stego versions are near-identical, so a random split puts a
