@@ -14,6 +14,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use stegobench_core::registry::Entry;
 
@@ -47,7 +48,7 @@ pub enum Verified {
 /// The container is locked down the way every run in this project is: no
 /// network, no capabilities, no new privileges, read-only root, and a memory
 /// cap. A self-test is still running somebody else's code on our machine.
-fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
+fn run_one(entry: &Entry, image: &str, fixture: &Path, timeout: Duration) -> Reading {
     let Some(invoke) = &entry.invoke else {
         return Reading::Failed("entry declares no invoke block".into());
     };
@@ -146,7 +147,7 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
     // way to say so.
     let mut docker = Command::new("docker");
     docker.args(&args);
-    let out = match crate::exec::captured(docker, "the container", crate::exec::ITEM_TIMEOUT) {
+    let out = match crate::exec::captured(docker, "the container", timeout) {
         Ok(out) => out,
         Err(e) => return Reading::Failed(e),
     };
@@ -181,7 +182,7 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path) -> Reading {
 /// no isolation here and that is a deliberate limit: a binary entry says the
 /// operator already trusts this program enough to have installed it, which is
 /// a different statement from pulling a stranger's image.
-fn run_binary(entry: &Entry, fixture: &Path) -> Reading {
+fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
     let (Some(bin), Some(invoke)) = (&entry.binary, &entry.invoke) else {
         return Reading::Failed("entry is not a runnable binary".into());
     };
@@ -200,7 +201,7 @@ fn run_binary(entry: &Entry, fixture: &Path) -> Reading {
 
     let mut program_cmd = Command::new(&path);
     program_cmd.args(&argv);
-    match crate::exec::captured(program_cmd, program, crate::exec::ITEM_TIMEOUT) {
+    match crate::exec::captured(program_cmd, program, timeout) {
         Ok(out) => parsers::parse(
             &invoke.parser,
             &String::from_utf8_lossy(&out.stdout),
@@ -215,15 +216,20 @@ fn run_binary(entry: &Entry, fixture: &Path) -> Reading {
 }
 
 /// Dispatches to whichever kind of plugin this entry is.
-fn run_any(entry: &Entry, fixture: &Path) -> Reading {
+/// Ask this tool about one file.
+///
+/// Public because it is what a run does, once per item: `doctor` asks about
+/// two fixtures and `score` asks about a corpus, and they must ask the same
+/// way or the self-test stops predicting anything about the run.
+pub fn read_one(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
     // A host adapter wins over the image: the entry names an image to identify
     // the subject, but the thing to run is here, not in it.
     if entry.invoke.as_ref().is_some_and(|i| i.host) {
-        return run_host_adapter(entry, fixture);
+        return run_host_adapter(entry, fixture, timeout);
     }
     match (&entry.image, &entry.binary) {
-        (Some(img), _) => run_one(entry, &img.reference.clone(), fixture),
-        (_, Some(_)) => run_binary(entry, fixture),
+        (Some(img), _) => run_one(entry, &img.reference.clone(), fixture, timeout),
+        (_, Some(_)) => run_binary(entry, fixture, timeout),
         _ => Reading::Failed("entry declares neither an image nor a binary".into()),
     }
 }
@@ -234,7 +240,7 @@ fn run_any(entry: &Entry, fixture: &Path) -> Reading {
 /// where the service lives. Secrets are NOT handled here: a service consumes
 /// its credentials when it starts, which is the operator's business, and this
 /// only asks it a question.
-fn run_host_adapter(entry: &Entry, fixture: &Path) -> Reading {
+fn run_host_adapter(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
     let Some(invoke) = &entry.invoke else {
         return Reading::Failed("entry declares no invoke block".into());
     };
@@ -266,7 +272,7 @@ fn run_host_adapter(entry: &Entry, fixture: &Path) -> Reading {
             cmd.env(k, v);
         }
     }
-    match crate::exec::captured(cmd, &program, crate::exec::ITEM_TIMEOUT) {
+    match crate::exec::captured(cmd, &program, timeout) {
         Ok(out) => parsers::parse(
             &invoke.parser,
             &String::from_utf8_lossy(&out.stdout),
@@ -304,8 +310,10 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
     let threshold = test.threshold;
     let higher = entry.emits.higher_means_stego;
 
-    let on_stego = run_any(entry, &detect_path);
-    let on_clean = run_any(entry, &clear_path);
+    // A self-test asks the same question a run asks, with the same deadline,
+    // so that passing here predicts something about scoring a corpus.
+    let on_stego = read_one(entry, &detect_path, crate::exec::ITEM_TIMEOUT);
+    let on_clean = read_one(entry, &clear_path, crate::exec::ITEM_TIMEOUT);
 
     let subject = entry.maintainer == stegobench_core::registry::Maintainer::Subject;
 

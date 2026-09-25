@@ -36,6 +36,7 @@ use stegobench_core::registry::Entry;
 pub mod availability;
 pub mod exec;
 pub mod parsers;
+pub mod runner;
 pub mod selftest;
 
 pub use availability::{Availability, Presence};
