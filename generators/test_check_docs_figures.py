@@ -18,6 +18,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -252,17 +253,301 @@ class FalsePositiveTests(Fixture):
         self.assertEqual(problems, [], problems)
 
 
+class RepoFixture(Fixture):
+    """The harness repository beside the corpus site.
+
+    The corpus site was checked from the first day and the repository that
+    ships the checker was not, so its README carried 344,348 pairs against a
+    real 344,357 for days: the one document out of reach kept the one number
+    the checker's own header names as the wrong one.
+
+    The manifest is widened to 2,000 covers here so a derived figure lands in
+    the range a year occupies. Without one, nothing in the fixture could tell
+    a count from a date, which is a collision the real prose produced twice.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = pathlib.Path(self.tmp.name) / "harness"
+        (self.repo / "docs" / "design").mkdir(parents=True)
+        # The corpus site still has to hold a page, or the check refuses
+        # before it reaches the repository at all.
+        self.write("index.md", "A corpus of photographs.")
+
+        rows = [{"file": f"{n:05d}.png", "tier_order": n,
+                 "attribution_required": n < 1090,
+                 "split": "train" if n < 1600 else "test",
+                 "licence": "Public domain" if n < 1922 else "CC0"}
+                for n in range(2000)]
+        (self.covers / "manifest.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+        (self.release / "core" / "pentimento-core-index.json").write_text(
+            json.dumps({"samples": 2000, "tier": "Core"}))
+
+    def repo_write(self, name: str, text: str) -> None:
+        p = self.repo / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def run_check(self):
+        return check(self.docs, derive(self.release, self.covers), self.repo)
+
+
+class RepoTests(RepoFixture):
+    def test_a_stale_pair_count_in_the_harness_readme_fails_and_names_it(self):
+        """The defect that shipped. A count alone is unactionable when the fix
+        is editing a document, so the finding has to carry the file, the
+        figure, the value found and the value expected."""
+        self.repo_write("README.md", "The first corpus tier is complete: "
+                                     "4 stego arms and 1 clean one, 352 pairs.")
+        problems, _ = self.run_check()
+        self.assertEqual(len(problems), 1, problems)
+        for part in ("README.md", "stego pairs", "352", "360"):
+            self.assertIn(part, problems[0])
+
+    def test_a_correct_harness_readme_passes_and_says_it_was_compared(self):
+        self.repo_write("README.md", "The first corpus tier is complete: "
+                                     "4 stego arms and 1 clean one, 360 pairs.")
+        problems, notes = self.run_check()
+        self.assertEqual(problems, [])
+        self.assertTrue(any("stego pairs" in n and "as shipped" in n
+                            for n in notes), notes)
+
+    def test_a_figure_wrapped_onto_the_next_line_is_still_checked(self):
+        """Exactly how the real README carries it: the number ends one line at
+        79 columns and the noun begins the next. Line by line the figure had
+        no noun beside it and the noun no number, so the headline count of the
+        whole corpus reported as never stated while the page stated it."""
+        self.repo_write("README.md",
+                        "The first corpus tier is complete: 4 stego arms and\n"
+                        "1 clean one, 352\n"
+                        "pairs, built in a single run with every arm\n"
+                        "resumable.\n")
+        problems, _ = self.run_check()
+        self.assertTrue(any("stego pairs" in p and "352" in p
+                            for p in problems), problems)
+
+    def test_llms_txt_is_read_like_any_other_page(self):
+        """A model reads it to decide how to call the tool, so a stale figure
+        there reaches every agent before it reaches any human."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("llms.txt", "The corpus holds 352 stego pairs.")
+        problems, _ = self.run_check()
+        self.assertTrue(any("llms.txt" in p for p in problems), problems)
+
+    def test_a_stale_arms_sentence_in_the_readme_is_caught(self):
+        """The repository writes the arm counts as a sentence and the corpus
+        site as a table cell. Accepting only the cell reported a figure the
+        README states plainly as never stated."""
+        self.repo_write("README.md", "Complete: 3 stego arms and 2 clean ones.")
+        problems, _ = self.run_check()
+        self.assertTrue(any("stego arms" in p for p in problems), problems)
+
+    def test_the_correct_arms_sentence_in_the_readme_passes(self):
+        self.repo_write("README.md", "Complete: 4 stego arms and 1 clean one.")
+        problems, notes = self.run_check()
+        self.assertEqual([p for p in problems if "stego arms" in p], [])
+        self.assertTrue(any("stego arms" in n and "as shipped" in n
+                            for n in notes), notes)
+
+    def test_a_harness_page_stating_no_figures_is_reported_not_passed(self):
+        """A checker that reports clean because it found nothing to check is
+        the failure this whole file exists to prevent."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        problems, notes = self.run_check()
+        self.assertEqual(problems, [])
+        self.assertTrue(any("stego pairs" in n and "never state it" in n
+                            for n in notes), notes)
+
+    def test_a_private_working_note_in_the_harness_is_not_read(self):
+        self.repo_write("README.md", "The corpus holds 360 pairs.")
+        self.repo_write("docs/private/notes.md", "we had 352 stego pairs")
+        problems, _ = self.run_check()
+        self.assertEqual(problems, [], problems)
+
+    def test_node_modules_in_the_harness_docs_is_not_read(self):
+        self.repo_write("README.md", "The corpus holds 360 pairs.")
+        self.repo_write("docs/node_modules/pkg/readme.md",
+                        "changelog for 352 stego pairs")
+        problems, _ = self.run_check()
+        self.assertEqual(problems, [], problems)
+
+    def test_a_repository_with_no_published_prose_is_a_failure(self):
+        """Pointed at the wrong directory it must refuse, not report clean on
+        the strength of having read nothing."""
+        empty = pathlib.Path(self.tmp.name) / "empty"
+        empty.mkdir()
+        with self.assertRaises(FigureError) as cm:
+            check(self.docs, derive(self.release, self.covers), empty)
+        self.assertIn("no published prose", str(cm.exception))
+
+    def test_a_docs_tree_inside_the_repository_is_not_reported_twice(self):
+        """Otherwise one stale number in one file reads as two defects."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("docs/guide.md", "The corpus holds 352 stego pairs.")
+        problems, _ = check(self.repo / "docs",
+                            derive(self.release, self.covers), self.repo)
+        self.assertEqual(len(problems), 1, problems)
+
+
+class RepoFalsePositiveTests(RepoFixture):
+    """Every one of these fired against the real repository on the first run.
+
+    None was a stale figure, and a gate that cries wolf is one somebody
+    switches off, which leaves the prose unchecked by a different route.
+    """
+
+    def test_a_year_in_prose_is_not_read_as_a_count(self):
+        """Found against the shipped design notes: "a 1924 Polish physics
+        textbook" in a sentence about public domain scans read as a stale
+        count of covers under that licence, whose real value is 1,922."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("docs/design/sources.md",
+                        "Commons' public domain holdings are dominated by "
+                        "scans: a 1924 Polish physics textbook, for one.")
+        problems, _ = self.run_check()
+        self.assertEqual(problems, [], problems)
+
+    def test_an_iso_date_beside_a_licence_is_not_read_as_a_count(self):
+        """Found against the shipped design notes: `Ruled 2026-09-16:
+        permissive only. CC0, public domain and plain CC BY` read as 2,026
+        covers under the public domain, whose real value is 1,922."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("docs/design/sources.md",
+                        "Ruled 2026-09-16: public domain and plain CC BY.")
+        problems, _ = self.run_check()
+        self.assertEqual(problems, [], problems)
+
+    def test_a_number_one_sentence_away_is_not_a_candidate(self):
+        """Rejoining wrapped lines made a nine-line paragraph one unit, and
+        anything anywhere in it became a candidate for anything else. The unit
+        is the sentence: what a human would point at when asked where a number
+        is claimed."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("docs/design/sources.md",
+                        "The corpus covers every region. A survey listed "
+                        "2150 plates.")
+        problems, _ = self.run_check()
+        self.assertEqual([p for p in problems if "covers" in p], [], problems)
+
+    def test_a_survey_of_another_corpus_is_not_scanned(self):
+        """`cover-source-licensing.md` records that a mirror advertising
+        20,000 covers holds 9,975, which is a finding about somebody else's
+        dataset sitting inside the band around our own 10,000."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("docs/design/cover-source-licensing.md",
+                        "That mirror actually holds 2150 covers.")
+        problems, _ = self.run_check()
+        self.assertEqual(problems, [], problems)
+
+
+class RepoBoundsTests(RepoFixture):
+    def test_an_oversized_page_is_refused_rather_than_truncated(self):
+        """A generated file must not turn the scan into an unbounded read, and
+        must not be quietly half-read either."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        (self.repo / "docs" / "huge.md").write_text(
+            "x" * (cdf.MAX_PAGE_BYTES + 1))
+        with self.assertRaises(FigureError) as cm:
+            self.run_check()
+        self.assertIn("huge.md", str(cm.exception))
+        self.assertIn("cap", str(cm.exception))
+
+    def test_too_many_pages_is_refused_rather_than_scanned(self):
+        self.repo_write("README.md", "A harness for steganalysis.")
+        with unittest.mock.patch.object(cdf, "MAX_PAGES", 1):
+            with self.assertRaises(FigureError) as cm:
+                self.run_check()
+        self.assertIn("page cap", str(cm.exception))
+
+    def test_too_much_prose_in_total_is_refused(self):
+        """The per-page and per-tree caps multiply out to gigabytes, so on
+        their own they are not a bound."""
+        self.repo_write("README.md", "A harness for steganalysis.")
+        self.repo_write("docs/a.md", "x" * 200)
+        with unittest.mock.patch.object(cdf, "MAX_TOTAL_BYTES", 100):
+            with self.assertRaises(FigureError) as cm:
+                self.run_check()
+        self.assertIn("bytes of prose", str(cm.exception))
+
+    def test_the_run_says_how_many_pages_it_read_and_where(self):
+        """Every failure this file guards against renders identically to a
+        clean run, so a reader has to be able to see that something was read
+        and which trees it came from."""
+        self.repo_write("README.md", "The corpus holds 360 pairs.")
+        _, notes = self.run_check()
+        self.assertTrue(any("page(s) read under" in n and str(self.repo) in n
+                            for n in notes), notes)
+
+    def test_a_page_that_is_not_utf8_is_refused_by_name(self):
+        self.repo_write("README.md", "A harness for steganalysis.")
+        (self.repo / "docs" / "broken.md").write_bytes(b"\xff\xfe pairs")
+        with self.assertRaises(FigureError) as cm:
+            self.run_check()
+        self.assertIn("broken.md", str(cm.exception))
+
+
+class UnwrapTests(unittest.TestCase):
+    def test_wrapped_prose_is_rejoined(self):
+        self.assertEqual(cdf.unwrap("one 344,357\npairs here"),
+                         "one 344,357 pairs here")
+
+    def test_table_rows_stay_separate(self):
+        """Joining them is what makes a figure in one row read as a candidate
+        for the figure in the next."""
+        text = "| CC0 | 2,625 |\n| CC BY 2.0 | 2,624 |"
+        self.assertEqual(cdf.unwrap(text), text)
+
+    def test_list_items_and_headings_stay_separate(self):
+        text = "## Arms\n- 35 stego\n- 4 clean"
+        self.assertEqual(cdf.unwrap(text), text)
+
+    def test_a_code_fence_is_left_alone(self):
+        text = "```\na = 1\nb = 2\n```"
+        self.assertEqual(cdf.unwrap(text), text)
+
+
 class EndToEndTests(Fixture):
+    # `--no-repo`, because the default is a real checkout of the harness whose
+    # real figures have nothing to do with this fixture's 360 pairs.
     def test_main_returns_zero_when_the_docs_agree(self):
         self.write("index.md", "360 stego pairs, 110 covers, 55%.")
         self.assertEqual(cdf.main([
+            "--no-repo",
             "--docs", str(self.docs), "--release", str(self.release),
             "--covers", str(self.covers)]), 0)
 
     def test_main_returns_one_when_they_do_not(self):
         self.write("index.md", "54% of covers need attribution.")
         self.assertEqual(cdf.main([
+            "--no-repo",
             "--docs", str(self.docs), "--release", str(self.release),
+            "--covers", str(self.covers)]), 1)
+
+
+class RepoEndToEndTests(RepoFixture):
+    def test_main_returns_one_when_the_harness_readme_is_stale(self):
+        """The whole point: a figure that drifts in the repository fails the
+        same way one that drifts on the corpus site does."""
+        self.repo_write("README.md", "The corpus holds 352 stego pairs.")
+        self.assertEqual(cdf.main([
+            "--docs", str(self.docs), "--repo", str(self.repo),
+            "--release", str(self.release),
+            "--covers", str(self.covers)]), 1)
+
+    def test_main_returns_zero_when_the_harness_readme_agrees(self):
+        self.repo_write("README.md", "The corpus holds 360 stego pairs.")
+        self.assertEqual(cdf.main([
+            "--docs", str(self.docs), "--repo", str(self.repo),
+            "--release", str(self.release),
+            "--covers", str(self.covers)]), 0)
+
+    def test_main_reports_the_repository_refusal_rather_than_crashing(self):
+        empty = pathlib.Path(self.tmp.name) / "empty"
+        empty.mkdir()
+        self.assertEqual(cdf.main([
+            "--docs", str(self.docs), "--repo", str(empty),
+            "--release", str(self.release),
             "--covers", str(self.covers)]), 1)
 
 

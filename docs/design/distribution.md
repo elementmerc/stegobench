@@ -130,10 +130,16 @@ point. A hash sort reshuffles every position each time a cover is added, so
 Nano's first 200 would be a different 200 in every release, and a prefix that
 stops being a prefix is worse than having no tiers at all.
 
-Current assignment over the 10,000 covers: 8,032 train and 1,968 test, with
-Nano at 16.5% test and Lite at 19.0%. Those fractions differ slightly by tier
-because the split is a property of the cover rather than of the tier, which is
-exactly the property being bought.
+Current assignment over the 10,000 covers: 8,029 train and 1,971 test. The
+test fraction differs slightly from tier to tier, because the split is a
+property of the cover rather than of the tier, and that is exactly the
+property being bought.
+
+The per-tier fractions used to be quoted here. They were derived from an
+earlier assignment, they moved when it did, and nothing recomputed them, so
+they have been taken out rather than left sitting beside two figures that are
+checked. `stegobench` fails the docs figure check on a stale number now, and a
+number nothing can check does not belong next to numbers that something can.
 
 Nobody else tiers a steganalysis corpus. Done properly it is a differentiator;
 done carelessly it is a way to poison every result built on the dataset.

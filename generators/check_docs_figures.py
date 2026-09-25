@@ -29,6 +29,16 @@ reported as unchecked rather than passed, because a checker that silently
 covers less than it appears to is the fault this corpus keeps finding
 elsewhere.
 
+THE DOCUMENT IT COULD NOT SEE
+-----------------------------
+For its first days this read the corpus site and nothing else, so the harness
+repository's own README sat claiming 344,348 pairs against a real 344,357. The
+irony is exact: 344,348 is the number named a few lines above as the wrong
+figure that was once published, and the one document out of reach was the one
+that kept it. `--repo` closes that: this repository's README, its `llms.txt`
+and everything under its `docs/` tree are held to the same figures, from the
+same packed index, and fail the same way.
+
 Usage::
 
     python check_docs_figures.py --docs ~/the-factory/pentimento/docs \\
@@ -187,7 +197,13 @@ def patterns(name: str, value: int, figures: dict[str, int]) -> list[str]:
         # what anybody would actually write in a sentence.
         return [f"{value:g}%"]
     if name == "stego arms":
-        return [f"{figures['stego arms']} stego, plus {figures['clean arms']} clean"]
+        # Two phrasings because two repositories say it two ways: the corpus
+        # site writes the table cell, the harness README writes the sentence.
+        # Accepting only the first reported the harness README as never
+        # stating an arm count it states in plain words.
+        stego, clean = figures["stego arms"], figures["clean arms"]
+        return [f"{stego} stego, plus {clean} clean",
+                f"{stego} stego arms and {clean} clean"]
     if name == "tool arms":
         return [f"{value} tool arms"]
     return [thousands(value)]
@@ -211,7 +227,11 @@ COVERED_ELSEWHERE = {"clean arms"}
 #: 8,029/1,971. Suppressing a figure and checking it are one decision apart,
 #: and the suppression was protecting the defect.
 CONTEXT = {
-    "stego pairs": ("stego pair", "matched stego"),
+    # Bare "pair" as well as the two full phrasings, because the harness
+    # README writes "35 stego arms and 4 clean ones, 344,357 pairs": the noun
+    # beside the number is plain "pairs", and requiring "stego pair" reported
+    # the headline figure of the whole corpus as never stated.
+    "stego pairs": ("stego pair", "matched stego", "pair"),
     "train covers": ("train", "split"),
     "test covers": ("test", "split"),
     "samples per outguess arm": ("outguess",),
@@ -222,21 +242,58 @@ CONTEXT = {
 }
 
 
+#: One claim ends and the next begins at a full stop. A table row and a list
+#: item have no full stop and stay whole, which is what keeps a breakdown
+#: table's rows independent of each other.
+SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+def segments(text: str) -> list[str]:
+    """The units a figure can be claimed in: a row, an item, or a sentence.
+
+    A whole paragraph is too coarse. Unwrapping the soft line breaks (see
+    `unwrap`) rejoined a nine-line paragraph about Commons' public domain
+    holdings into one unit, and "a 1924 Polish physics textbook" three
+    sentences away from the words "public domain" then read as a stale count
+    of covers under that licence. The sentence is the unit a human would
+    point at when asked where a number is claimed.
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        out += SENTENCE.split(line)
+    return out
+
+
 def in_context(text: str, name: str) -> str:
-    """Only the lines that are talking about this figure."""
-    # A per-licence count is only ever claimed on a line naming that licence,
+    """Only the sentences that are talking about this figure."""
+    # A per-licence count is only ever claimed where that licence is named,
     # and the licences share magnitudes: CC0's 2,625 and CC BY 2.0's 2,624 sit
     # inside each other's +/-10% band, so without this every row of the
     # breakdown table reads as a stale value for every other row.
     if name.startswith("covers under "):
         licence = name[len("covers under "):].lower()
-        return "\n".join(line for line in text.splitlines()
-                         if licence in line.lower())
+        return "\n".join(s for s in segments(text) if licence in s.lower())
     words = CONTEXT.get(name)
     if not words:
         return text
-    return "\n".join(line for line in text.splitlines()
-                      if any(w in line.lower() for w in words))
+    return "\n".join(s for s in segments(text)
+                     if any(w in s.lower() for w in words))
+
+
+#: A date is not a quantity. Two of these fired against the real prose:
+#: "Ruled 2026-09-16: permissive only. CC0, public domain and plain CC BY"
+#: read as 2,026 covers under the public domain against a real 1,922, and "a
+#: 1924 Polish physics textbook" in a sentence about a cover test run read as
+#: 1,924 test covers against a real 1,971. Both sit inside the magnitude band,
+#: and every corpus dates its own prose, so leaving years in the haystack
+#: guarantees the collision rather than risking it.
+#:
+#: The accepted cost: a figure between 1,500 and 2,099 written without its
+#: thousands separator is now invisible to this check. Three of the derived
+#: figures fall in that band, and every document writes them "1,922" rather
+#: than "1922", so the loss is theoretical where the false alarms were real.
+DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b"
+                  r"|(?<![\d,])(?:1[5-9]|20)\d{2}(?![\d,])")
 
 
 def stale_numbers(text: str, name: str, value: int,
@@ -248,15 +305,21 @@ def stale_numbers(text: str, name: str, value: int,
     never mentions it at all.
     """
     want = set(patterns(name, value, figures))
-    text = in_context(text, name)
+    text = DATE.sub(" ", in_context(text, name))
     if name == "attribution percent":
         found = set(re.findall(r"\b(\d{1,3}(?:\.\d)?)%", text))
         return sorted(f"{f}%" for f in found if f"{f}%" not in want
                       and 40 <= float(f) <= 70)
     if name == "stego arms":
-        found = re.findall(r"\b(\d{1,3}) stego, plus (\d{1,3}) clean", text)
-        return sorted(f"{a} stego, plus {b} clean" for a, b in found
-                      if f"{a} stego, plus {b} clean" not in want)
+        out = set()
+        for joiner in (", plus ", " arms and "):
+            for a, b in re.findall(
+                    rf"\b(\d{{1,3}}) stego{re.escape(joiner)}(\d{{1,3}}) clean",
+                    text):
+                phrase = f"{a} stego{joiner}{b} clean"
+                if phrase not in want:
+                    out.add(phrase)
+        return sorted(out)
     if name == "tool arms":
         found = set(re.findall(r"\b(\d{1,3}) tool arms\b", text))
         return sorted(f"{f} tool arms" for f in found
@@ -287,27 +350,162 @@ def stale_numbers(text: str, name: str, value: int,
 NOT_PROSE = ("attribution",)
 
 
+#: Pages whose subject is somebody else's corpus. `cover-source-licensing.md`
+#: surveys BOSSbase, ALASKA2, IStego100K and the advertised mirrors of them,
+#: and records that one mirror claiming 20,000 covers "actually holds 9,975
+#: covers". That is a finding about another dataset, on a line that says
+#: "covers", inside the magnitude band around our own 10,000, so scanning the
+#: page reports correct prose as a stale cover count. The page asserts no
+#: count of this corpus at all, which is what makes the whole-file exclusion
+#: honest rather than convenient.
+SURVEYS_OTHERS = ("cover-source-licensing",)
+
+
 #: `private/` is gitignored in every repo on this fleet and never published, so
 #: a figure in there is a working note rather than a claim to a reader. Scanning
 #: it makes the check fail over prose nobody will ever see.
 NOT_PUBLISHED = ("node_modules", "private")
 
 
+#: Caps, so a generated or vendored file cannot turn the scan into an
+#: unbounded read. Both are far above any real documentation tree: the corpus
+#: site is 12 pages and its largest is under 30 KiB. Passing either is a loud
+#: refusal rather than a truncated read, because a check that quietly examined
+#: half the prose is the failure this file exists to prevent.
+MAX_PAGE_BYTES = 4 * 1024 * 1024
+MAX_PAGES = 2_000
+#: The per-page and per-tree caps multiply out to several gigabytes held in
+#: memory, which is not a bound worth having. This one is the bound.
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+
 def is_prose(path: pathlib.Path) -> bool:
     if any(part in NOT_PUBLISHED for part in path.parts):
         return False
-    return path.stem.lower() not in NOT_PROSE
+    stem = path.stem.lower()
+    return stem not in NOT_PROSE and stem not in SURVEYS_OTHERS
 
 
-def check(docs: pathlib.Path, figures: dict[str, int]) -> tuple[list[str], list[str]]:
-    pages = sorted(p for p in docs.rglob("*.md") if is_prose(p))
-    if not pages:
+def read_page(path: pathlib.Path) -> str:
+    size = path.stat().st_size
+    if size > MAX_PAGE_BYTES:
+        raise FigureError(
+            f"{path} is {size:,} bytes, past the {MAX_PAGE_BYTES:,} byte cap "
+            f"on a page of prose. A file that large is generated data rather "
+            f"than a claim about the corpus; add its name to NOT_PROSE")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise FigureError(f"{path} is not UTF-8 text ({e}), so it cannot be "
+                          f"read as prose") from e
+
+
+#: Markdown whose lines are independent claims rather than one wrapped
+#: sentence: table rows, list items, headings, quotes and indented code. These
+#: keep one line each, because joining them is exactly what makes an unrelated
+#: figure on the next row read as a candidate for this one.
+BLOCK = re.compile(r"^(?:\s*$|[|>#]|\s*[-*+]\s|\s*\d+[.)]\s|\s{4,}|```)")
+
+
+def unwrap(text: str) -> str:
+    """Rejoin soft-wrapped prose so a figure and its noun share a line.
+
+    The harness README is wrapped at 79 columns and breaks mid-phrase: "35
+    stego arms and 4 clean ones, 344,357" ends one line and "pairs," begins
+    the next. Matching line by line, the pair count was invisible in both
+    directions, the number having no noun beside it and the noun no number,
+    so the figure reported as never stated while the document stated it
+    plainly. Line wrapping is a rendering detail and must not decide what
+    gets checked.
+    """
+    out: list[str] = []
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append(line)
+            continue
+        if fenced or not out or BLOCK.match(line) or BLOCK.match(out[-1]):
+            out.append(line)
+        else:
+            out[-1] = f"{out[-1].rstrip()} {line.strip()}"
+    return "\n".join(out)
+
+
+#: What the harness repository asserts to a reader. Named rather than walked,
+#: because an rglob from the repository root would descend into `target/`,
+#: `crates/` and every vendored README: unbounded, and full of version numbers
+#: and byte counts this corpus never claimed.
+REPO_PAGES = ("README.md", "llms.txt")
+REPO_TREES = ("docs",)
+
+#: This file lives at <repo>/generators/, so the checkout is two levels up.
+#: Defaulting to it rather than requiring a flag is the point: the README went
+#: stale precisely because nothing in any invocation named it.
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def pages_under(docs: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(p for p in docs.rglob("*.md") if is_prose(p))
+
+
+def repo_prose(repo: pathlib.Path) -> list[pathlib.Path]:
+    """The harness repository's own published prose.
+
+    `llms.txt` is in the list because it is the first thing a model reads to
+    decide how to call the tool, so a stale figure there is read by every
+    agent that orients itself before every human who opens the README.
+    """
+    found = [repo / name for name in REPO_PAGES]
+    found = [p for p in found if p.is_file() and is_prose(p)]
+    for tree in REPO_TREES:
+        found += pages_under(repo / tree) if (repo / tree).is_dir() else []
+    if not found:
+        raise FigureError(
+            f"no published prose under {repo}: expected "
+            f"{', '.join(REPO_PAGES)} or a docs/ tree, and found neither. "
+            f"Pass the repository root, or --no-repo if there is nothing "
+            f"there to check")
+    return sorted(set(found))
+
+
+def check(docs: pathlib.Path, figures: dict[str, int],
+          repo: pathlib.Path | None = None) -> tuple[list[str], list[str]]:
+    found = [(str(p.relative_to(docs)), p) for p in pages_under(docs)]
+    if not found:
         raise FigureError(f"no documentation pages under {docs}, so this "
                           f"check examined nothing. That is not a pass")
-    text = "\n".join(p.read_text() for p in pages)
-    per_page = {p: p.read_text() for p in pages}
+    if repo is not None:
+        # A docs tree that lives inside the repository would otherwise be
+        # scanned twice under two names, and every finding in it reported
+        # twice, which reads as two defects where there is one.
+        seen = {p.resolve() for _, p in found}
+        found += [(str(p.relative_to(repo)), p) for p in repo_prose(repo)
+                  if p.resolve() not in seen]
+    if len(found) > MAX_PAGES:
+        raise FigureError(
+            f"{len(found):,} pages to scan, past the {MAX_PAGES:,} page cap. "
+            f"That is a vendored or generated tree rather than documentation; "
+            f"narrow --docs and --repo rather than raising the cap")
+
+    per_page, total = {}, 0
+    for name, p in found:
+        page = read_page(p)
+        total += len(page)
+        if total > MAX_TOTAL_BYTES:
+            raise FigureError(
+                f"more than {MAX_TOTAL_BYTES:,} bytes of prose by the time it "
+                f"reached {name}. Narrow --docs and --repo rather than "
+                f"raising the cap")
+        per_page[name] = unwrap(page)
+    text = "\n".join(per_page.values())
 
     problems, notes = [], []
+    # Named roots and a page count, because every failure this file guards
+    # against looks identical to a clean run from the outside. A reader has to
+    # be able to see that something was actually read, and what.
+    where = f"{docs}" + (f" and {repo}" if repo is not None else "")
+    notes.append(f"{len(per_page)} page(s) read under {where}")
     for name, value in sorted(figures.items()):
         if name in COVERED_ELSEWHERE:
             continue
@@ -320,11 +518,24 @@ def check(docs: pathlib.Path, figures: dict[str, int]) -> tuple[list[str], list[
                          f"nothing was checked")
             continue
         if stale:
-            where = sorted({str(p.relative_to(docs)) for p, t in per_page.items()
-                            if any(s in in_context(t, name) for s in stale)})
-            problems.append(
-                f"{name} should read {wanted[0]}; the docs also carry "
-                f"{', '.join(stale)} in {', '.join(where)}")
+            # One line per document rather than one per figure. The fix for a
+            # stale number is editing a named file, and a finding that lists
+            # four filenames against three values leaves the reader to work
+            # out which value is in which file before they can start.
+            found_in = 0
+            for page in sorted(per_page):
+                here = in_context(per_page[page], name)
+                got = [s for s in stale if s in here]
+                if not got:
+                    continue
+                found_in += 1
+                problems.append(
+                    f"{page}: {name} reads {', '.join(got)}, and the packed "
+                    f"index says {wanted[0]}")
+            if not found_in:
+                problems.append(
+                    f"(page unknown): {name} reads {', '.join(stale)}, and "
+                    f"the packed index says {wanted[0]}")
         elif present:
             notes.append(f"{name}: {wanted[0]}, as shipped")
     return problems, notes
@@ -344,12 +555,22 @@ def main(argv: list[str] | None = None) -> int:
                          "attribution shares and cover counts, so checking "
                          "their prose against Core's reports correct text as "
                          "wrong")
+    ap.add_argument("--repo", default=str(REPO_ROOT),
+                    help="the harness repository root, whose README, "
+                         "llms.txt and docs/ tree quote the same figures and "
+                         "drifted from them unnoticed while only the corpus "
+                         "site was being checked")
+    ap.add_argument("--no-repo", action="store_true",
+                    help="check only --docs. For running this against a "
+                         "corpus site from outside a checkout of the harness")
     args = ap.parse_args(argv)
 
     try:
         figures = derive(pathlib.Path(args.release), pathlib.Path(args.covers),
                          args.tier)
-        problems, notes = check(pathlib.Path(args.docs), figures)
+        problems, notes = check(pathlib.Path(args.docs), figures,
+                                None if args.no_repo
+                                else pathlib.Path(args.repo))
     except FigureError as e:
         print(f"cannot check: {e}", file=sys.stderr)
         return 1
@@ -362,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         # had been compared and three were never mentioned. That is the same
         # over-claim this file's docstring argues against, one level up.
         never = sum(1 for n in notes if "never state" in n)
-        compared = len(notes) - never
+        compared = sum(1 for n in notes if "as shipped" in n)
         print(f"\n{len(figures)} figure(s) derived from the packed index, "
               f"{compared} compared with the docs, {never} never stated there. "
               f"Every figure that was compared agrees.")
@@ -370,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
     for p in problems:
         print(f"  FAIL  {p}", file=sys.stderr)
-    print(f"\n{len(problems)} figure(s) in the docs do not match the corpus "
+    print(f"\n{len(problems)} statement(s) in the docs do not match the corpus "
           f"that shipped. A wrong number reads exactly like a right one.",
           file=sys.stderr)
     return 1
