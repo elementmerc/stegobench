@@ -303,19 +303,26 @@ impl CorpusEntry {
         if l.spdx_version_inferred {
             if l.status != LicenceStatus::Verified {
                 bad.push(
-                    "licence.spdx_version_inferred is set but the status is                      not verified. An unverified entry names no licence, so                      there is no version to be inferred"
+                    "licence.spdx_version_inferred is set but the status is not \
+                     verified. An unverified entry names no licence, so there is no \
+                     version to be inferred"
                         .into(),
                 );
             }
             if l.spdx.as_ref().is_none_or(|s| s.trim().is_empty()) {
                 bad.push(
-                    "licence.spdx_version_inferred is set but no spdx                      identifier is given; the flag qualifies that field and                      means nothing without it"
-                        .into(),
+                    "licence.spdx_version_inferred is set but no spdx identifier is \
+                     given; the flag qualifies that field and means nothing without \
+                     it"
+                    .into(),
                 );
             }
             if l.note.as_ref().is_none_or(|s| s.trim().is_empty()) {
                 bad.push(
-                    "licence.spdx_version_inferred is set but licence.note                      does not say where the version came from. The flag tells                      a machine the source did not state it; the note is what                      tells a person what to re-check"
+                    "licence.spdx_version_inferred is set but licence.note does not \
+                     say where the version came from. The flag tells a machine the \
+                     source did not state it; the note is what tells a person what \
+                     to re-check"
                         .into(),
                 );
             }
@@ -484,7 +491,10 @@ impl CorpusEntry {
             });
             if !ok {
                 bad.push(format!(
-                    "integrity.records_sha256 {d:?} is not a corpus digest. It                      is written as \"sha256:\" followed by {SHA256_HEX_LEN}                      lower case hexadecimal characters, exactly as `stegobench                      score` prints it, because the two are compared as text"
+                    "integrity.records_sha256 {d:?} is not a corpus digest. It is \
+                     written as \"sha256:\" followed by {SHA256_HEX_LEN} lower case \
+                     hexadecimal characters, exactly as `stegobench score` prints \
+                     it, because the two are compared as text"
                 ));
             }
         }

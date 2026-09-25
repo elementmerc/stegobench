@@ -661,6 +661,7 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
     let Command::Score {
         corpus,
         detector,
+        corpus_id,
         limit,
         timeout,
         ..
@@ -702,6 +703,11 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
         }
     }
 
+    // What the run would be WORTH, beside what it would cost. A plan that
+    // reports six hours and omits that the result will be `custom` has
+    // answered half the question somebody asks before committing six hours.
+    let (configuration, why) = plan_configuration(&reg, corpus_id.as_deref(), limit.is_some());
+
     let per_image = entry.cost.seconds_per_image;
     let seconds = per_image.map(|s| s * items as f64);
     // One JSON line per answer, measured at roughly sixty bytes on the real
@@ -714,6 +720,7 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
     value.insert("seconds_per_image".into(), serde_json::json!(per_image));
     value.insert("estimated_seconds".into(), serde_json::json!(seconds));
     value.insert("records_mb".into(), serde_json::json!(records_mb));
+    value.insert("configuration".into(), serde_json::json!(configuration));
     value.insert(
         "worst_case_seconds".into(),
         serde_json::json!(items * timeout),
@@ -734,8 +741,68 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
         format!(
             "{items} item(s) to score with {detector}. Time: {duration}. \
              Records file: about {records_mb:.1} MB. Worst case, if every \
-             item hit the {timeout}s deadline: {}.",
+             item hit the {timeout}s deadline: {}.\nThe result would be \
+             {configuration}: {why}",
             human_duration((items * timeout) as f64)
+        ),
+    )
+}
+
+/// Whether the run being planned would earn a `named` result, and why.
+///
+/// Answered from the registry alone, without hashing the corpus. A plan is
+/// meant to be cheap, and the expensive half of the real check is comparing a
+/// digest this has deliberately not computed. So a run this calls `named` is
+/// one that COULD be named, and `score` still has to agree.
+fn plan_configuration(
+    reg: &Registry,
+    corpus_id: Option<&str>,
+    limited: bool,
+) -> (&'static str, String) {
+    let Some(id) = corpus_id else {
+        return (
+            "custom",
+            "no --corpus-id was given, so there is no registered corpus to \
+             check this directory against. A custom result is comparable \
+             with itself rather than with anybody else's number"
+                .into(),
+        );
+    };
+    let Some(entry) = reg.corpora.get(id) else {
+        return (
+            "custom",
+            format!("no corpus with id {id:?} is registered, so `score` would refuse this"),
+        );
+    };
+    if entry
+        .integrity
+        .as_ref()
+        .and_then(|i| i.records_sha256.as_deref())
+        .is_none()
+    {
+        return (
+            "custom",
+            format!(
+                "{id} is registered but declares no records digest, so there \
+                 is nothing to check this directory against"
+            ),
+        );
+    }
+    if limited {
+        return (
+            "custom",
+            "--limit scores part of the corpus, and a prefix of a tier is \
+             not the tier"
+                .into(),
+        );
+    }
+    (
+        "named",
+        format!(
+            "{id} declares a records digest. If this directory matches it \
+             the result can be quoted beside anybody else's run over the \
+             same corpus, and if it does not `score` refuses before \
+             anything runs"
         ),
     )
 }
