@@ -14,12 +14,14 @@ pub mod manifest;
 pub mod registry;
 pub mod result;
 pub mod run;
+pub mod samples;
 
 pub use corpus::{CorpusEntry, LicenceStatus, Redistribution};
 pub use manifest::{ManifestV1, MANIFEST_SCHEMA_ID};
 pub use registry::{Entry, Kind, Registry};
 pub use result::{Result1, RESULT_SCHEMA_ID};
 pub use run::{RunV1, RUN_SCHEMA_ID};
+pub use samples::{Role, Sample, SampleError, Samples};
 
 /// Process exit codes, which are part of the CLI's contract and are documented
 /// in the man page. A caller, human or otherwise, distinguishes "I refused" from
