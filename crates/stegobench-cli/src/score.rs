@@ -108,6 +108,18 @@ pub enum ScoreError {
         clean: u64,
         stego: u64,
     },
+    #[error(
+        "{id} is not the image its own record describes. The record states \
+         {want} and the file on disk is {got}. A run cannot be named over a \
+         corpus whose images and records disagree: the digest that names the \
+         corpus is taken over what the records SAY, so swapping the images \
+         underneath them leaves it unchanged"
+    )]
+    ImageChanged {
+        id: String,
+        want: String,
+        got: String,
+    },
 }
 
 impl ScoreError {
@@ -124,7 +136,9 @@ impl ScoreError {
             // The caller asked for something incoherent. Fix the command.
             ScoreError::NotADetector { .. } => exit::USAGE,
             // A claim about the bytes was checked and did not hold.
-            ScoreError::NotThatCorpus { .. } => exit::VERIFY_MISMATCH,
+            ScoreError::NotThatCorpus { .. } | ScoreError::ImageChanged { .. } => {
+                exit::VERIFY_MISMATCH
+            }
             // The corpus is unfit for a measurement, and will be as unfit the
             // second time. Refusals, not breakages.
             ScoreError::SplitLeaks { .. } | ScoreError::OneSided { .. } => exit::PREFLIGHT_REFUSED,
@@ -183,6 +197,20 @@ where
             Some(want) => {
                 let got = corpus_digest(request.corpus)?;
                 if got.as_deref() == Some(want) {
+                    // The manifest is the one the registry named. Now check
+                    // that the images are the ones the manifest describes,
+                    // because the digest above would not notice if they were
+                    // not. See `verify_bytes`.
+                    progress(
+                        "the corpus matches the digest its registry entry \
+                         declares; checking the images against their own \
+                         records before naming the run",
+                    );
+                    let checked = verify_bytes(request.corpus, &mut progress)?;
+                    progress(&format!(
+                        "{checked} image(s) are the files their records \
+                         describe"
+                    ));
                     true
                 } else {
                     // Refused rather than downgraded. The user asserted
@@ -534,6 +562,87 @@ impl CorpusDigest {
         (self.every_record_declares_one && self.seen > 0)
             .then(|| format!("sha256:{:x}", self.hash.finalize()))
     }
+}
+
+/// Checks that every image is the file its own record says it is.
+///
+/// THE HOLE THIS CLOSES
+///
+/// The corpus digest is taken over what the records STATE about their images,
+/// not over the images. That is what lets it survive a corpus being extracted
+/// from a shard and moved, and it is the right property for identifying a
+/// corpus. It is the wrong property to rest a `named` result on by itself:
+/// somebody could take the real manifest records, pair them with easier
+/// images, and match the registry's digest exactly while measuring something
+/// else entirely.
+///
+/// So a run that claims a registered corpus pays for one pass over the bytes.
+/// It costs a read of the corpus, which the detector was going to do anyway,
+/// and it turns `named` from "the manifest matches" into "the images are the
+/// ones the manifest describes", which is what a reader assumes the word means.
+///
+/// Not done for a `custom` run. There is no external claim to check one
+/// against, the records are the only description of the corpus that exists,
+/// and comparing them with themselves would be theatre.
+fn verify_bytes<P>(root: &Path, progress: &mut P) -> Result<u64, ScoreError>
+where
+    P: FnMut(&str),
+{
+    let mut checked = 0u64;
+    let mut skipped = 0u64;
+    let mut last_beat = Instant::now();
+    for sample in Samples::open(root)? {
+        let sample = sample?;
+        let Some(want) = sample.digest.as_deref() else {
+            // A corpus reaching here has a digest, which means every record
+            // stated one, so this cannot fire. Counted rather than asserted.
+            skipped += 1;
+            continue;
+        };
+        let got = hash_file(&sample.image).map_err(|e| ScoreError::Records {
+            path: sample.image.display().to_string(),
+            source: e,
+        })?;
+        if got != want {
+            return Err(ScoreError::ImageChanged {
+                id: sample.id,
+                want: want.to_string(),
+                got,
+            });
+        }
+        checked += 1;
+        // Baseline Section 2.1: a long loop emits a heartbeat. Hashing a Core
+        // tier is tens of gigabytes and a silent minute reads as a hang.
+        if last_beat.elapsed() >= HEARTBEAT {
+            progress(&format!("{checked} image(s) checked against their records"));
+            last_beat = Instant::now();
+        }
+    }
+    debug_assert_eq!(skipped, 0, "a digested corpus had a record with no digest");
+    Ok(checked)
+}
+
+/// How often a long pass says it is still alive.
+const HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// The sha256 of a file as lower case hex, streamed rather than read whole.
+///
+/// A corpus image is a few hundred kilobytes and reading one whole would be
+/// fine; reading one that turns out to be a gigabyte would not, and this is
+/// pointed at files somebody else produced.
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// The digest of a corpus on disk, for a caller that wants only that.
@@ -1488,15 +1597,25 @@ mod tests {
     }
 
     /// A corpus whose records state the digests the test chooses.
-    fn digested(root: &Path, digests: &[&str]) {
+    /// A corpus whose records state the TRUE digest of each image, except
+    /// where the label is empty, which leaves the field off entirely.
+    ///
+    /// True rather than arbitrary, because a named run checks the images
+    /// against their records and a fixture of made up hashes would exercise
+    /// only the failure branch. The `label` still varies the content, so two
+    /// corpora built from different labels get different digests.
+    fn digested(root: &Path, labels: &[&str]) {
         std::fs::create_dir_all(root).expect("corpus");
-        for (i, d) in digests.iter().enumerate() {
+        for (i, label) in labels.iter().enumerate() {
             let role = if i == 0 { "clean" } else { "stego" };
-            std::fs::write(root.join(format!("i{i}.png")), png(64, 64, 8, 2, i)).unwrap();
-            let sha = if d.is_empty() {
+            let mut bytes = png(64, 64, 8, 2, i);
+            bytes.extend_from_slice(label.as_bytes());
+            let image = root.join(format!("i{i}.png"));
+            std::fs::write(&image, &bytes).unwrap();
+            let sha = if label.is_empty() {
                 String::new()
             } else {
-                format!(r#","sha256":"{d}""#)
+                format!(r#","sha256":"{}""#, hash_file(&image).expect("hashed"))
             };
             std::fs::write(
                 root.join(format!("i{i}.json")),
@@ -1829,6 +1948,61 @@ mod tests {
         for (err, want) in cases {
             assert_eq!(err.exit_code(), want, "{err}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapping_the_images_under_a_matching_manifest_is_caught() {
+        // The attack the byte check exists for, and the reason a corpus digest
+        // alone cannot carry a named result. Take the real records, keep them
+        // byte for byte so the corpus digest is unchanged, and put easier
+        // images underneath. Everything the registry can compare still agrees.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        let digest = corpus_digest(&root).expect("readable").expect("named");
+        let entry = registered_corpus(Some(&digest));
+
+        // The records are untouched; only the pixels change.
+        std::fs::write(root.join("i1.png"), png(64, 64, 8, 2, 99)).unwrap();
+        assert_eq!(
+            corpus_digest(&root).expect("readable").as_deref(),
+            Some(digest.as_str()),
+            "the corpus digest noticed, which would make this test prove nothing"
+        );
+
+        let mut request = request(&root, None);
+        request.registered = Some(&entry);
+        let err = score(&sizing_detector(tmp.path()), &request, |_| {}).expect_err("refused");
+        assert!(
+            err.to_string().contains("is not the image its own record"),
+            "{err}"
+        );
+        assert_eq!(err.exit_code(), stegobench_core::exit::VERIFY_MISMATCH);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_custom_run_does_not_pay_for_the_byte_check() {
+        // There is no external claim to check a custom run against, the
+        // records are the only description of that corpus that exists, and
+        // comparing them with themselves would be theatre that costs a whole
+        // extra read of the corpus.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        std::fs::write(root.join("i1.png"), png(64, 64, 8, 2, 99)).unwrap();
+
+        let mut said = Vec::new();
+        let (result, _) = score(&sizing_detector(tmp.path()), &request(&root, None), |l| {
+            said.push(l.to_string())
+        })
+        .expect("scored");
+        assert_eq!(result.declarations.configuration, Configuration::Custom);
+        assert!(
+            !said.iter().any(|l| l.contains("their records describe")),
+            "a custom run paid for the check: {said:?}"
+        );
     }
 
     #[cfg(unix)]

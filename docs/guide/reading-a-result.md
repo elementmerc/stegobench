@@ -31,7 +31,7 @@ Look at `declarations.configuration`.
 
 | Value | What it means |
 |---|---|
-| `named` | The corpus entry declared a digest in advance and this run matched it. You can put this number in a table beside somebody else's `named` run over the same corpus |
+| `named` | The corpus entry declared a digest in advance, this run matched it, and every image was checked against the digest its own record states. You can put this number in a table beside somebody else's `named` run over the same corpus |
 | `custom` | A perfectly good measurement that is comparable with itself. A directory nobody has registered a digest for, or a partial run |
 
 `custom` isn't a warning. It's most runs, and it's the honest label for one.

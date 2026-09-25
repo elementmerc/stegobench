@@ -229,6 +229,40 @@ removing `if: false` from the `crates-io` job, after configuring the four
 crates' Trusted Publishing settings on crates.io to name this repository and
 the `Release` workflow.
 
+## The tap and the bucket
+
+Once the release is visible, its archives are what Homebrew and Scoop download.
+Neither file is written by hand: `tools/release/generate_packaging.py` reads
+the release's own `SHA256SUMS`, the file the workflow signed, and emits both
+with the URLs and digests already filled in.
+
+```sh
+gh release download v1.2.3 --pattern SHA256SUMS --dir dist
+python3 tools/release/generate_packaging.py \
+    --version 1.2.3 --sums dist/SHA256SUMS --out /tmp/packaging
+```
+
+Copy `homebrew/stegobench.rb` to `Formula/stegobench.rb` in
+`elementmerc/homebrew-tap` and `scoop/stegobench.json` to
+`bucket/stegobench.json` in the bucket. Both repositories are ours, so neither
+push waits on anybody's review.
+
+The generator refuses rather than guessing: a digest missing from `SHA256SUMS`,
+an archive belonging to a different release, or a build target it has no entry
+for each stops the run and names what was wrong. It writes nothing when either
+file would have been wrong, so there is no path that leaves a tap half updated.
+`packaging/README.md` has the longer explanation and a committed example.
+
+`cargo binstall stegobench-cli` needs no file here at all. The URLs live in
+`[package.metadata.binstall]` in `crates/stegobench-cli/Cargo.toml`, and
+`tools/release/test_generate_packaging.py` fails if they stop matching the
+names `release.yml` gives its assets.
+
+- [ ] `brew install elementmerc/tap/stegobench` on a machine that has never
+      built this project.
+- [ ] `cargo binstall stegobench-cli` fetches the archive rather than
+      compiling, and the version it reports matches the tag.
+
 ## After publishing
 
 - [ ] `cargo install stegobench-cli` on a machine that has never built this
@@ -274,6 +308,17 @@ the `Release` workflow.
 - **The Linux aarch64 build cross-links** with the GNU aarch64 toolchain as the
   link driver while Rust supplies the musl objects. It's the part of the
   workflow most worth watching on a first run.
+- **`flake.nix` has never been built.** It was written on a machine with no Nix
+  and no network, so it is conventional rather than verified. Run one real
+  `nix build .#stegobench` and one `nix run .` before the first tag; the
+  failure it is most likely to show is the pinned nixpkgs carrying a compiler
+  the workspace has not been compiled with, since the flake deliberately
+  ignores `rust-toolchain.toml`.
+- **The tap and the bucket do not exist yet.** `elementmerc/homebrew-tap` and
+  the Scoop bucket are two empty repositories somebody has to create. The
+  generator and its tests are here and green; nothing has ever been pushed to a
+  destination, so `brew install` and `scoop install` are documented rather than
+  working.
 - **The Python half has no release path here.** `pentimento` publishes to PyPI,
   and the corpus to Internet Archive, HuggingFace and Kaggle through
   `publish-all.sh` and `publish-kaggle.sh`. Those are separate sequences with

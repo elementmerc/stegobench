@@ -47,7 +47,9 @@ the parts that are deliberately not finished.
   count of tools you have not installed.
 - A result records the operating system and the architecture it ran on.
 - `stegobench score --corpus-id` names the registered corpus a directory
-  holds, and the harness checks the claim instead of taking it. A run is
+  holds, and the harness checks the claim instead of taking it. A named run
+  also hashes every image against the digest its own record states, so a real
+  manifest with easier images underneath it is refused. A run is
   `named` only when the corpus entry declares the digest of its records and
   the directory matches it; a directory that doesn't is refused before
   anything is scored.

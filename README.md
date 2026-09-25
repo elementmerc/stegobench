@@ -229,7 +229,10 @@ stegobench score --corpus ./pentimento-nano --corpus-id pentimento-core \
 ```
 
 A run is marked `named` only when the corpus entry declares the digest of its
-records and the directory in front of the tool matches it. A directory that
+records, the directory in front of the tool matches it, and every image turns
+out to be the file its own record describes. That last check costs one extra
+read of the corpus and is what stops somebody keeping a real manifest and
+putting easier images underneath it. A directory that
 doesn't match is refused before anything is scored, because you asserted
 something about those bytes that isn't true of them. Most corpora have no such
 digest yet, and those runs are `custom`, carry the registered name and tier,
