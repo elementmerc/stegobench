@@ -58,12 +58,34 @@ pub enum SubjectKind {
     Embedder,
 }
 
+/// Where the bytes came from.
+///
+/// Two of the four registered corpora may not be redistributed, so a corpus
+/// this harness fetched and one the user already had are different provenance
+/// claims about the same name. A reader deciding whether to trust a number is
+/// entitled to know which they have, and a submission path deciding which
+/// division an entry belongs in needs it: a result the harness can fetch and
+/// re-score is a different kind of evidence from one it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CorpusSource {
+    /// The harness downloaded it from the route the registry declares, and
+    /// checked it against the digest recorded there.
+    Fetched,
+    /// The user pointed at a copy they already had. Correct and ordinary for
+    /// a corpus nobody may redistribute, and the reason this field exists
+    /// rather than being assumed.
+    Supplied,
+}
+
 /// The exact bytes the measurement was taken on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CorpusRef {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Fetched by us, or supplied by the user. See [`CorpusSource`].
+    pub source: CorpusSource,
     /// Digest over the corpus manifest. A result that cannot name the bytes it
     /// was measured on is an anecdote, and `stegobench verify` re-checks this
     /// rather than trusting it.
@@ -196,12 +218,42 @@ pub struct Host {
 pub struct Declarations {
     pub split_discipline: SplitDiscipline,
     pub pairing: Pairing,
+    /// Whether this run measured something anybody else can name and repeat.
+    /// See [`Configuration`].
+    pub configuration: Configuration,
     /// The corpus a trained detector saw, or None. A detector scored on what it
     /// trained on is not being measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trained_on: Option<String>,
     /// Set by the submission path, never by the submitter.
     pub self_reported: bool,
+}
+
+/// Whether this measurement is comparable to anybody else's.
+///
+/// The tier structure exists because two independently sampled subsets produce
+/// numbers that look comparable and are not: somebody trains on one and
+/// evaluates on another, and every figure they publish is inflated by an
+/// amount nobody can recover afterwards. Nesting the tiers closes that at the
+/// distribution layer.
+///
+/// This field closes it at the layer where a user can reopen it. A run over a
+/// hand-picked subset is a perfectly good thing to do and a perfectly bad
+/// thing to quote as a tier number, so it is marked rather than forbidden.
+///
+/// **Set by the harness from what it actually ran, never by the person
+/// running it**, which is the same rule `self_reported` follows and for the
+/// same reason: a field the subject can set in their own favour is not worth
+/// having.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Configuration {
+    /// A registered corpus tier, scored whole, with the arm and rate named in
+    /// the registry. Comparable with any other result that says the same.
+    Named,
+    /// Anything else. A hand-picked subset, a run stopped early, a corpus
+    /// edited locally. Comparable with itself and nothing else.
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -287,6 +339,23 @@ impl Result1 {
                 ));
             }
         }
+        // A named configuration is a claim that somebody else can reproduce
+        // this, and reproducing it means fetching the same corpus. A result
+        // that says "named" over a corpus only its author has is a claim
+        // nobody can act on, and it is the shape a flattering number would
+        // take if one were ever submitted.
+        if self.declarations.configuration == Configuration::Named
+            && self.corpus.source == CorpusSource::Supplied
+            && self.corpus.digest.is_empty()
+        {
+            bad.push(
+                "this result calls itself a named configuration over a corpus \
+                 the harness did not fetch and cannot identify: with no digest \
+                 there is nothing for anybody to check it against. Record the \
+                 corpus digest, or mark the run custom"
+                    .into(),
+            );
+        }
         // A tag where a digest belongs is the single most common way a result
         // becomes unreproducible, so it is named rather than left to the reader.
         for p in &self.provenance.plugins {
@@ -320,6 +389,7 @@ mod tests {
             corpus: CorpusRef {
                 name: "pentimento-core".into(),
                 tier: Some("core".into()),
+                source: CorpusSource::Fetched,
                 digest: "sha256:b633b019".into(),
                 pairs: 1000,
                 split: Some("test".into()),
@@ -358,6 +428,7 @@ mod tests {
             declarations: Declarations {
                 split_discipline: SplitDiscipline::ByCover,
                 pairing: Pairing::SingleVariable,
+                configuration: Configuration::Named,
                 trained_on: None,
                 self_reported: false,
             },
@@ -399,6 +470,71 @@ mod tests {
         let mut r = sample();
         r.provenance.plugins[0].image = "ghcr.io/x/y:latest".into();
         assert!(r.validate().unwrap_err()[0].contains("not pinned by digest"));
+    }
+
+    #[test]
+    fn a_named_configuration_over_an_unidentifiable_corpus_is_refused() {
+        // The shape a flattering submission would take: claim the tier
+        // everybody compares against, over a copy only the author has, with
+        // nothing anybody can check it against.
+        let mut r = sample();
+        r.declarations.configuration = Configuration::Named;
+        r.corpus.source = CorpusSource::Supplied;
+        r.corpus.digest = String::new();
+        let problems = r.validate().unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("mark the run custom")),
+            "got {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_supplied_corpus_is_fine_when_it_can_be_identified() {
+        // Two of the four registered corpora may not be redistributed, so
+        // pointing at a copy you already have is the ordinary case and must
+        // not be treated as suspect on its own.
+        let mut r = sample();
+        r.corpus.source = CorpusSource::Supplied;
+        assert!(r.validate().is_ok(), "{:?}", r.validate());
+    }
+
+    #[test]
+    fn a_custom_run_needs_no_digest_to_be_valid() {
+        // A run over a subset somebody assembled is a reasonable thing to do.
+        // It is marked rather than forbidden, so it must still validate.
+        let mut r = sample();
+        r.declarations.configuration = Configuration::Custom;
+        r.corpus.source = CorpusSource::Supplied;
+        r.corpus.digest = String::new();
+        assert!(r.validate().is_ok(), "{:?}", r.validate());
+    }
+
+    #[test]
+    fn the_configuration_and_the_corpus_source_survive_a_round_trip() {
+        // Both are read by the submission path to decide a division, so a
+        // field that silently defaulted would put an entry in the wrong one.
+        let mut r = sample();
+        r.declarations.configuration = Configuration::Custom;
+        r.corpus.source = CorpusSource::Supplied;
+        let text = serde_json::to_string(&r).unwrap();
+        assert!(text.contains("\"configuration\":\"custom\""), "{text}");
+        assert!(text.contains("\"source\":\"supplied\""), "{text}");
+        let back: Result1 = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn neither_new_field_may_be_omitted() {
+        // Both are claims, and an omitted claim that defaults to the
+        // flattering value is worse than no field at all.
+        for (object, field) in [("corpus", "source"), ("declarations", "configuration")] {
+            let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+            v[object].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<Result1>(v).is_err(),
+                "{object}.{field} was allowed to be missing"
+            );
+        }
     }
 
     #[test]
