@@ -15,6 +15,12 @@ the parts that are deliberately not finished.
 
 - Every command in the tree is built and tested: `list`, `describe`,
   `doctor`, `schema`, `validate`, `plan`, `score`, `completions` and `help`.
+- A result names the corpus it was measured on by digest, computed from what
+  the corpus's own records declare, so it survives the corpus being extracted
+  from a shard and moved.
+- The arm a result describes is read off the corpus instead of assumed. It
+  used to say spatial and PNG on every run, which was wrong for every JPEG
+  arm and looked exactly like a fact.
 - `stegobench score` runs a registered detector over a corpus directory and
   writes a validated `result-v1` document. The run resumes after an
   interruption, and refuses to continue if the corpus changed under the

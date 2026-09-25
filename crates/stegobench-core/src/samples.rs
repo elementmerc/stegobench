@@ -133,7 +133,7 @@ pub enum Role {
 /// the `result-v1` document, not here, because this has no way to know which
 /// arm or which split the caller asked for. What it owes that caller is enough
 /// to make the judgement, which is [`Sample::cover`] and [`Sample::split`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
     /// Record path relative to the corpus root, extension removed, POSIX
     /// separators. Stable across runs, machines and a move of the corpus.
@@ -162,6 +162,35 @@ pub struct Sample {
     /// says, which is the only identification available for a directory
     /// somebody extracted from a shard and then moved.
     pub digest: Option<String>,
+    /// What the record says about the arm this sample belongs to.
+    pub arm: ArmInfo,
+}
+
+/// The arm fields, reported exactly as the record writes them.
+///
+/// Every one of these is a string or a number out of somebody's corpus, and
+/// none of it is mapped onto this crate's own vocabulary here. A record saying
+/// `jpeg-dct` means the same thing as `result-v1`'s `jpeg`, and deciding that
+/// is a judgement about two projects' vocabularies rather than a fact about a
+/// file, so it belongs with the caller that writes the result document.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ArmInfo {
+    /// The published arm name, such as `wow-0200`.
+    ///
+    /// The packer writes this deliberately in the form the release publishes
+    /// rather than the form the builder used, because the two once differed and
+    /// a reader grouping by this field got an arm that matched nothing.
+    pub name: Option<String>,
+    /// The embedding tool, such as `wow`. `clean` on the synthesised clean arms.
+    pub tool: Option<String>,
+    /// How much was hidden, in whatever unit [`ArmInfo::rate_unit`] states.
+    pub rate: Option<f64>,
+    /// The unit, which is load-bearing: `0.4` means bits per pixel for the
+    /// spatial schemes and a fraction of a reported capacity for the JPEG ones,
+    /// and a reader comparing the two numbers is comparing nothing.
+    pub rate_unit: Option<String>,
+    /// `spatial`, `jpeg-dct`, `container` or whatever else a corpus writes.
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -471,7 +500,7 @@ impl Samples {
             (Some(_), []) => Err(SampleError::RecordWithoutImage { id }),
             (Some(rec), [image]) => {
                 let value = read_record(&self.current_dir.join(rec))?;
-                let (role, cover, split, digest) = describe(&id, &value)?;
+                let (role, cover, split, digest, arm) = describe(&id, &value)?;
                 Ok(Some(Sample {
                     id,
                     image: self.current_dir.join(image),
@@ -479,6 +508,7 @@ impl Samples {
                     cover,
                     split,
                     digest,
+                    arm,
                 }))
             }
             (Some(_), _) => Err(SampleError::AmbiguousImage {
@@ -584,8 +614,15 @@ fn read_record(path: &Path) -> Result<serde_json::Value, SampleError> {
     })
 }
 
-/// What the record says: which side, which cover, which split, which digest.
-type Described = (Role, Option<String>, Option<String>, Option<String>);
+/// What the record says: which side, which cover, which split, which digest,
+/// and which arm.
+type Described = (
+    Role,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    ArmInfo,
+);
 
 fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleError> {
     let object = value.as_object().ok_or_else(|| SampleError::BadRecord {
@@ -666,7 +703,28 @@ fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleErro
         _ => None,
     };
 
-    Ok((role, cover, split, digest))
+    // Reported, never mapped. See [`ArmInfo`]: turning `jpeg-dct` into this
+    // project's own word for it is a judgement about two vocabularies, and it
+    // belongs with whoever writes the result document.
+    let arm = ArmInfo {
+        name: text(object, "arm"),
+        tool: text(object, "tool"),
+        rate: object.get("rate").and_then(serde_json::Value::as_f64),
+        rate_unit: text(object, "rate_unit"),
+        domain: text(object, "domain"),
+    };
+
+    Ok((role, cover, split, digest, arm))
+}
+
+/// A record field read as a string, or None where it is absent, empty, null or
+/// some other type. A corpus this cannot describe is not a corpus this should
+/// refuse to score.
+fn text(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    match object.get(key) {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        _ => None,
+    }
 }
 
 /// A cover name is a bare basename and is checked as one.

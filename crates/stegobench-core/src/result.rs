@@ -87,8 +87,11 @@ pub struct CorpusRef {
     /// Fetched by us, or supplied by the user. See [`CorpusSource`].
     pub source: CorpusSource,
     /// Digest over the corpus manifest. A result that cannot name the bytes it
-    /// was measured on is an anecdote, and `stegobench verify` re-checks this
-    /// rather than trusting it.
+    /// was measured on is an anecdote, and `stegobench verify` recomputes this
+    /// from a corpus on disk rather than trusting it.
+    ///
+    /// Empty where the corpus cannot honestly be named, which is any corpus
+    /// whose records do not all state a digest for their own image.
     pub digest: String,
     pub pairs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +142,15 @@ pub enum Domain {
     Jpeg,
     /// Hidden in the container rather than the image, so no pixel changes.
     Structural,
+    /// The run covered arms in more than one domain, so no single one
+    /// describes it. A Core tier holds spatial, JPEG and container arms
+    /// together, and an aggregate over all of them is a real measurement that
+    /// would be mislabelled by any one of the three.
+    Mixed,
+    /// The corpus did not say and nothing could work it out. Better here than
+    /// in a reader's head: `spatial` written by default was wrong for every
+    /// JPEG arm and looked exactly like a fact.
+    Unstated,
 }
 
 /// The numbers.

@@ -33,10 +33,10 @@ use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
     Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Metrics,
-    Pairing, PluginRef, Provenance, Result1, SplitDiscipline, Subject, SubjectKind,
+    Pairing, PluginRef, Provenance, Rate, RateUnit, Result1, SplitDiscipline, Subject, SubjectKind,
     RESULT_SCHEMA_ID,
 };
-use stegobench_core::samples::{Role, Samples};
+use stegobench_core::samples::{Role, Sample, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
 use stegobench_plugin::{Record, WorkItem};
 
@@ -224,14 +224,7 @@ where
             pairs: labels.len() as u64,
             split: None,
         },
-        arm: Arm {
-            // A directory of samples does not say which scheme made it. The
-            // honest answer is the one the corpus gave, and it gave none.
-            embedder: "unknown".into(),
-            rate: None,
-            domain: Domain::Spatial,
-            format: "png".into(),
-        },
+        arm: checks.arm.clone(),
         metrics: Metrics {
             auc,
             auc_ci95: None,
@@ -372,6 +365,126 @@ struct Checks {
     /// is why `corpus.source` sits beside it and says whether the harness
     /// fetched the corpus or was handed it.
     digest: Option<String>,
+    /// What was embedded, as the corpus itself states it.
+    arm: Arm,
+}
+
+/// Names a corpus by what its records declare about their own images.
+///
+/// Fed in corpus order, which is sorted by id and therefore identical on every
+/// machine, so two people holding the same corpus compute the same value and a
+/// result can say which bytes it was measured on. Constant memory: it is a
+/// hash state and two counters.
+///
+/// It identifies the MANIFEST rather than the bytes. Nothing here reopens an
+/// image to check the claim a record makes about it, which is a real limit and
+/// is why the result document carries `corpus.source` beside the digest to say
+/// whether the harness fetched the corpus or was handed it.
+#[derive(Default)]
+pub struct CorpusDigest {
+    hash: Sha256,
+    seen: u64,
+    every_record_declares_one: bool,
+}
+
+impl CorpusDigest {
+    fn new() -> Self {
+        Self {
+            hash: Sha256::new(),
+            seen: 0,
+            every_record_declares_one: true,
+        }
+    }
+
+    fn note(&mut self, sample: &Sample) {
+        self.seen += 1;
+        self.hash.update(sample.id.as_bytes());
+        self.hash.update(b"\0");
+        match &sample.digest {
+            Some(d) => self.hash.update(d.as_bytes()),
+            None => self.every_record_declares_one = false,
+        }
+        self.hash.update(b"\n");
+    }
+
+    /// The digest, or `None` where the corpus cannot honestly have one.
+    ///
+    /// A digest over a corpus where some records state none of their own would
+    /// name the file list, and the field it goes in is read as naming the
+    /// content. Carrying nothing is the smaller claim, which is to say it is
+    /// not a false one.
+    fn finish(self) -> Option<String> {
+        (self.every_record_declares_one && self.seen > 0)
+            .then(|| format!("sha256:{:x}", self.hash.finalize()))
+    }
+}
+
+/// The digest of a corpus on disk, for a caller that wants only that.
+///
+/// `score` folds this into a walk it was doing anyway. `verify` has no such
+/// walk, so it pays for its own.
+pub fn corpus_digest(root: &Path) -> Result<Option<String>, ScoreError> {
+    let mut digest = CorpusDigest::new();
+    for sample in Samples::open(root)? {
+        digest.note(&sample?);
+    }
+    Ok(digest.finish())
+}
+
+/// One value seen across a corpus, or the fact that there was not one.
+///
+/// Three answers, because three things are true of a real corpus: it states one
+/// arm, or it states several, or it states none. Collapsing the last two into
+/// "unknown" is how `spatial` came to be written on JPEG runs.
+///
+/// Constant memory whatever the corpus holds: once a second distinct value
+/// arrives, nothing more needs keeping.
+#[derive(Debug, Clone, PartialEq, Default)]
+enum Uniform<T> {
+    #[default]
+    Nothing,
+    One(T),
+    Many,
+}
+
+impl<T: PartialEq> Uniform<T> {
+    fn note(&mut self, value: Option<T>) {
+        let Some(value) = value else { return };
+        match self {
+            Uniform::Nothing => *self = Uniform::One(value),
+            Uniform::One(seen) if *seen == value => {}
+            Uniform::One(_) => *self = Uniform::Many,
+            Uniform::Many => {}
+        }
+    }
+
+    fn one(&self) -> Option<&T> {
+        match self {
+            Uniform::One(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+impl Uniform<String> {
+    /// The single value, or a word saying which of the other two cases it is.
+    /// Both go in a string field a person reads, so both have to be words.
+    fn or_say_why(&self) -> String {
+        match self {
+            Uniform::One(v) => v.clone(),
+            Uniform::Many => "mixed".into(),
+            Uniform::Nothing => "unstated".into(),
+        }
+    }
+}
+
+/// What the corpus says about the arm it holds, gathered while walking it.
+#[derive(Default)]
+struct ArmFacts {
+    tool: Uniform<String>,
+    rate: Uniform<(String, f64)>,
+    domain: Uniform<String>,
+    format: Uniform<String>,
 }
 
 /// What a cover contributes to both checks, gathered in one pass.
@@ -417,24 +530,29 @@ struct Cover {
 fn check(request: &Request) -> Result<Checks, ScoreError> {
     let mut covers: HashMap<String, Cover> = HashMap::new();
     let mut any_split = false;
-    let mut digest = Sha256::new();
-    let mut every_record_declares_one = true;
-    let mut seen = 0u64;
+    let mut digest = CorpusDigest::new();
+    let mut facts = ArmFacts::default();
 
     for sample in Samples::open(request.corpus)? {
         let sample = sample?;
 
-        // Folded into a walk that was happening anyway. The order is the
-        // corpus order, which is sorted by id and therefore the same on every
-        // machine, so two people with the same corpus get the same digest.
-        seen += 1;
-        digest.update(sample.id.as_bytes());
-        digest.update(b"\0");
-        match &sample.digest {
-            Some(d) => digest.update(d.as_bytes()),
-            None => every_record_declares_one = false,
+        // Folded into a walk that was happening anyway.
+        digest.note(&sample);
+
+        if sample.role == Role::Stego {
+            // Gathered from the stego side only. The arm is what was embedded,
+            // and a clean row states `clean` as its tool, which would turn
+            // every corpus into a mixed one.
+            let arm = &sample.arm;
+            facts
+                .tool
+                .note(arm.tool.clone().or_else(|| arm.name.clone()));
+            facts.domain.note(arm.domain.clone());
+            facts.format.note(image_format(&sample.image));
+            facts
+                .rate
+                .note(arm.rate.zip(arm.rate_unit.clone()).map(|(r, u)| (u, r)));
         }
-        digest.update(b"\n");
 
         if sample.role != Role::Clean {
             continue;
@@ -464,12 +582,8 @@ fn check(request: &Request) -> Result<Checks, ScoreError> {
         pairing_breaks: Violations::default(),
         compared: 0,
         unreadable: 0,
-        // A digest over a corpus where some records state no digest of their
-        // own would be a name for the file list rather than for the content,
-        // and the field it goes in is read as the second thing. Better to
-        // carry nothing than to carry a name that means less than it looks.
-        digest: (every_record_declares_one && seen > 0)
-            .then(|| format!("sha256:{:x}", digest.finalize())),
+        digest: digest.finish(),
+        arm: arm_of(&facts),
     };
 
     for sample in Samples::open(request.corpus)? {
@@ -523,6 +637,70 @@ fn check(request: &Request) -> Result<Checks, ScoreError> {
         Pairing::Unverified
     };
     Ok(checks)
+}
+
+/// The arm block, built from what the corpus states rather than from a guess.
+///
+/// Every field here used to be a constant, and two of the three constants were
+/// wrong for most of the corpus: `spatial` on a JPEG arm and `png` on a corpus
+/// of JPEGs are not placeholders a reader can see through, they are facts the
+/// document appears to assert.
+fn arm_of(facts: &ArmFacts) -> Arm {
+    let rate = facts.rate.one().and_then(|(unit, value)| {
+        let unit = match unit.as_str() {
+            "bits per pixel" => RateUnit::Bpp,
+            // Both JPEG tools are driven as a share of whatever capacity they
+            // report for that cover, which is the distinction the unit exists
+            // to carry.
+            "bits per non-zero AC coefficient" => return None,
+            u if u.contains("capacity") => RateUnit::CapacityFraction,
+            _ => return None,
+        };
+        Some(Rate {
+            value: *value,
+            unit,
+        })
+    });
+
+    let domain = match &facts.domain {
+        Uniform::One(d) => match d.as_str() {
+            "spatial" => Domain::Spatial,
+            "jpeg-dct" | "jpeg" => Domain::Jpeg,
+            "container" | "structural" => Domain::Structural,
+            _ => Domain::Unstated,
+        },
+        Uniform::Many => Domain::Mixed,
+        // The corpus said nothing, so the format is the only evidence left.
+        // A corpus of JPEGs is not proof that the payload went into the
+        // coefficients, which is why this is the fallback and not the rule.
+        Uniform::Nothing => match facts.format.one().map(String::as_str) {
+            Some("jpeg") => Domain::Jpeg,
+            Some(_) => Domain::Spatial,
+            None => Domain::Unstated,
+        },
+    };
+
+    Arm {
+        embedder: facts.tool.or_say_why(),
+        rate,
+        domain,
+        format: facts.format.or_say_why(),
+    }
+}
+
+/// What a file calls itself, normalised, for the arm's `format` field.
+///
+/// The extension rather than the header, deliberately. This field records what
+/// the corpus claims to be, and the pairing check reads the headers separately,
+/// so a corpus whose names and bytes disagree shows up as a disagreement rather
+/// than being quietly resolved in one direction.
+fn image_format(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "jpg" | "jpeg" => "jpeg".into(),
+        "tif" | "tiff" => "tiff".into(),
+        _ => ext,
+    })
 }
 
 /// The first way two images differ other than in their payload, in words.
@@ -1218,6 +1396,133 @@ mod tests {
             result.corpus.digest
         );
         result.validate().expect("valid");
+    }
+
+    /// A corpus of one arm, described the way the shipped packer describes it.
+    fn armed(root: &Path, extra: &str, extension: &str) {
+        std::fs::create_dir_all(root).expect("corpus");
+        std::fs::write(root.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("c0.json"),
+            r#"{"role":"clean","tool":"clean","sha256":"aa"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join(format!("s0.{extension}")), png(64, 64, 8, 2, 8)).unwrap();
+        std::fs::write(
+            root.join("s0.json"),
+            format!(r#"{{"role":"stego","sha256":"bb"{extra}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_arm_is_read_off_the_corpus_rather_than_assumed() {
+        // Every field here used to be a constant, and two of the three were
+        // wrong for most of the shipped corpus.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        armed(
+            &root,
+            r#","tool":"wow","arm":"wow-0200","rate":0.2,"rate_unit":"bits per pixel","domain":"spatial""#,
+            "png",
+        );
+        let arm = check(&request(&root, None)).expect("checked").arm;
+        assert_eq!(arm.embedder, "wow");
+        assert_eq!(arm.domain, Domain::Spatial);
+        assert_eq!(arm.format, "png");
+        let rate = arm.rate.expect("a rate");
+        assert_eq!(rate.unit, RateUnit::Bpp);
+        assert!((rate.value - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_clean_row_does_not_make_every_corpus_a_mixed_one() {
+        // Clean rows state `clean` as their tool. Counting them would make one
+        // arm look like two on every corpus that ships its own clean half.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        armed(&root, r#","tool":"hugo","domain":"spatial""#, "png");
+        assert_eq!(
+            check(&request(&root, None)).expect("checked").arm.embedder,
+            "hugo"
+        );
+    }
+
+    #[test]
+    fn a_jpeg_arm_is_not_labelled_spatial_and_a_capacity_share_is_not_bpp() {
+        // The two wrong constants, in one corpus. A reader comparing 0.05 of a
+        // reported capacity against 0.4 bits per pixel is comparing nothing,
+        // which is why the unit refuses to be guessed.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        armed(
+            &root,
+            r#","tool":"outguess","rate":0.05,"rate_unit":"fraction of the capacity outguess reports","domain":"jpeg-dct""#,
+            "jpg",
+        );
+        let arm = check(&request(&root, None)).expect("checked").arm;
+        assert_eq!(arm.embedder, "outguess");
+        assert_eq!(arm.domain, Domain::Jpeg);
+        assert_eq!(arm.format, "jpeg", "jpg and jpeg are one format");
+        assert_eq!(arm.rate.expect("a rate").unit, RateUnit::CapacityFraction);
+    }
+
+    #[test]
+    fn a_rate_in_a_unit_this_cannot_carry_is_dropped_rather_than_relabelled() {
+        // The JPEG adaptive schemes are driven in bits per non-zero AC
+        // coefficient, which `result-v1` has no unit for. Writing the number
+        // under one of the two units it does have would publish a false one.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        armed(
+            &root,
+            r#","tool":"juniward","rate":0.4,"rate_unit":"bits per non-zero AC coefficient","domain":"jpeg-dct""#,
+            "jpg",
+        );
+        let arm = check(&request(&root, None)).expect("checked").arm;
+        assert_eq!(arm.rate, None);
+        assert_eq!(arm.embedder, "juniward");
+    }
+
+    #[test]
+    fn a_corpus_of_several_arms_says_mixed_rather_than_picking_one() {
+        // A whole tier is a legitimate thing to score and its aggregate is a
+        // real number. Labelling it with whichever arm sorted first would
+        // attribute that number to one scheme out of thirty-nine.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(root.join("c0.json"), r#"{"role":"clean","sha256":"a"}"#).unwrap();
+        for (i, (tool, domain)) in [("wow", "spatial"), ("outguess", "jpeg-dct")]
+            .into_iter()
+            .enumerate()
+        {
+            std::fs::write(root.join(format!("s{i}.png")), png(64, 64, 8, 2, i + 1)).unwrap();
+            std::fs::write(
+                root.join(format!("s{i}.json")),
+                format!(r#"{{"role":"stego","sha256":"b","tool":"{tool}","domain":"{domain}"}}"#),
+            )
+            .unwrap();
+        }
+        let arm = check(&request(&root, None)).expect("checked").arm;
+        assert_eq!(arm.embedder, "mixed");
+        assert_eq!(arm.domain, Domain::Mixed);
+    }
+
+    #[test]
+    fn a_corpus_that_says_nothing_about_its_arm_says_unstated() {
+        // The honest answer to a directory of loose samples, and a different
+        // statement from naming a scheme nobody recorded.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        armed(&root, "", "png");
+        let arm = check(&request(&root, None)).expect("checked").arm;
+        assert_eq!(arm.embedder, "unstated");
+        assert_eq!(arm.rate, None);
+        // The format is the only evidence left, and a PNG corpus is a spatial
+        // one until something says otherwise.
+        assert_eq!(arm.domain, Domain::Spatial);
     }
 
     #[test]
