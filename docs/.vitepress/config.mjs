@@ -89,12 +89,14 @@ export default {
           items: [
             { text: 'Pairing, and what breaks it', link: '/guide/pairing' },
             { text: 'Scores, not verdicts', link: '/guide/scores' },
+            { text: 'Reading a result', link: '/guide/reading-a-result' },
           ],
         },
         {
           text: 'Going further',
           items: [
             { text: 'Limitations', link: '/guide/limits' },
+            { text: 'Submitting a result', link: '/leaderboard' },
           ],
         },
       ],
