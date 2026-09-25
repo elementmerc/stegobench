@@ -125,6 +125,24 @@ the parts that are deliberately not finished.
   submission arrives.
 - `llms.txt` gives a machine-readable orientation to the repository.
 
+### Release and distribution
+
+- Release artefacts are signed, keyless, with a Sigstore signature beside each
+  file and a GitHub build provenance attestation. `SHA256SUMS` is signed too,
+  since it's the file an attacker would most want to swap.
+- `cargo binstall stegobench-cli` fetches the released binary instead of
+  compiling the workspace.
+- A Nix flake, so `nix run` gets the same binary a build from source would.
+- The Homebrew formula and the Scoop manifest are generated from the release's
+  own checksum file rather than hand maintained, so they can't drift from what
+  was actually published.
+- A post-publish verifier loads every destination the way a stranger would and
+  checks that the live page states the release. An upload returning success
+  says nothing about what the page shows, and this project has twice found a
+  wrong public page days later.
+- That verifier also runs nightly, so a takedown or a silent build failure
+  surfaces within a day.
+
 ### CI
 
 - The generators are tested on Linux, macOS and Windows, because they're what
