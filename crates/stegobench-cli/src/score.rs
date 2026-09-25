@@ -23,7 +23,7 @@
 //! bites, and a reader of this file should meet that fact here rather than
 //! discover it at ten times the scale.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
     Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Metrics,
-    PluginRef, Provenance, Result1, Subject, SubjectKind, RESULT_SCHEMA_ID,
+    PluginRef, Provenance, Result1, SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
@@ -63,6 +63,19 @@ pub enum ScoreError {
          to tell two images apart. Pick a detector: `stegobench list detectors`"
     )]
     NotADetector { name: String },
+    #[error(
+        "the corpus at {path} puts {count} stego image(s) on a different side \
+         of the train and test split from the cover they were made from, for \
+         example: {examples}. A cover and its stego twin on opposite sides \
+         inflates every number computed from this corpus, and the inflation is \
+         invisible in the output, so this refuses rather than reporting a \
+         confident wrong answer"
+    )]
+    SplitLeaks {
+        path: String,
+        count: usize,
+        examples: String,
+    },
     #[error(
         "the corpus at {path} holds {clean} clean and {stego} stego image(s), \
          and a measurement needs both. A detector scored on one side of the \
@@ -138,6 +151,23 @@ where
         });
     }
 
+    // Checked before a number is computed from the corpus, because a corpus
+    // that leaks a cover across the boundary produces a confident wrong
+    // answer, and producing it first and mentioning the problem afterwards is
+    // how a bad number gets quoted.
+    let (discipline, violations) = split_discipline(request)?;
+    if !violations.is_empty() {
+        return Err(ScoreError::SplitLeaks {
+            path: request.corpus.display().to_string(),
+            count: violations.len(),
+            examples: violations
+                .into_iter()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+
     let auc = stegobench_metrics::roc_auc(&scores, &labels).unwrap_or(0.5);
     let mut tpr_at_fpr = BTreeMap::new();
     for fpr in [0.01, 0.05, 0.10] {
@@ -197,7 +227,7 @@ where
             host: None,
         },
         declarations: Declarations {
-            split_discipline: stegobench_core::result::SplitDiscipline::NotApplicable,
+            split_discipline: discipline,
             pairing: stegobench_core::result::Pairing::SingleVariable,
             // Always custom, and this is the honest answer rather than a
             // placeholder. A directory of samples is not a registered tier: it
@@ -257,6 +287,78 @@ impl Iterator for Feed {
             }
         }
     }
+}
+
+/// Does this corpus keep a cover and its stego twin on the same side?
+///
+/// The claim `result-v1` carries as `split_discipline`, checked rather than
+/// asserted. It is the one of the two reliability claims that files on disk
+/// can actually prove: a split label travels with a cover, and a stego image
+/// names the cover it was made from, so a stego image carrying a DIFFERENT
+/// split from its own cover is a corpus that will leak a photograph across the
+/// train and test boundary.
+///
+/// Violating it inflates every number computed from the corpus and is
+/// invisible in the output, which is exactly why the harness must not take it
+/// on trust.
+///
+/// WHAT THIS HOLDS IN MEMORY, AND WHY THAT IS BOUNDED
+///
+/// One entry per COVER that carries a split, not one per sample. A Core tier
+/// is 10,000 covers against 344,357 samples, so this is an order of magnitude
+/// below the corpus and bounded by a number the corpus states rather than by
+/// anything this code chooses. The alternative, sorting the whole corpus by
+/// cover, would cost more and buy nothing.
+fn split_discipline(request: &Request) -> Result<(SplitDiscipline, Vec<String>), ScoreError> {
+    let mut split_of_cover: HashMap<String, String> = HashMap::new();
+    let mut stego: Vec<(String, String, String)> = Vec::new();
+    let mut any_split = false;
+
+    for sample in Samples::open(request.corpus)? {
+        let sample = sample?;
+        match sample.role {
+            Role::Clean => {
+                if let Some(split) = sample.split {
+                    any_split = true;
+                    if let Some(name) = sample.image.file_name().and_then(|n| n.to_str()) {
+                        split_of_cover.insert(name.to_string(), split);
+                    }
+                }
+            }
+            Role::Stego => {
+                // A stego row with no split of its own inherits its cover's,
+                // which is the corpus doing the right thing by construction
+                // and cannot be a violation. Only a row that states one can
+                // contradict.
+                if let (Some(cover), Some(split)) = (sample.cover, sample.split) {
+                    any_split = true;
+                    stego.push((sample.id, cover, split));
+                }
+            }
+        }
+    }
+
+    let mut violations = Vec::new();
+    for (id, cover, split) in stego {
+        if let Some(cover_split) = split_of_cover.get(&cover) {
+            if cover_split != &split {
+                violations.push(format!(
+                    "{id} is in the {split} split while its cover {cover} is in \
+                     the {cover_split} split"
+                ));
+            }
+        }
+    }
+
+    let discipline = if !any_split {
+        // Not a failure. A directory of loose samples with no split labels is
+        // an ordinary thing to score, and saying "not applicable" is a
+        // different statement from saying the discipline was checked and held.
+        SplitDiscipline::NotApplicable
+    } else {
+        SplitDiscipline::ByCover
+    };
+    Ok((discipline, violations))
 }
 
 /// Scores and labels, joined by position.
@@ -529,6 +631,99 @@ mod tests {
 
         assert_eq!(tally.resumed, 4, "the scored part should have been reused");
         assert_eq!(whole.metrics, resumed.metrics);
+    }
+
+    /// A corpus carrying split labels, with one knob: whether the stego rows
+    /// agree with their covers.
+    fn split_corpus(root: &Path, leak: bool) {
+        std::fs::create_dir_all(root).expect("corpus");
+        for i in 0..3 {
+            let split = if i == 0 { "test" } else { "train" };
+            std::fs::write(root.join(format!("c{i}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            std::fs::write(
+                root.join(format!("c{i}.json")),
+                format!(r#"{{"role":"clean","split":"{split}","sha256":"0"}}"#),
+            )
+            .unwrap();
+
+            // The leak puts the stego twin of cover 0 on the other side.
+            let stego_split = if leak && i == 0 { "train" } else { split };
+            std::fs::write(root.join(format!("s{i}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            std::fs::write(
+                root.join(format!("s{i}.json")),
+                format!(
+                    r#"{{"role":"stego","source_png":"c{i}.png","split":"{stego_split}","sha256":"0"}}"#
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_corpus_that_keeps_twins_together_is_reported_as_by_cover() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, false);
+        let (discipline, violations) = split_discipline(&request(&root, None)).expect("checked");
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(discipline, SplitDiscipline::ByCover);
+    }
+
+    #[test]
+    fn a_cover_split_from_its_twin_stops_the_run() {
+        // The whole reason the check exists. A photograph on both sides of the
+        // boundary inflates every number computed from the corpus, and the
+        // inflation is invisible in the output, so a confident wrong answer is
+        // the alternative to refusing.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, true);
+
+        let (_, violations) = split_discipline(&request(&root, None)).expect("checked");
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("c0.png"), "{violations:?}");
+
+        let entry = sizing_detector(tmp.path());
+        let err = score(&entry, &request(&root, None), |_| {}).expect_err("refused");
+        assert!(err.to_string().contains("different side"), "{err}");
+    }
+
+    #[test]
+    fn a_corpus_with_no_split_labels_says_not_applicable_rather_than_by_cover() {
+        // "No split applies" and "the split was checked and held" are
+        // different facts, and a directory of loose samples is an ordinary
+        // thing to score.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 2, 2);
+        let (discipline, violations) = split_discipline(&request(&root, None)).expect("checked");
+        assert!(violations.is_empty());
+        assert_eq!(discipline, SplitDiscipline::NotApplicable);
+    }
+
+    #[test]
+    fn a_stego_row_inheriting_its_cover_split_is_not_a_violation() {
+        // Arm rows in the real corpus carry no split of their own, precisely
+        // because the split is a property of the cover. Reading that absence
+        // as a disagreement would refuse every correctly built corpus.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("c0.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(
+            root.join("c0.json"),
+            r#"{"role":"clean","split":"test","sha256":"0"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("s0.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(
+            root.join("s0.json"),
+            r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
+        )
+        .unwrap();
+        let (discipline, violations) = split_discipline(&request(&root, None)).expect("checked");
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(discipline, SplitDiscipline::ByCover);
     }
 
     #[test]
