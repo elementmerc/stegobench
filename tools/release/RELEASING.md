@@ -244,6 +244,13 @@ the `Release` workflow.
 
 ## Known gaps, stated rather than discovered
 
+- **Keyless signing writes to a public log.** That is most of what makes it
+  worth having, and it cuts both ways: the repository name, the workflow path,
+  the tag and every artefact digest are readable by anybody in Sigstore's
+  transparency log from the moment the first signed release is cut, while this
+  GitHub repository is still private. Going public is the plan, so this is a
+  sequencing note rather than a blocker. Don't cut a signed release before
+  you're content for the name to be public.
 - **The two signing actions are not pinned yet.** See "Filling in the signing
   pins" above. The release refuses to run until a human has resolved both
   SHAs, so this is a blocked release rather than a silent hole.
