@@ -75,6 +75,39 @@ was recorded, and whether the run could reach the network. If you
 are consuming results from somebody else, those fields are what you check
 before you believe the number.
 
+## Verifying a release download
+
+Release artefacts are signed with keyless Sigstore cosign and carry a GitHub
+build provenance attestation. The two commands are `gh attestation verify` for
+the provenance and `cosign verify-blob` for the signature; the README has both
+of them in full, under "Verifying a download". This section is what they mean.
+
+**What a signature here proves.** That the file came out of the release
+workflow in this repository, on a tag, and that it hasn't changed since. The
+certificate names the workflow file and the ref, and it's recorded in
+Sigstore's public transparency log, so a forged signature would have to be
+published somewhere anybody can read.
+
+**What it doesn't prove.** That the code is good, that the release does what
+the notes say, or that the account that pushed the tag wasn't compromised. A
+signature is a statement about origin, not about quality or intent. If somebody
+takes over the repository, what they publish will verify: what you'd notice is
+the identity in the certificate, which is why the verification command names it
+explicitly rather than accepting any signature at all.
+
+**There is no private key.** Both mechanisms use the workflow run's own
+short-lived identity, so there's nothing stored in a secret for an attacker to
+take and nothing for the maintainer to lose. That also means there's no key to
+fetch before verifying and none to rotate afterwards.
+
+**`SHA256SUMS` is signed too.** It's the file an attacker would most want to
+replace, because a checksum list proves only that the bytes match a list the
+same attacker could have written. Verify it with `cosign verify-blob` first,
+then trust `sha256sum -c`.
+
+**If verification fails**, don't run the binary. Say so by email (above) with
+the file you downloaded, where you got it and the exact command output.
+
 ## What's out of scope
 
 - The published corpus content itself. Pentimento is built from permissively

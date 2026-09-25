@@ -92,6 +92,23 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "codename=${codename}" >> "${GITHUB_OUTPUT}"
           echo "Releasing ${tag} (${codename})."
+      - name: Refuse a release whose action pins are still placeholders
+        # The signing steps in the `release` job below reference two actions
+        # whose commit SHAs nobody has filled in yet, deliberately marked with
+        # a ref that cannot be mistaken for a hash. GitHub would fail to
+        # resolve them when that job starts, which is loud but late and
+        # unexplained. This says so in the first minute instead, and names the
+        # file that explains what to do about it.
+        run: |
+          set -euo pipefail
+          # The bracket around the R keeps this line from matching itself,
+          # which would make the guard fire for ever once the pins are real.
+          if grep -nE 'PIN-ME-SEE-[R]ELEASING-MD' .github/workflows/release.yml; then
+            echo "::error::release.yml still carries unresolved action pins, listed above." >&2
+            echo "Each one needs the full commit SHA of the version being adopted, with the version in a trailing comment (baseline Section 5)." >&2
+            echo "tools/release/RELEASING.md, under 'Filling in the signing pins', has the commands." >&2
+            exit 1
+          fi
       - name: The CHANGELOG must already describe this version
         run: |
           set -euo pipefail
@@ -304,9 +321,16 @@ jobs:
     needs: [preflight, build, sbom]
     runs-on: ubuntu-latest
     permissions:
-      # The only job in this file that can write anything, and it writes one
-      # thing: a draft release.
+      # The only job in this file that can write anything, and it writes two:
+      # a draft release, and a provenance attestation for what is attached to
+      # it.
       contents: write
+      # Sigstore's keyless flow and the attestation below both trade this
+      # run's OIDC identity for a short-lived certificate. There is no private
+      # key here, in a secret or anywhere else, which is the point: a key
+      # nobody holds is a key nobody can lose.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -326,6 +350,39 @@ jobs:
             | LC_ALL=C sort \
             | xargs -d '\n' sha256sum > SHA256SUMS
           cat SHA256SUMS
+
+      # ── EVERYTHING BELOW HAPPENS BEFORE ANYTHING IS PUBLISHED ─────────────
+      #
+      # Signing is in this job rather than a later one, and ahead of the
+      # `gh release create` step rather than after it, so that a failure
+      # anywhere in it leaves no release at all rather than a release with
+      # four of nine artefacts signed. There is no path through this job that
+      # attaches an unsigned artefact.
+
+      - name: Attest how these artefacts were built
+        # GitHub's own build provenance: a signed SLSA statement saying this
+        # repository, this workflow, this commit and this run produced exactly
+        # these bytes. It is checked with `gh attestation verify`, needs no
+        # key, and is the half of the answer cosign does not give, because a
+        # cosign signature says who signed and this says what built.
+        #
+        # It runs before the signing step so the subjects are the nine
+        # artefacts rather than the nine artefacts plus their signatures.
+        uses: actions/attest-build-provenance@PIN-ME-SEE-RELEASING-MD  # PLACEHOLDER, not a commit SHA. See tools/release/RELEASING.md.
+        with:
+          subject-path: dist/*
+
+      - name: Install cosign
+        # Keyless Sigstore signing. The installer action itself still needs a
+        # commit SHA of its own, which is the placeholder below.
+        uses: sigstore/cosign-installer@PIN-ME-SEE-RELEASING-MD  # PLACEHOLDER, not a commit SHA. See tools/release/RELEASING.md.
+
+      - name: Sign every artefact, SHA256SUMS included, and verify each one
+        # The script signs, then verifies what it signed against the identity
+        # a downloader checks, then counts. It exits non-zero on any of the
+        # three, which fails this job before the draft exists.
+        run: tools/release/sign-artefacts.sh dist
+
       - name: The release notes are the CHANGELOG entry, not a second copy
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -360,6 +417,27 @@ jobs:
             --notes-file notes.md \
             dist/*
           gh release view "${TAG}" --json assets --jq '.assets[].name'
+      - name: The draft must carry every file that was signed
+        # Reconcile rather than trust the exit code. `gh release create`
+        # uploads assets one at a time, so success on the command says less
+        # than a comparison of what is on the page against what is on disk.
+        # The draft is not visible, so a mismatch found here is still cheap.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f -print | sed 's|^\./||' | LC_ALL=C sort > /tmp/expected.txt
+          cd ..
+          gh release view "${TAG}" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > /tmp/attached.txt
+          if ! diff -u /tmp/expected.txt /tmp/attached.txt; then
+            echo "::error::The draft release does not carry the same files that were signed, differences above." >&2
+            echo "Delete the draft, fix the cause and re-run. Publishing a draft with a missing signature is how a reader ends up unable to check a download." >&2
+            exit 1
+          fi
+          echo "Attached $(wc -l < /tmp/attached.txt) files, every one of them signed."
 
   crates-io:
     name: Publish to crates.io

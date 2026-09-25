@@ -72,22 +72,137 @@ below to happen.
    1.5, JSON.
 4. **Writes `SHA256SUMS`** over every artefact, checkable with
    `sha256sum -c SHA256SUMS`.
-5. **Creates a DRAFT GitHub Release** titled `vX.Y.Z — Codename`, with the
-   CHANGELOG section as the notes and everything above attached.
+5. **Attests how they were built.** A GitHub build provenance statement naming
+   this repository, this workflow, this commit and this run as what produced
+   exactly those bytes.
+6. **Signs every artefact, `SHA256SUMS` included**, with keyless Sigstore
+   cosign, then verifies each signature against the identity a downloader
+   checks. Each file gains a `.sig` and a `.pem`.
+7. **Creates a DRAFT GitHub Release** titled `vX.Y.Z — Codename`, with the
+   CHANGELOG section as the notes and everything above attached, then compares
+   the attached asset list against what was signed on disk.
+
+Steps 5 and 6 run before step 7 on purpose. A failure in either fails the job
+with no release in existence, so there's no path that leaves a draft carrying
+some signed artefacts and some unsigned ones. The reconcile at the end of step
+7 covers the other half of that question: `gh release create` uploads assets
+one at a time, and its exit code says less than a comparison of the page
+against the directory.
 
 It deliberately does **not** publish to crates.io. That job exists in the
 workflow, switched off with `if: false`, because the first publish should be
 watched.
+
+## How the artefacts are signed, and why that way
+
+A checksum file answers one question: have these bytes changed since somebody
+wrote the list? It cannot answer the question a downloader actually has, which
+is whether the bytes came from us, because whoever can serve you a tarball can
+serve you a `SHA256SUMS` that matches it. Signing is what separates those two
+questions. The decision below was taken while writing the signing path into
+`release.yml`, and it is recorded here because the alternative is re-arguing it
+at the next release.
+
+Success looks like this: a stranger with no account, no prior contact with the
+project and no special tooling can establish that a downloaded archive came
+from this repository's release workflow, and the project never holds a key
+whose compromise would let somebody else claim the same thing.
+
+| Option | Pros | Cons | Best for |
+|---|---|---|---|
+| Sigstore cosign, keyless | No private key exists to lose, leak or rotate; the certificate names the workflow, the repository and the tag, so a signature says which run made the file; the Rekor transparency log means a forged signature has to be published somewhere public to work; verification needs one binary and no account | The downloader installs cosign; the verification command is long and gets the identity wrong easily; it depends on Sigstore's public infrastructure staying up; certificates are short lived, so verification relies on the log rather than the certificate's own validity window | Anybody verifying from outside GitHub, including a forensic examiner writing down what they checked |
+| Long lived GPG key in an Actions secret | Familiar to anybody who has verified a Linux distribution package; verification works offline once the key is fetched; independent of any hosted service | The private key exists, sits in CI where every workflow change is a chance to exfiltrate it, and cannot be rotated without invalidating the trust anybody built up; key distribution is the unsolved half, since a key served from the same site as the artefacts proves nothing; revocation after a compromise is close to useless in practice | Projects with existing key infrastructure and a distribution channel for the public key that is not the download page |
+| GitHub build provenance attestations | First party, so the identity is GitHub's rather than ours; one command, `gh attestation verify`, with no identity regexp to get wrong; records the build, not only the signature, so it says what produced the bytes; no key anywhere | Verification effectively needs the `gh` tool and, for a private repository, an authenticated one; the attestation lives in GitHub's store rather than beside the file, so it does not survive somebody mirroring the tarball elsewhere; it is tied to GitHub as a platform | A downloader who is already on GitHub and wants one short command |
+
+**Recommendation, and what was implemented: both cosign keyless and build
+provenance, neither alone.** They fail differently, which is the whole
+argument. Cosign's signature travels with the file, so it still verifies from
+a mirror, from the Internet Archive, or three years from now off a disk; build
+provenance answers "what built this" rather than "who signed this", in one
+command, for the majority of downloaders who already have `gh`. Neither puts a
+private key anywhere a compromise can reach, and neither depends on the
+repository staying in the same hands, which a GPG key does. The GPG option was
+rejected on the key: this is a one person project, the key would live in an
+Actions secret, and a signing key in CI is a key that is one malicious workflow
+edit away from being somebody else's.
+
+`SHA256SUMS` is signed along with everything else, and it is the file that most
+needed it.
+
+## Filling in the signing pins
+
+**Two actions in `release.yml` are not pinned yet**, because the session that
+wrote this path had no network access and would have had to invent a commit
+SHA. A wrong hash that looks right is far worse than an obvious blank, so both
+carry the ref `PIN-ME-SEE-RELEASING-MD`, which is not hexadecimal and cannot
+be mistaken for a hash:
+
+| Action | What it does | What it needs |
+|---|---|---|
+| `actions/attest-build-provenance` | Produces the build provenance statement | The full commit SHA of the release being adopted, with the version in a trailing comment |
+| `sigstore/cosign-installer` | Puts `cosign` on PATH | The same |
+
+The pre-flight job refuses the release while either is still a placeholder, so
+this cannot be forgotten into a tag. To fill them in:
+
+```sh
+# The commit a release tag points at, without cloning anything.
+# Put the tag you actually intend to adopt in place of <tag>; the version
+# numbers are deliberately not written down here, because a version copied
+# from a document is a version nobody checked.
+gh api repos/actions/attest-build-provenance/git/refs/tags/<tag> --jq '.object.sha'
+gh api repos/sigstore/cosign-installer/git/refs/tags/<tag> --jq '.object.sha'
+```
+
+Read what changed in that release first, and respect the seven day cooldown in
+`renovate.json`. If the tag is annotated the reference
+above is a tag object rather than a commit, so dereference it:
+
+```sh
+gh api repos/<owner>/<repo>/git/tags/<sha-from-above> --jq '.object.sha'
+```
+
+Then write each one as `uses: owner/repo@<40 hex characters>  # vX.Y.Z` and run
+the tests below. `tools/release/test_release_workflow.py` refuses a bare tag
+anywhere in any workflow, and refuses a commit pin with no version comment
+beside it.
+
+While the pins are placeholders, the cosign version itself is also unpinned:
+`sigstore/cosign-installer` installs its own default. Pin it at the same time
+by passing `cosign-release` to that step.
 
 ## Before publishing the draft
 
 Read the draft before making it visible. This is the step that exists because a
 published page has twice carried something wrong here for days.
 
-- [ ] Nine files are attached: four archives, four SBOM files (one per
-      published crate), and `SHA256SUMS`.
+- [ ] Twenty-seven files are attached: nine artefacts (four archives, four
+      SBOM files, one per published crate, and `SHA256SUMS`) and a `.sig` and
+      a `.pem` for each of them.
 - [ ] Download one archive, run `sha256sum -c SHA256SUMS`, unpack it and run
       `./stegobench --version`. The version it prints matches the tag.
+- [ ] Verify a signature the way a stranger would, from the downloaded files
+      rather than from this checkout, and verify `SHA256SUMS` itself:
+
+      ```sh
+      TAG=v1.2.3
+      ARCHIVE=stegobench-$TAG-x86_64-unknown-linux-musl.tar.gz
+
+      for f in "$ARCHIVE" SHA256SUMS; do
+        cosign verify-blob \
+          --certificate "$f.pem" \
+          --signature "$f.sig" \
+          --certificate-identity-regexp '^https://github\.com/elementmerc/stegobench/\.github/workflows/release\.yml@refs/tags/v' \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          "$f"
+      done
+
+      gh attestation verify "$ARCHIVE" --repo elementmerc/stegobench
+      ```
+
+- [ ] The identity in that command is the one the README tells a downloader to
+      paste. If they have drifted apart, every reader's verification fails and
+      the project looks compromised.
 - [ ] The notes are the CHANGELOG section and read as intended out of context.
 - [ ] The title carries the codename.
 - [ ] Nothing in the archive is a path, hostname or file from this machine.
@@ -129,9 +244,18 @@ the `Release` workflow.
 
 ## Known gaps, stated rather than discovered
 
-- **The archives are not signed.** `SHA256SUMS` says the bytes haven't changed
-  since they were built; it says nothing about who built them. Signing is the
-  next thing this path needs.
+- **The two signing actions are not pinned yet.** See "Filling in the signing
+  pins" above. The release refuses to run until a human has resolved both
+  SHAs, so this is a blocked release rather than a silent hole.
+- **Nobody has run the signing path end to end.** It is tested offline against
+  a stub cosign by `tools/release/test_sign_artefacts.py`, which proves the
+  control flow and proves nothing about the real tool's flags. The first
+  tagged run is where that gets established, which is another reason the
+  release is a draft.
+- **The signatures are not listed in `SHA256SUMS`.** The checksum file is
+  written before anything is signed, so the `.sig` and `.pem` files are not in
+  it. They don't need to be: a signature is checked by verifying it, not by
+  comparing it against a list.
 - **The macOS archive is not byte-reproducible.** macOS ships bsdtar, which
   has none of GNU tar's determinism flags, so the macOS tarball's metadata can
   differ between two builds of the same commit. The Linux archives are
