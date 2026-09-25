@@ -134,6 +134,32 @@ hash cannot. `stegobench` refuses to load a registry entry whose image is \
 named by tag rather than digest, so an unreproducible tool cannot enter the \
 registry by accident.
 
+WHY BOTH, AND WHAT EACH COSTS YOU
+
+Neither shape could go. Without containers a tool would run as you, with your \
+network and your files, and two people could never run identical bytes. \
+Without local binaries every contributor would have to publish a container \
+before they could register a tool, and a commercial or platform specific \
+program could not be measured at all.
+
+  container   sandboxed, no network, identical bytes on every machine.
+              Costs you a container runtime, and on macOS or Windows that
+              runtime is a Linux virtual machine.
+  local       native speed, nothing to install but the tool itself. Costs
+              you the sandbox, and the hash pins the file on YOUR machine:
+              two people who both built from source get different hashes for
+              the same version and neither is wrong.
+
+You never choose between them when you RUN something. You name a detector and \
+`stegobench` uses whatever route its entry declares; `list` prints which, and \
+a result records it so a reader knows whether the number travels.
+
+A binary entry may also declare `platforms`. A tool that only exists on \
+Windows is not broken on a Mac, and `doctor` says it cannot run here rather \
+than reporting it missing and sending you after a package that does not exist \
+for you. Leaving the field out means nobody has said, which is not a claim \
+that it runs everywhere.
+
 Every entry also declares a self-test: a fixture it must flag and a fixture \
 it must clear. A tool that is merely PRESENT is not a tool that WORKS, and \
 this project has hit the failure mode of a check that could not fail more \

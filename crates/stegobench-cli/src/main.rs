@@ -30,6 +30,7 @@ use stegobench_cli::help_topics;
 use stegobench_cli::score;
 use stegobench_core::registry::{Kind, Registry};
 use stegobench_core::{exit, ManifestV1, Result1, RunV1};
+use stegobench_plugin::availability::Presence;
 use stegobench_plugin::{availability, selftest, Verified};
 
 /// What a subcommand produced: a JSON value for stdout, and human text for stderr.
@@ -270,6 +271,10 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
 
     let mut rows = Vec::new();
     let (mut missing, mut broken, mut passed, mut skipped, mut answered) = (0, 0, 0, 0, 0);
+    // Counted apart from `missing` on purpose. A tool that cannot run on this
+    // operating system is not a thing the reader failed to install, and a
+    // count that lumps the two together reads as a job of work waiting.
+    let mut unsupported = 0;
 
     for entry in reg.entries.values() {
         let mut check = availability::check(entry);
@@ -286,8 +291,10 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
             Verified::Failed(_) => Some(false),
             Verified::Skipped(_) | Verified::Answered(_) => None,
         };
-        if !check.presence.is_present() {
-            missing += 1;
+        match &check.presence {
+            Presence::Unsupported { .. } => unsupported += 1,
+            p if !p.is_present() => missing += 1,
+            _ => {}
         }
         match &verdict {
             Verified::Passed => passed += 1,
@@ -318,6 +325,13 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
          {missing} not installed, {skipped} not checked.",
         rows.len()
     ));
+    if unsupported > 0 {
+        human.push(format!(
+            "{unsupported} of those cannot run on {} at all, so nothing to \
+             install would change it.",
+            std::env::consts::OS
+        ));
+    }
     if answered > 0 {
         human.push(
             "An answering subject is installed and responding. Whether it \n\
@@ -340,6 +354,7 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
         "verified": passed,
         "broken": broken,
         "missing": missing,
+        "unsupported_here": unsupported,
         "not_checked": skipped,
         "answering": answered,
         "tools": rows.iter().map(|(c, v, d)| serde_json::json!({
