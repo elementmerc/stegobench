@@ -1239,4 +1239,36 @@ must_clear = "b.png"
         r.entries.insert("stegcore".into(), e);
         assert_eq!(r.footprint().bundled_mb, 109);
     }
+
+    /// The worked example in the README is the first registry entry anybody
+    /// writes, because they copy it.
+    ///
+    /// It was wrong. `size_mb = 200` with `bundled = false` is refused, since
+    /// the flag is derived from the size rather than chosen, so a newcomer
+    /// following the documentation hit an error on their first attempt. A
+    /// reviewer found it by trying the instructions rather than reading them.
+    ///
+    /// This parses the block out of the README itself, so the test is the
+    /// document: editing the example without validating it fails here.
+    #[test]
+    fn the_readme_example_entry_is_one_the_registry_accepts() {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+        )
+        .expect("the README is two levels up from this crate");
+
+        let start = readme
+            .find("name = \"my-detector\"")
+            .expect("the README still carries a detector example");
+        let block = &readme[start..];
+        let end = block.find("```").expect("the example is a fenced block");
+        // The example writes a digest as an ellipsis, because a real one is 64
+        // characters of noise in the middle of an explanation.
+        let body = block[..end].replace("sha256:...", &format!("sha256:{}", "a".repeat(64)));
+
+        let entry: Entry = toml::from_str(&body).expect("the example parses as TOML");
+        if let Err(problems) = entry.validate() {
+            panic!("the README example is refused by the registry: {problems:?}");
+        }
+    }
 }

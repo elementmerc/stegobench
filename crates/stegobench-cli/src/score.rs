@@ -447,6 +447,90 @@ mod tests {
         );
     }
 
+    /// A detector that scores by file size, so a test can measure without
+    /// installing anything.
+    fn sizing_detector(dir: &Path) -> Entry {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("size.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\n\
+             wc -c < \"$1\" | tr -d ' ' | awk '{print $1/1000}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        toml::from_str(&format!(
+            "name = \"sizer\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"\n\
+             [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n",
+            script.display().to_string()
+        ))
+        .expect("parses")
+    }
+
+    #[test]
+    fn two_runs_over_the_same_corpus_agree_on_every_number() {
+        // Baseline Section 2.1 asks for byte-identical output from two runs,
+        // and a result document cannot give that: it records when the run
+        // started and how long it took, and those genuinely differ. So what
+        // is asserted is the part a reader acts on. If the metrics moved
+        // between two runs over unchanged bytes, the measurement would not be
+        // a measurement.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+
+        let first = score(&entry, &request(&root, None), |_| {})
+            .expect("first run")
+            .0;
+        // A second records file, so the second run genuinely re-scores rather
+        // than resuming and agreeing with itself by construction.
+        let mut second_request = request(&root, None);
+        second_request.records = root.with_extension("second.jsonl");
+        let second = score(&entry, &second_request, |_| {})
+            .expect("second run")
+            .0;
+
+        assert_eq!(first.metrics, second.metrics);
+        assert_eq!(first.corpus, second.corpus);
+        assert_eq!(first.declarations, second.declarations);
+        assert_eq!(first.subject, second.subject);
+    }
+
+    #[test]
+    fn a_resumed_run_reports_the_same_numbers_as_an_uninterrupted_one() {
+        // The failure this prevents is the worst kind: a resumed run that
+        // quietly measures less than it claims, because the resumed items
+        // were counted as done but never joined to their labels.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+
+        let whole = score(&entry, &request(&root, None), |_| {})
+            .expect("whole")
+            .0;
+
+        // Score part, then finish, against one records file. The limit has to
+        // reach past the clean images: enumeration is sorted, so a limit of
+        // three here would score `c000` to `c002` and nothing else, and a
+        // one-sided run is correctly refused before it can be resumed.
+        let mut partial = request(&root, Some(4));
+        partial.records = root.with_extension("resumed.jsonl");
+        score(&entry, &partial, |_| {}).expect("partial");
+        let mut rest = request(&root, None);
+        rest.records = partial.records.clone();
+        let (resumed, tally) = score(&entry, &rest, |_| {}).expect("resumed");
+
+        assert_eq!(tally.resumed, 4, "the scored part should have been reused");
+        assert_eq!(whole.metrics, resumed.metrics);
+    }
+
     #[test]
     fn an_embedder_is_refused_rather_than_scored() {
         // Asking an embedder to tell two images apart produces a number that

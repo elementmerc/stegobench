@@ -73,7 +73,9 @@ licence = "MIT"
 [image]
 reference = "ghcr.io/you/my-detector@sha256:..."   # a tag is refused
 size_mb = 200
-bundled = false
+bundled = true            # derived from the size, not chosen: true at or
+                          # below 750 MB, and the registry refuses a file
+                          # whose flag disagrees with its own size
 
 [emits]
 output = "score"          # or "verdict" if it only says yes or no
