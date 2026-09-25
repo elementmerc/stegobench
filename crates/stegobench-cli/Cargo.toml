@@ -13,6 +13,51 @@ documentation = "https://docs.rs/stegobench-cli"
 keywords = ["steganalysis", "steganography", "benchmark", "forensics", "cli"]
 categories = ["command-line-utilities", "science", "multimedia::images"]
 
+# ── cargo-binstall ──────────────────────────────────────────────────────────
+#
+# `cargo binstall stegobench-cli` should fetch the archive `release.yml` built
+# rather than compile the workspace. Every URL below was derived from what that
+# workflow actually names its assets, not from binstall's defaults, because
+# three things here differ from the convention binstall assumes:
+#
+#  1. The archives are named after the BINARY (`stegobench`), not the package
+#     (`stegobench-cli`), so `{ name }` is wrong and the literal is used.
+#  2. The release tag carries a leading `v` and the crate version does not, so
+#     the path segment is `v{ version }`.
+#  3. `universal-apple-darwin` is not a rustup target. binstall will report a
+#     real Apple triple, so both of them are pointed at the one fat archive.
+#
+# The Linux archives are static musl builds, so the two GNU triples are pointed
+# at the musl ones deliberately: the binary runs there, and leaving it to
+# binstall's own musl fallback would make that a coincidence rather than a
+# decision. Every `bin-dir` matches the single directory the workflow puts
+# inside each archive.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/stegobench-v{ version }-{ target }.tar.gz"
+bin-dir = "stegobench-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/stegobench-v{ version }-x86_64-unknown-linux-musl.tar.gz"
+bin-dir = "stegobench-v{ version }-x86_64-unknown-linux-musl/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/stegobench-v{ version }-aarch64-unknown-linux-musl.tar.gz"
+bin-dir = "stegobench-v{ version }-aarch64-unknown-linux-musl/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/stegobench-v{ version }-universal-apple-darwin.tar.gz"
+bin-dir = "stegobench-v{ version }-universal-apple-darwin/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/stegobench-v{ version }-universal-apple-darwin.tar.gz"
+bin-dir = "stegobench-v{ version }-universal-apple-darwin/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/stegobench-v{ version }-x86_64-pc-windows-msvc.zip"
+bin-dir = "stegobench-v{ version }-x86_64-pc-windows-msvc/{ bin }{ binary-ext }"
+pkg-fmt = "zip"
+
 [lib]
 name = "stegobench_cli"
 path = "src/lib.rs"
