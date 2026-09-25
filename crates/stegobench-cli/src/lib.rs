@@ -9,3 +9,4 @@
 
 pub mod cli;
 pub mod help_topics;
+pub mod score;

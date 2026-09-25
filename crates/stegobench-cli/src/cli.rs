@@ -157,14 +157,43 @@ pub enum Command {
         no_selftest: bool,
     },
 
-    /// Score a corpus with one or more detectors
+    /// Score a corpus with a detector
+    ///
+    /// Reads every sample under --corpus, asks the detector about each one,
+    /// and writes a result-v1 document naming the exact bytes it measured.
+    ///
+    /// The run is resumable. Every answer is written to the records file as it
+    /// is produced, and running the same command again picks up where it
+    /// stopped rather than starting over.
     ///
     /// Example:
-    ///   stegobench score --corpus pentimento-core
+    ///   stegobench score --corpus ./pentimento-nano --detector zsteg
     Score {
-        /// Corpus name or directory.
-        #[arg(long, value_name = "NAME_OR_PATH")]
-        corpus: String,
+        /// A directory of samples: images with a JSON record beside each.
+        #[arg(long, value_name = "DIR")]
+        corpus: std::path::PathBuf,
+        /// Which registered detector to ask. See `stegobench list detectors`.
+        #[arg(long, value_name = "NAME")]
+        detector: String,
+        /// Where the per-item answers are kept, and where a resumed run reads
+        /// what is already done. Defaults to <corpus>.records.jsonl beside the
+        /// corpus.
+        #[arg(long, value_name = "FILE")]
+        records: Option<std::path::PathBuf>,
+        /// Where to write the result-v1 document. Defaults to stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        /// Seconds any single image is given before the detector is killed and
+        /// that item is recorded as an error.
+        #[arg(long, value_name = "SECONDS", default_value = "60")]
+        timeout: u64,
+        /// Score at most this many items, for a smoke test.
+        ///
+        /// A run that uses this is marked `custom` in the result and cannot be
+        /// quoted as a tier number, because a prefix of a corpus is not the
+        /// corpus.
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
     },
 
     /// Emit a shell completion script

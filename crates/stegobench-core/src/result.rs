@@ -358,8 +358,17 @@ impl Result1 {
         }
         // A tag where a digest belongs is the single most common way a result
         // becomes unreproducible, so it is named rather than left to the reader.
+        //
+        // TWO SHAPES ARE PINNED, NOT ONE. A container carries its digest after
+        // an `@`. A binary plugin carries the SHA-256 of the bytes that were
+        // actually executed, which has no `@` and is the stronger of the two:
+        // a registry can move a tag under you, and it cannot change a file you
+        // have already hashed. Insisting on the `@` refused every result this
+        // harness produces for its own binary entries, which was found by the
+        // harness refusing its own first real run.
         for p in &self.provenance.plugins {
-            if !p.image.contains('@') {
+            let pinned = p.image.contains('@') || p.image.starts_with("sha256:");
+            if !pinned {
                 bad.push(format!(
                     "plugin {:?} names image {:?}, which is not pinned by digest",
                     p.name, p.image
@@ -469,6 +478,27 @@ mod tests {
     fn a_mutable_image_tag_is_refused_because_it_cannot_be_reproduced() {
         let mut r = sample();
         r.provenance.plugins[0].image = "ghcr.io/x/y:latest".into();
+        assert!(r.validate().unwrap_err()[0].contains("not pinned by digest"));
+    }
+
+    #[test]
+    fn a_binary_plugin_is_pinned_by_the_hash_of_what_ran() {
+        // A local program has no registry and no tag. The SHA-256 of the file
+        // that was executed pins it harder than a digest does, and refusing it
+        // rejected every result this harness produces for its own binary
+        // entries, which is how this was found.
+        let mut r = sample();
+        r.provenance.plugins[0].image =
+            "sha256:e5cb26609a59ac554cb4bca9763fa206977f3e5e584eb8bf62afa260c1cb36f0".into();
+        assert!(r.validate().is_ok(), "{:?}", r.validate());
+    }
+
+    #[test]
+    fn a_bare_version_string_is_still_refused() {
+        // The rule has to keep catching the thing it was written for: a
+        // version that names no particular bytes.
+        let mut r = sample();
+        r.provenance.plugins[0].image = "1.4.2".into();
         assert!(r.validate().unwrap_err()[0].contains("not pinned by digest"));
     }
 

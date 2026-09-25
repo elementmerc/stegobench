@@ -22,11 +22,12 @@
 //! forever.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command};
 use stegobench_cli::help_topics;
+use stegobench_cli::score;
 use stegobench_core::registry::{Kind, Registry};
 use stegobench_core::{exit, ManifestV1, Result1, RunV1};
 use stegobench_plugin::{availability, selftest, Verified};
@@ -509,6 +510,96 @@ fn cmd_help(topic: Option<&str>) -> Output {
 /// They exist in the tree from the first release so the vocabulary is fixed
 /// before anyone depends on it, and they exit 8 with the reason rather than
 /// pretending to work.
+#[allow(clippy::too_many_arguments)]
+fn cmd_score(
+    registry_dir: &Path,
+    corpus: &Path,
+    detector: &str,
+    records: Option<&Path>,
+    out: Option<&Path>,
+    timeout: u64,
+    limit: Option<u64>,
+) -> Output {
+    let reg = match load_registry(registry_dir) {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let Some(entry) = reg.entries.get(detector) else {
+        return Output::err(
+            exit::USAGE,
+            format!(
+                "no tool named {detector:?} is registered. \
+                 `stegobench list detectors` shows what is."
+            ),
+        );
+    };
+
+    // The records file sits beside the corpus by default, named after it, so
+    // two runs over two corpora cannot resume from each other's answers.
+    let records = records.map(PathBuf::from).unwrap_or_else(|| {
+        let mut name = corpus.file_name().unwrap_or_default().to_os_string();
+        name.push(".records.jsonl");
+        corpus.with_file_name(name)
+    });
+
+    let request = score::Request {
+        corpus,
+        records,
+        timeout: std::time::Duration::from_secs(timeout),
+        limit,
+    };
+
+    // Progress goes to stderr, so `--json` on stdout stays machine readable
+    // while a person can still watch a run that takes hours.
+    let report = |line: &str| eprintln!("  {line}");
+    let (result, tally) = match score::score(entry, &request, report) {
+        Ok(pair) => pair,
+        Err(e) => return Output::err(exit::PLUGIN_FAILED, e.to_string()),
+    };
+
+    // Validated before it is written, not after. A document this refuses is
+    // one no reader should have been handed in the first place.
+    if let Err(problems) = result.validate() {
+        return Output::err(
+            exit::SCHEMA_INVALID,
+            format!(
+                "the run finished but produced a result that does not \
+                 validate, which is a bug in this harness rather than in the \
+                 detector:\n  {}",
+                problems.join("\n  ")
+            ),
+        );
+    }
+
+    let body = match serde_json::to_string_pretty(&result) {
+        Ok(b) => b,
+        Err(e) => return Output::err(exit::FAILURE, format!("could not write the result: {e}")),
+    };
+    if let Some(path) = out {
+        if let Err(e) = std::fs::write(path, format!("{body}\n")) {
+            return Output::err(
+                exit::FAILURE,
+                format!("could not write the result to {}: {e}", path.display()),
+            );
+        }
+    }
+
+    let value = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+    Output::ok(
+        value,
+        format!(
+            "{} scored, {} resumed, {} could not be answered. AUC {:.4} over \
+             {} clean and {} stego image(s).",
+            tally.scored,
+            tally.resumed,
+            result.metrics.n_error,
+            result.metrics.auc,
+            result.metrics.n_clean,
+            result.metrics.n_stego,
+        ),
+    )
+}
+
 fn not_yet(what: &str, tracked_as: &str) -> Output {
     Output::err(
         exit::ENVIRONMENT_UNFIT,
@@ -531,7 +622,22 @@ fn run(cli: &Cli) -> Output {
             fixtures,
             no_selftest,
         } => cmd_doctor(&cli.registry, fixtures, *no_selftest),
-        Command::Score { .. } => not_yet("score", "needs the plugin host"),
+        Command::Score {
+            corpus,
+            detector,
+            records,
+            out,
+            timeout,
+            limit,
+        } => cmd_score(
+            &cli.registry,
+            corpus,
+            detector,
+            records.as_deref(),
+            out.as_deref(),
+            *timeout,
+            *limit,
+        ),
         Command::Completions { shell } => cmd_completions(*shell),
         Command::Help { topic } => cmd_help(topic.as_deref()),
     }
@@ -634,7 +740,15 @@ mod tests {
             vec!["stegobench", "--json", "plan", "score"],
             vec!["stegobench", "--json", "doctor"],
             vec!["stegobench", "--json", "doctor", "--no-selftest"],
-            vec!["stegobench", "--json", "score", "--corpus", "x"],
+            vec![
+                "stegobench",
+                "--json",
+                "score",
+                "--corpus",
+                "x",
+                "--detector",
+                "y",
+            ],
             vec!["stegobench", "--json", "completions", "bash"],
             vec!["stegobench", "--json", "help", "pairing"],
             vec!["stegobench", "--json", "help"],
