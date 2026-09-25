@@ -48,11 +48,12 @@ those parsers are hostile input handlers and run the whole thing somewhere you
 can afford to lose.
 
 **Containers are the isolation, and they're not perfect.** When the harness
-runs a containerised tool, which today means `stegobench doctor` putting one
-through its self test, it does so with the network switched off, every
-capability dropped, no new privileges, a read-only root filesystem, a 2 GB
-memory cap, the image under test mounted read-only, and a deadline that kills
-a run that hangs. That's a meaningful reduction in blast radius; it isn't a
+runs a containerised tool, whether that's `stegobench doctor` putting one
+through its self test or `stegobench score` walking it over a whole corpus, it
+does so with the network switched off, every capability dropped, no new
+privileges, a read-only root filesystem, a 2 GB memory cap, the image under
+test mounted read-only, and a deadline that kills a run that hangs. That's a
+meaningful reduction in blast radius; it isn't a
 guarantee against a container escape, and a kernel bug defeats all of it. For
 genuinely untrusted material, put a virtual machine or a separate host between
 the work and anything you care about.

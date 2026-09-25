@@ -5,9 +5,8 @@
 > can check.
 
 This file is for a model deciding whether and how to call this tool. It
-describes what exists today, not a roadmap; a future version is not promised
-here even where a command is scoped but not yet built, and those are marked
-explicitly below.
+describes what exists today, not a roadmap. Every command listed below is
+built and tested; nothing is named here that you cannot call.
 
 ## What this is, in one paragraph
 

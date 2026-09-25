@@ -3,12 +3,12 @@
 # Comment: Christ is King
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Daniel Iwugo
-"""One way in to forty-two programs.
+"""One way in to forty-five programs.
 
 WHY
 ---
 Until now the only way to use any of this was to clone the repository, work out
-which of forty-two files does the thing you want, guess the dependency set, and
+which of forty-five files does the thing you want, guess the dependency set, and
 run `python generators/whichever.py`. That is a pile of scripts rather than a
 tool, and the difference is most of what decides whether anybody else ever uses
 it.
