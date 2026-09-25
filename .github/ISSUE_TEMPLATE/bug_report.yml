@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# The doctor output is required rather than optional because almost every bug
+# report about this harness turns out to be a question about what this machine
+# could actually run, and that answer takes one command to produce and a long
+# exchange of messages to reconstruct without it.
+name: Bug report
+description: Something in the harness or the generators behaved wrongly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please don't report a security problem here. See
+        [SECURITY.md](https://github.com/elementmerc/stegobench/blob/dev/SECURITY.md)
+        for where those go.
+
+        Two limits on `stegobench score` are deliberate rather than bugs.
+        It reads an unpacked corpus directory, so a packed tier has to be
+        extracted first, and it marks every such run `custom` in the result.
+        The README's "What's here today, honestly" section is the current
+        statement of what works; please check it before filing.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I ran ... and expected ..., but it ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: Copied and pasted, with its output. Add `--json` if the command takes it.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `stegobench doctor --json`
+      description: >-
+        This says which registered tools this machine can actually run and what
+        happened when it asked them. Exit code 8 with tools reported missing is
+        normal on a machine that hasn't pulled the images, so paste the output
+        whatever the exit code was. If the bug is that `doctor` itself fails,
+        say so here and paste whatever it printed.
+      render: json
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `stegobench --version`, plus the commit if you built from a clone.
+      placeholder: "stegobench 0.1.0, commit abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: half
+    attributes:
+      label: Which half
+      options:
+        - The Rust harness (stegobench)
+        - The Python generators (pentimento)
+        - The registry or a plugin entry
+        - The documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, macOS 15.2, Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Container runtime, if the bug involves one
+      description: Output of `docker --version`. Leave blank if no container was involved.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you file
+      options:
+        - label: I've read the "What's here today, honestly" section of the README and this isn't a feature that's documented as not built yet.
+          required: true

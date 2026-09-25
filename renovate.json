@@ -1,0 +1,91 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Dependency updates for both halves of this repository, proposed by a bot and merged by a human.",
+    "THE SEVEN DAY COOLDOWN IS THE POINT. minimumReleaseAge holds every update back until its version has been public for seven days. The attack this defends against is a package that is compromised, published, and used to harvest credentials from everyone who installs it within hours. Most compromised releases are spotted and pulled within days, so a version that is a week old has survived the window in which almost all of that damage is done. A dependency graph is attack surface and every entry in it runs with our privileges.",
+    "The cooldown is not the detection path for a vulnerability that is already known. CI runs cargo audit and pip-audit on every push and fails the build rather than warning, so a dependency with a published advisory is loud immediately whether or not a Renovate branch exists for it yet.",
+    "NOTHING AUTOMERGES. The baseline rule is that the bot proposes and a human reviews and approves, so automerge is off everywhere and there is no rule below that turns it back on for a subset.",
+    "requirements.lock is ignored on purpose. It is not a lockfile to be kept current: it records the exact environment that produced the published corpus, including the JIT compiler behind the code that decides which pixels carry a payload. Updating it would destroy the record it exists to be.",
+    "requirements.txt is pinned to the versions the published numbers were measured against, so an update there is a decision about the measurement rather than routine maintenance. The bot may raise it; a person decides it."
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":dependencyDashboard",
+    ":semanticCommitsDisabled"
+  ],
+  "baseBranches": [
+    "dev"
+  ],
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "automerge": false,
+  "labels": [
+    "dependencies"
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "enabledManagers": [
+    "cargo",
+    "pip_requirements",
+    "pep621",
+    "github-actions",
+    "npm"
+  ],
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/target/**",
+    "private/**",
+    "requirements.lock"
+  ],
+  "packageRules": [
+    {
+      "description": "Rust crates, one pull request rather than a stream of them. The workspace dependency set is deliberately small, so grouping keeps the whole set reviewable in a single read.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "groupName": "Rust dependencies",
+      "commitMessageTopic": "Rust dependencies"
+    },
+    {
+      "description": "Python packages for the generators. Grouped for the same reason, and never merged without someone deciding whether the numbers move.",
+      "matchManagers": [
+        "pip_requirements",
+        "pep621"
+      ],
+      "groupName": "Python dependencies",
+      "commitMessageTopic": "Python dependencies"
+    },
+    {
+      "description": "GitHub Actions, pinned by commit hash rather than by tag. A tag can be repointed at any commit by whoever owns the repository it lives in, which is how the tj-actions/changed-files compromise reached everyone who wrote @v4.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions",
+      "commitMessageTopic": "GitHub Actions",
+      "pinDigests": true
+    },
+    {
+      "description": "The documentation site's packages. They build a static site and never touch a measurement, so they are grouped and kept out of the way of the two sets that do.",
+      "matchManagers": [
+        "npm"
+      ],
+      "groupName": "Documentation site dependencies",
+      "commitMessageTopic": "documentation site dependencies"
+    },
+    {
+      "description": "A major version of anything is its own pull request. Grouping a breaking change in with routine bumps is how a breaking change gets waved through.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": null,
+      "labels": [
+        "dependencies",
+        "major"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# This file cites the HARNESS. The corpus it was built to score, Pentimento,
+# lives in its own repository and carries its own citation, because a citation
+# should point at the data rather than at the tool that made it.
+#
+# There is deliberately no `version`, no `date-released` and no `doi` here.
+# Nothing has been tagged and no archive has minted an identifier, so every one
+# of those fields would be a guess, and a guessed identifier in a citation is
+# exactly the failure this project argues against elsewhere. They go in when
+# they are true.
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Stegobench"
+abstract: >-
+  A reproducible benchmark for steganalysis. Stegobench runs detectors and
+  embedders as sandboxed plugins declared in a registry, checks that the
+  machine can actually run them before it believes a result, and reports
+  measurements as a versioned JSON document that names the exact bytes the
+  number was taken on.
+type: software
+authors:
+  - family-names: "Iwugo"
+    given-names: "Daniel"
+license: AGPL-3.0-or-later
+repository-code: "https://github.com/elementmerc/stegobench"
+keywords:
+  - steganalysis
+  - steganography
+  - benchmark
+  - reproducibility
+  - digital forensics

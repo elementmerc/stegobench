@@ -112,6 +112,57 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    # WHAT AN AUDIT TOOL DOES AND DOES NOT CATCH
+    #
+    # Both tools below compare our dependency set against a database of
+    # advisories somebody has already published. That catches the known and
+    # nothing else: a package compromised this morning is not in any database
+    # this afternoon, and the credential-harvesting cascades that make the
+    # dependency graph worth worrying about run on exactly that gap. The two
+    # defences that do cover it are the seven day cooldown in `renovate.json`,
+    # which keeps a version out until the window in which most compromises are
+    # found has passed, and not running untrusted builds as the user who holds
+    # the keys. This job is the third layer, not the only one.
+    #
+    # It fails rather than warns. An advisory that prints in green text is one
+    # everybody learns to scroll past, and this job is worth nothing the day
+    # that happens.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-audit
+        # Deliberately not pinned to a version, which is the one exception to
+        # the pinning rule in this file and needs saying out loud. An audit
+        # tool held at an old version stops recognising the advisory format it
+        # is there to read, so freezing it defeats the job. The exposure is
+        # bounded: it runs in a throwaway runner, in a job with read-only
+        # permissions, with no credentials to take.
+        run: cargo install cargo-audit --locked
+      - name: Rust advisories
+        # `--deny warnings` makes an unmaintained or yanked crate fatal too.
+        # That means an advisory published upstream can turn this red with no
+        # commit of ours in between, and that is the intended reading: the job
+        # reports on the dependency set, not on the last change to it.
+        run: cargo audit --deny warnings
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install pip-audit
+        # Unpinned for the same reason as cargo-audit above.
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Python advisories
+        # `requirements.txt` only. `requirements.lock` is deliberately left
+        # out: it records the environment that produced the published corpus
+        # rather than the one we intend to install, so auditing it would turn
+        # this job permanently red for a historical fact nobody can change.
+        # `--strict` fails on a dependency the tool could not resolve, so a
+        # package skipped for being unreadable is a failure rather than a pass.
+        run: pip-audit --requirement requirements.txt --strict
+
   docs:
     name: ${{ matrix.name }} documentation builds
     runs-on: ubuntu-latest

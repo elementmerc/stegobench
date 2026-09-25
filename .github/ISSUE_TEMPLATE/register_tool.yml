@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# The fields here are the registry entry's own required fields, asked in plain
+# language. A proposal that can fill this in is a proposal that can be turned
+# into a TOML file; one that can't is one where the missing piece is worth
+# discovering before anybody writes code.
+name: Register a new tool or corpus
+description: Propose a detector, an embedder or a corpus for the registry
+labels: ["registry"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A tool is a TOML file under `plugins/registry/`, so you can send a pull
+        request instead of an issue if you'd rather. See
+        [CONTRIBUTING.md](https://github.com/elementmerc/stegobench/blob/dev/CONTRIBUTING.md)
+        and `stegobench help plugins`.
+
+        Use this form if you'd like to discuss it first, or if you're proposing
+        a tool you don't maintain.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is it
+      options:
+        - Detector, it judges whether an image carries a payload
+        - Embedder, it hides a payload in an image
+        - Corpus, a dataset to score against
+    validations:
+      required: true
+
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      description: What it's called, and the identifier you'd like it registered under.
+    validations:
+      required: true
+
+  - type: input
+    id: upstream
+    attributes:
+      label: Where it lives
+      description: The project's own repository or homepage.
+    validations:
+      required: true
+
+  - type: input
+    id: licence
+    attributes:
+      label: Licence
+      description: >-
+        An SPDX identifier if there is one. For a corpus, say what the terms
+        actually grant and where you read them, and say separately whether
+        redistribution is permitted, because that's a separate question from
+        whether you may use it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: how-to-run
+    attributes:
+      label: How it runs
+      description: >-
+        For a container, the image reference pinned by digest. A mutable tag is
+        refused, because a tag can be repointed after a measurement was taken.
+        For a locally installed program, the argv that invokes it and the
+        arguments that make it print its version. For a corpus, how somebody
+        downloads it and roughly how many covers it holds.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: selftest
+    attributes:
+      label: How we'd prove it works
+      description: >-
+        Every tool declares a self test with both directions: a fixture it must
+        flag and a fixture it must clear. A tool that answers "stego" to
+        everything passes a one-sided check, which is why both are required. An
+        embedder declares an embed and extract round trip on top of that, whose
+        recovered bytes have to match what went in. Skip this for a corpus.
+    validations:
+      required: false
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it's worth having
+      description: >-
+        What it measures that the thirteen tools already registered don't, or
+        what makes it a useful reference point.
+    validations:
+      required: true
+
+  - type: input
+    id: relationship
+    attributes:
+      label: Your relationship to it
+      description: Maintainer, user, or neither. This is recorded, not judged.
+    validations:
+      required: true
