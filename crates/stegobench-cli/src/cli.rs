@@ -240,7 +240,7 @@ pub enum Command {
     /// Example:
     ///   stegobench help pairing
     Help {
-        /// One of: pairing, splits, licences, plugins. Omit to list topics.
+        /// One of: pairing, splits, licences, plugins, results. Omit to list.
         #[arg(value_name = "TOPIC")]
         topic: Option<String>,
     },

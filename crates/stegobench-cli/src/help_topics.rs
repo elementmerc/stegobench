@@ -8,7 +8,7 @@
 //! the reasoning already carried in the code and in `generators/README.md`
 //! rather than pointing at it.
 
-pub const TOPICS: &[&str] = &["pairing", "splits", "licences", "plugins"];
+pub const TOPICS: &[&str] = &["pairing", "splits", "licences", "plugins", "results"];
 
 pub fn text(topic: &str) -> Option<&'static str> {
     match topic {
@@ -16,6 +16,7 @@ pub fn text(topic: &str) -> Option<&'static str> {
         "splits" => Some(SPLITS),
         "licences" => Some(LICENCES),
         "plugins" => Some(PLUGINS),
+        "results" => Some(RESULTS),
         _ => None,
     }
 }
@@ -62,6 +63,78 @@ variable is a real property of some arms and is kept on purpose to show what \
 it does, so the run happens and the result carries the fact. A cover leaking \
 across the train and test boundary makes the number wrong while it still \
 looks right, so that one refuses.
+";
+
+const RESULTS: &str = "\
+results: how to judge a number somebody else produced
+
+Somebody sends you a result-v1 document with an AUC of 0.94 in it. Every field \
+below was written by this harness from what actually happened rather than by \
+the person who ran it, so none of it has to be taken on trust. Check them in \
+this order, which is the order of what it costs to be wrong.
+
+1. WAS IT MEASURED ON THE CORPUS IT NAMES?
+
+  stegobench verify their-result.json --corpus ./the-corpus
+
+`corpus.digest` names the bytes the number came from. That recomputes it from \
+a corpus on your own disk and exits 5 if the two are not about each other. A \
+match proves the document and your copy describe the same records. It does not \
+prove the images match their records; that means rehashing every file and \
+belongs to whoever packed the release.
+
+2. IS IT COMPARABLE TO ANYBODY ELSE'S NUMBER?
+
+  declarations.configuration
+    named     the corpus entry declared a digest in advance and this run
+              matched it. It can sit in a table beside another named run
+    custom    comparable with itself. An unregistered directory, or a run
+              that scored part of a corpus
+
+`custom` is not a warning, it is most runs. What it rules out is quoting the \
+figure as a tier number.
+
+3. COULD IT BE MEASURING SOMETHING OTHER THAN STEGANOGRAPHY?
+
+  declarations.pairing
+    single-variable  every pair that could be compared matched on format,
+                     size, bit depth and channels. Read it as looked and
+                     found nothing, not as proof
+    confounded       at least one pair differs in something else, and the
+                     detector is partly measuring that
+    unverified       nothing could be compared, so nothing is claimed
+
+  declarations.split_discipline
+    by-cover         a cover and its stego twin stayed on one side
+    not-applicable   correct for an untrained detector
+
+A run whose corpus violated the split does not exist: the harness refuses \
+rather than producing the inflated number.
+
+4. WHO PRODUCED IT?
+
+`declarations.self_reported` is set by the submission path, never by the \
+submitter. `declarations.trained_on` names the corpus a trained detector saw, \
+and a detector scored on what it trained on is not being measured.
+
+5. WOULD YOU GET THE SAME NUMBER?
+
+`provenance.plugins[].route` decides how far it travels. A container digest \
+names bytes you can pull, so running the same command runs identical code. A \
+local binary's hash names a file on their machine, and two people who both \
+built from source get different hashes for the same version.
+
+`provenance.host` records the operating system and architecture, \
+`network_reachable` whether the tool could phone home, and `determinism` \
+whether two runs of that tool agree at all.
+
+THE SHORT VERSION
+
+A number is defensible when the digest checks out, pairing is \
+single-variable, the split is by-cover or genuinely not applicable, and \
+trained_on is absent or names something other than what it was scored on. \
+Everything else is a reason to ask one more question rather than to throw the \
+number away.
 ";
 
 const SPLITS: &str = "\

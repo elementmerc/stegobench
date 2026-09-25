@@ -69,7 +69,10 @@ the parts that are deliberately not finished.
   verification mismatch, 6 schema invalid, 7 licence refusal, 8 environment
   unfit, 130 interrupted.
 - `stegobench help <topic>` carries the conceptual reasoning that doesn't fit
-  on a flag: `pairing`, `splits`, `licences` and `plugins`.
+  on a flag: `pairing`, `splits`, `licences`, `plugins` and `results`.
+- `stegobench help results`, and a guide page beside it, say which fields of a
+  result to check before believing the number in it, in the order of what it
+  costs to be wrong.
 - Man pages are generated from the same command tree the binary parses
   against, so the two can't drift apart.
 

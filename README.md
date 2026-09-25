@@ -59,7 +59,8 @@ stdout and leaves progress and human text on stderr, so
 
 Conceptual reasoning that doesn't fit on a `--help` line lives behind
 `stegobench help <topic>`: try `stegobench help pairing` or
-`stegobench help plugins`.
+`stegobench help results`, which is how to judge a number somebody else
+produced.
 
 ## Adding your own detector
 
