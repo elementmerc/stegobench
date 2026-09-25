@@ -14,7 +14,11 @@ the parts that are deliberately not finished.
 ### CLI
 
 - Every command in the tree is built and tested: `list`, `describe`,
-  `doctor`, `schema`, `validate`, `plan`, `score`, `completions` and `help`.
+  `doctor`, `schema`, `validate`, `verify`, `plan`, `score`, `completions`
+  and `help`.
+- `stegobench verify` recomputes the corpus digest a result claims and says
+  whether the document and the corpus are about each other. A number somebody
+  sends you can now be checked rather than believed.
 - A result names the corpus it was measured on by digest, computed from what
   the corpus's own records declare, so it survives the corpus being extracted
   from a shard and moved.

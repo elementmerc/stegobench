@@ -35,7 +35,8 @@ pub struct ManifestV1 {
     pub file: String,
     /// Lower-case hex, 64 characters. Checked in [`ManifestV1::validate`]
     /// because a manifest whose digest is not actually a SHA-256 defeats the
-    /// entire point of `stegobench verify`.
+    /// entire point of recording one: a reader cannot tell a typo from a file
+    /// that changed.
     pub sha256: String,
     pub width: u32,
     pub height: u32,

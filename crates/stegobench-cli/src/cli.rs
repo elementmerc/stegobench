@@ -196,6 +196,26 @@ pub enum Command {
         limit: Option<u64>,
     },
 
+    /// Re-check a result against the corpus it says it measured
+    ///
+    /// A result names the bytes it was measured on by digest. This recomputes
+    /// that digest from a corpus on disk and says whether the two agree, so a
+    /// number somebody sent you can be checked rather than believed.
+    ///
+    /// Exits 5 when the digests disagree, which means the document and the
+    /// corpus are not about each other, whatever either one is called.
+    ///
+    /// Example:
+    ///   stegobench verify result.json --corpus ./pentimento-nano
+    Verify {
+        /// A result-v1 document.
+        #[arg(value_name = "FILE")]
+        file: std::path::PathBuf,
+        /// The corpus to check it against.
+        #[arg(long, value_name = "DIR")]
+        corpus: std::path::PathBuf,
+    },
+
     /// Emit a shell completion script
     ///
     /// Example:

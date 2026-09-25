@@ -28,6 +28,9 @@ progress still reaches a terminal.
   generated from the Rust types that actually write these documents.
 - `stegobench validate <file>`: check a document against whichever of the
   three schemas its own `schema` field names; exits 6 on a mismatch.
+- `stegobench verify <file> --corpus DIR`: recompute the corpus digest a
+  result claims and say whether the document and the corpus are about each
+  other; exits 5 when they are not.
 - `stegobench list <detectors|embedders|corpora|all>`: everything a registry
   can run, plus the datasets it knows about, read live from
   `plugins/registry/`, so it cannot go stale.

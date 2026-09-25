@@ -440,6 +440,109 @@ fn cmd_validate(file: &Path) -> Output {
     }
 }
 
+/// Re-checks a result against the corpus it claims to have measured.
+///
+/// The claim a result makes about its corpus is the one thing a reader cannot
+/// check by reading the document: every other field describes the run, and this
+/// one describes bytes somewhere else. So it is recomputed here rather than
+/// compared with itself.
+///
+/// The limit is stated rather than hidden. The digest names what the corpus's
+/// own records declare about their images, so a match proves the document and
+/// the corpus describe the same manifest. It does not prove the images match
+/// their records: that would mean rehashing every file, which is a different
+/// and much slower question, and the answer to it belongs to whoever packed
+/// the release.
+fn cmd_verify(file: &Path, corpus: &Path) -> Output {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            return Output::err(
+                exit::FAILURE,
+                format!("cannot read {}: {e}", file.display()),
+            )
+        }
+    };
+    let result: Result1 = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Output::err(
+                exit::SCHEMA_INVALID,
+                format!(
+                    "{} is not a result-v1 document: {e}. `stegobench validate \
+                     {}` says what is wrong with it",
+                    file.display(),
+                    file.display()
+                ),
+            )
+        }
+    };
+
+    if result.corpus.digest.is_empty() {
+        return Output::err(
+            exit::VERIFY_MISMATCH,
+            format!(
+                "{} names no corpus digest, so there is nothing to check it \
+                 against. A result written over a corpus whose records state \
+                 no digests of their own carries none, and cannot be verified \
+                 by this route",
+                file.display()
+            ),
+        );
+    }
+
+    let found = match score::corpus_digest(corpus) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Output::err(
+                exit::VERIFY_MISMATCH,
+                format!(
+                    "the corpus at {} cannot be named: at least one of its \
+                     records states no digest for its own image, so no digest \
+                     over it would mean what {} claims",
+                    corpus.display(),
+                    file.display()
+                ),
+            )
+        }
+        Err(e) => return Output::err(exit::FAILURE, e.to_string()),
+    };
+
+    let claimed = &result.corpus.digest;
+    let json = serde_json::json!({
+        "ok": &found == claimed,
+        "claimed": claimed,
+        "found": found,
+        "corpus": corpus.display().to_string(),
+    });
+    if &found == claimed {
+        let mut out = Output::ok(
+            json,
+            format!(
+                "{} was measured on the corpus at {}. Both name {claimed}",
+                file.display(),
+                corpus.display()
+            ),
+        );
+        out.code = exit::OK;
+        out
+    } else {
+        let mut out = Output::err(
+            exit::VERIFY_MISMATCH,
+            format!(
+                "{} and the corpus at {} are not about each other.\n  \
+                 the document claims {claimed}\n  the corpus is    {found}\n\
+                 Whatever the two are called, the number in that document was \
+                 not measured on these images",
+                file.display(),
+                corpus.display()
+            ),
+        );
+        out.json = json;
+        out
+    }
+}
+
 fn cmd_completions(shell: clap_complete::Shell) -> Output {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
@@ -717,6 +820,7 @@ fn run(cli: &Cli) -> Output {
     match &cli.command {
         Command::Schema { name } => cmd_schema(name),
         Command::Validate { file } => cmd_validate(file),
+        Command::Verify { file, corpus } => cmd_verify(file, corpus),
         Command::List { kind } => cmd_list(&cli.registry, kind),
         Command::Describe { name } => cmd_describe(&cli.registry, name),
         Command::Plan { command } => cmd_plan(&cli.registry, command),
@@ -875,10 +979,10 @@ mod tests {
         // required to hold at least the commands the docs name.
         let walked = root.get_subcommands().count();
         assert!(
-            walked >= 9,
-            "walked {walked} subcommand(s); the command tree should carry at \
-             least the nine 04-cli-surface.md names, so this walk looked at \
-             almost nothing"
+            walked >= 10,
+            "walked {walked} subcommand(s); the command tree carries schema, \
+             validate, verify, list, describe, doctor, plan, score, \
+             completions and help, so this walk looked at almost nothing"
         );
         for sub in root.get_subcommands() {
             let name = sub.get_name().to_string();
@@ -1134,17 +1238,135 @@ mod tests {
         assert_eq!(cmd_validate(&p).code, exit::SCHEMA_INVALID);
     }
 
+    /// A corpus of `n` samples whose records state the digests given.
+    fn corpus_named(root: &Path, digests: &[&str]) {
+        std::fs::create_dir_all(root).unwrap();
+        for (i, d) in digests.iter().enumerate() {
+            let role = if i == 0 { "clean" } else { "stego" };
+            std::fs::write(root.join(format!("i{i}.png")), b"\x89PNG\r\n\x1a\n").unwrap();
+            std::fs::write(
+                root.join(format!("i{i}.json")),
+                format!(r#"{{"role":"{role}","sha256":"{d}"}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    /// A result-v1 document claiming it was measured on `digest`.
+    fn result_claiming(path: &Path, digest: &str) {
+        let doc = serde_json::json!({
+            "schema": stegobench_core::result::RESULT_SCHEMA_ID,
+            "subject": {"name": "x", "version": "sha256:a", "kind": "detector"},
+            "corpus": {"name": "c", "source": "supplied", "digest": digest, "pairs": 2},
+            "arm": {"embedder": "wow", "domain": "spatial", "format": "png"},
+            "metrics": {"auc": 0.9, "tpr_at_fpr": {}, "n_clean": 1, "n_stego": 1, "n_error": 0},
+            "provenance": {
+                "plugins": [{"name": "x", "image": "sha256:a", "determinism": "nondeterministic"}],
+                "harness_version": "0.1.0",
+                "started_utc": "2026-09-25T00:00:00Z",
+                "elapsed_seconds": 1.0,
+                "network_reachable": false
+            },
+            "declarations": {
+                "split_discipline": "not-applicable",
+                "pairing": "unverified",
+                "configuration": "custom",
+                "self_reported": false
+            }
+        });
+        std::fs::write(path, serde_json::to_string(&doc).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn verify_agrees_when_the_document_and_the_corpus_are_the_same_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_named(&corpus, &["aa", "bb"]);
+        let digest = score::corpus_digest(&corpus)
+            .expect("readable")
+            .expect("named");
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+        let out = cmd_verify(&doc, &corpus);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert_eq!(out.json["ok"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn verify_refuses_a_corpus_the_document_was_not_measured_on() {
+        // The whole job. Two directories can have the same name, the same file
+        // count and different contents, and the number in a result is about
+        // exactly one of them.
+        let dir = tempfile::tempdir().unwrap();
+        let measured = dir.path().join("measured");
+        let other = dir.path().join("other");
+        corpus_named(&measured, &["aa", "bb"]);
+        corpus_named(&other, &["aa", "bc"]);
+        let digest = score::corpus_digest(&measured)
+            .expect("readable")
+            .expect("named");
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let out = cmd_verify(&doc, &other);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH);
+        assert!(out.human.contains("not about each other"), "{}", out.human);
+        assert_eq!(out.json["ok"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn verify_says_so_when_there_is_nothing_to_check() {
+        // A result over a corpus that cannot be named carries an empty digest,
+        // and comparing an empty string with an empty string would pass while
+        // proving nothing at all.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_named(&corpus, &["aa", "bb"]);
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, "");
+        let out = cmd_verify(&doc, &corpus);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH);
+        assert!(
+            out.human.contains("names no corpus digest"),
+            "{}",
+            out.human
+        );
+    }
+
+    #[test]
+    fn verify_refuses_a_corpus_that_cannot_be_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(corpus.join("a.json"), r#"{"role":"clean"}"#).unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, "sha256:whatever");
+        let out = cmd_verify(&doc, &corpus);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH);
+        assert!(out.human.contains("cannot be named"), "{}", out.human);
+    }
+
+    #[test]
+    fn verify_sends_a_document_that_is_not_a_result_to_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("x.json");
+        std::fs::write(&doc, r#"{"hello":"world"}"#).unwrap();
+        let out = cmd_verify(&doc, dir.path());
+        assert_eq!(out.code, exit::SCHEMA_INVALID);
+        assert!(out.human.contains("stegobench validate"), "{}", out.human);
+    }
+
     /// Drives the binary's own code to every exit code the contract in
     /// `stegobench_core::exit` names, or records plainly why a given code
     /// cannot be reached yet.
     ///
-    /// The table in `04-cli-surface.md` and the man page are only as good as
-    /// the binary's agreement with them: a documented code the binary never
-    /// actually returns is worse than no table, because a script or an agent
-    /// trusts the table. Codes 3 (pre-flight refusal) and 4 (plugin failure)
-    /// and 5 (verify mismatch) and 7 (licence refusal) genuinely have NO code
-    /// path yet, because the commands that would produce them (`plan`,
-    /// `score`, and any corpus-licence or provenance check) are not built.
+    /// The man page is only as good as the binary's agreement with it: a
+    /// documented code the binary never actually returns is worse than no
+    /// table at all, because a script or an agent trusts the table. Codes 3
+    /// (pre-flight refusal) and 7 (licence refusal) genuinely have NO code
+    /// path yet, because nothing refuses a run on grounds of capacity and no
+    /// corpus-licence gate is built.
     /// That is a true statement about this release, not a gap in the test:
     /// asserting it here means the day one of those codes becomes reachable
     /// without a test acknowledging it, this test starts failing to mention
@@ -1174,9 +1396,9 @@ mod tests {
         // driven in the score module's own tests, which can build a corpus
         // and a registry entry without this test constructing both.
 
-        // 5: verify mismatch. NOT YET REACHABLE: there is no `verify`
-        // subcommand yet (04-cli-surface.md names one; it is not in
-        // Command). See exit::VERIFY_MISMATCH.
+        // 5: verify mismatch. Reachable: `verify` recomputes a corpus digest
+        // and compares it with the one a result claims. Driven below, against
+        // a corpus the document was not measured on.
 
         // 6: schema invalid.
         {
