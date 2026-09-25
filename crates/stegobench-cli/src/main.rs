@@ -775,6 +775,46 @@ fn cmd_score(
         );
     };
 
+    // Asked before the corpus is walked, because the answer does not depend on
+    // the corpus and the walk is the expensive half. A run over a Core tier
+    // that discovers thirty seconds in that the detector was never installed
+    // has spent those thirty seconds finding out something it knew at the
+    // start. Baseline Section 2.1: pre-flight everything, before a long job
+    // rather than halfway through.
+    //
+    // Presence only. The self-test is `doctor`'s job and costs a container
+    // pull; refusing to start a run because a fixture is missing would be a
+    // different and much more annoying gate.
+    match availability::check(entry).presence {
+        Presence::Present { .. } => {}
+        Presence::Unsupported { reason } => {
+            return Output::err(
+                exit::PREFLIGHT_REFUSED,
+                format!("{detector} cannot run on this machine: {reason}"),
+            )
+        }
+        Presence::Absent { reason } => {
+            return Output::err(
+                exit::PREFLIGHT_REFUSED,
+                format!(
+                    "{detector} is registered but is not on this machine: \
+                     {reason}. `stegobench doctor` checks every registered \
+                     tool at once"
+                ),
+            )
+        }
+        Presence::Unknown { reason } => {
+            return Output::err(
+                exit::PREFLIGHT_REFUSED,
+                format!(
+                    "whether {detector} can run here could not be established: \
+                     {reason}. Refusing rather than starting a run that may \
+                     produce nothing"
+                ),
+            )
+        }
+    }
+
     // The records file sits beside the corpus by default, named after it, so
     // two runs over two corpora cannot resume from each other's answers.
     let records = records.map(PathBuf::from).unwrap_or_else(|| {
@@ -1412,9 +1452,34 @@ mod tests {
         assert_eq!(cmd_schema("not-a-real-schema").code, exit::USAGE);
         assert_eq!(cmd_help(Some("not-a-real-topic")).code, exit::USAGE);
 
-        // 3: pre-flight refusal. NOT YET REACHABLE: nothing refuses a run
-        // before starting it on grounds of capacity or fitness yet.
-        // See exit::PREFLIGHT_REFUSED.
+        // 3: pre-flight refusal. Reachable: `score` asks whether the detector
+        // is on this machine before it walks the corpus, and refuses rather
+        // than spending the walk to find out.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let reg = dir.path().join("detectors");
+            std::fs::create_dir_all(&reg).unwrap();
+            std::fs::write(
+                reg.join("ghost.toml"),
+                "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+                 [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
+                 version_args = [\"--version\"]\n\
+                 [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+            )
+            .unwrap();
+            let out = cmd_score(
+                dir.path(),
+                &dir.path().join("no-such-corpus"),
+                "ghost",
+                None,
+                None,
+                5,
+                None,
+            );
+            assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+            // Proof it refused on the tool rather than on the missing corpus.
+            assert!(out.human.contains("not on this machine"), "{}", out.human);
+        }
 
         // 4: plugin failure. Reachable now that `score` runs: an embedder
         // asked to tell two images apart is refused through this code. It is
