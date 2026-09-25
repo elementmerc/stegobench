@@ -68,14 +68,14 @@ def open_preserving_mode(path) -> Image.Image:
     return img.convert("RGB")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--covers", required=True, help="directory of source covers")
     ap.add_argument("--out", required=True, help="output root")
     ap.add_argument("--count", type=int, default=40)
     ap.add_argument("--bpp", type=float, default=0.5, help="bits per sample")
     ap.add_argument("--seed", type=int, default=20260915)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     covers = sorted(pathlib.Path(args.covers).glob("*.png"))[: args.count]
     if not covers:

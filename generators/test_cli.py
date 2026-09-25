@@ -16,7 +16,9 @@ is not installed.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
+import inspect
 import io
 import pathlib
 import sys
@@ -118,6 +120,110 @@ class DispatchTests(unittest.TestCase):
         code, _, err = run(broken[0].replace("_", "-"))
         self.assertEqual(code, 2)
         self.assertIn("pip install", err)
+
+
+HERE = pathlib.Path(__file__).resolve().parent
+
+
+def accepts(signature: inspect.Signature, *args: object) -> bool:
+    try:
+        signature.bind(*args)
+    except TypeError:
+        return False
+    return True
+
+
+def declared_signature(name: str) -> inspect.Signature | None:
+    """`main`'s signature read from the file, for a module that will not import.
+
+    Half the subcommands that carried this fault need an optional dependency,
+    so a check that can only inspect imported modules is a check that would
+    have caught half of them. Reading the source catches the rest on a machine
+    where `conseal` or `jpeglib` is absent. Only a module-level `def main`
+    counts: one generator carries a whole script in a string literal, and the
+    `main` inside that string is not this module's entry point.
+    """
+    source = (HERE / f"{name}.py").read_text(encoding="utf-8")
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef) or node.name != "main":
+            continue
+        args = node.args
+        positional = args.posonlyargs + args.args
+        first_default = len(positional) - len(args.defaults)
+        params = []
+        for index, arg in enumerate(positional):
+            kind = (inspect.Parameter.POSITIONAL_ONLY
+                    if index < len(args.posonlyargs)
+                    else inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            default = (inspect.Parameter.empty if index < first_default
+                       else ast.unparse(args.defaults[index - first_default]))
+            params.append(inspect.Parameter(arg.arg, kind, default=default))
+        if args.vararg:
+            params.append(inspect.Parameter(
+                args.vararg.arg, inspect.Parameter.VAR_POSITIONAL))
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+            params.append(inspect.Parameter(
+                arg.arg, inspect.Parameter.KEYWORD_ONLY,
+                default=(inspect.Parameter.empty if default is None
+                         else ast.unparse(default))))
+        if args.kwarg:
+            params.append(inspect.Parameter(
+                args.kwarg.arg, inspect.Parameter.VAR_KEYWORD))
+        return inspect.Signature(params)
+    return None
+
+
+class EntryPointShapeTests(unittest.TestCase):
+    """Every subcommand has to answer to both documented ways of running it.
+
+    The dispatcher calls `module.main(argv[1:])`; `python3 generators/x.py`
+    reaches the same function through `main()`. The root README and
+    docs/guide/quickstart.md both spell out the direct route, and the
+    dispatcher's own docstring spells out the other. Six subcommands shipped
+    as `def main() -> int:`, which
+    meant every invocation through `pentimento` died on a TypeError inside the
+    dispatcher before the subcommand's own parser ever ran.
+
+    This walks the dispatch table rather than naming today's modules, so the
+    next module added with the wrong shape fails here instead of at somebody's
+    first invocation.
+    """
+
+    def signatures(self) -> list[tuple[str, inspect.Signature]]:
+        found = []
+        for name in candidates():
+            described = describe(name)
+            if described is None:
+                continue
+            signature = (declared_signature(name)
+                         if isinstance(described, Unavailable)
+                         else inspect.signature(described[0].main))
+            if signature is not None:
+                found.append((name, signature))
+        return found
+
+    def test_the_check_actually_reaches_the_subcommands(self):
+        """A walk that finds nothing would pass every assertion below."""
+        self.assertGreater(len(self.signatures()), 30)
+
+    def test_every_main_can_be_called_the_way_the_dispatcher_calls_it(self):
+        for name, signature in self.signatures():
+            with self.subTest(module=name):
+                self.assertTrue(
+                    accepts(signature, []),
+                    f"cli.py calls {name}.main(argv[1:]), and "
+                    f"main{signature} cannot be called that way. Give it "
+                    f"`argv: list[str] | None = None` and pass argv through "
+                    f"to parse_args, as the other subcommands do")
+
+    def test_every_main_can_still_be_called_with_no_arguments(self):
+        for name, signature in self.signatures():
+            with self.subTest(module=name):
+                self.assertTrue(
+                    accepts(signature),
+                    f"the README documents running a generator directly, and "
+                    f"{name}.main{signature} cannot be called with no "
+                    f"arguments, so `python3 generators/{name}.py` is broken")
 
 
 if __name__ == "__main__":

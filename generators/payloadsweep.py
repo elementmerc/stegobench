@@ -50,7 +50,7 @@ def open_preserving_mode(path) -> Image.Image:
     return img.convert("RGB")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--covers", required=True)
     ap.add_argument("--out", required=True)
@@ -73,7 +73,7 @@ def main() -> int:
         help="spread: payload scattered over the whole image, as real tools do. "
         "sequential: packed into a prefix, which global detectors dilute away.",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     covers = sorted(pathlib.Path(args.covers).glob("*.png"))[: args.count]
     if not covers:

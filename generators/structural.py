@@ -28,13 +28,13 @@ import sys
 IEND = b"\x49\x45\x4e\x44\xae\x42\x60\x82"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--covers", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--count", type=int, default=40)
     ap.add_argument("--payload-bytes", type=int, default=4096)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     covers = sorted(pathlib.Path(args.covers).glob("*.png"))[: args.count]
     if not covers:

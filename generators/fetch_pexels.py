@@ -137,14 +137,14 @@ def centre_crop(img: Image.Image, size: int) -> Image.Image:
     return img.crop((left, top, left + size, top + size))
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="directory to write covers into")
     ap.add_argument("--count", type=int, default=200, help="total covers wanted")
     ap.add_argument("--size", type=int, default=512, help="square crop side")
     ap.add_argument("--queries", default=",".join(DEFAULT_QUERIES))
     ap.add_argument("--per-page", type=int, default=80, help="API page size, max 80")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     key = os.environ.get("PEXELS_API_KEY")
     if not key:

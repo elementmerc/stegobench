@@ -451,7 +451,7 @@ def random_candidates(limit: int, min_kb: int, max_kb: int, size: int,
         time.sleep(delay)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--count", type=int, default=400, help="total covers wanted")
@@ -507,7 +507,7 @@ def main() -> int:
                     help="path to the shared dedup store. Without it this fetcher "
                          "cannot tell that a cover already arrived from another "
                          "source or an earlier session, so it is strongly advised")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     # This runs detached overnight with its output redirected to a file, and
     # Python block-buffers stdout when it is not a terminal. A heartbeat sitting
