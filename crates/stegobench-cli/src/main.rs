@@ -1221,6 +1221,51 @@ mod tests {
         }
     }
 
+    /// Every result document this repository ships must satisfy this
+    /// repository's own validator.
+    ///
+    /// It did not, and nothing noticed. Two fields were added to `result-v1`
+    /// in earlier work and the twenty-four documents under `results/` were
+    /// left behind, so a reader following the README's own instruction to
+    /// validate a document would have been told the project's own published
+    /// measurements are not valid documents. A benchmark whose sample output
+    /// its own tool refuses has undermined the point of publishing it.
+    ///
+    /// The same failure will happen again on the next schema change; the
+    /// difference is that it will happen here rather than in front of a
+    /// reader.
+    #[test]
+    fn every_result_this_repository_publishes_validates() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("results/v1");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("results/v1 exists") {
+            let path = entry.expect("readable").path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let out = cmd_validate(&path);
+            assert_eq!(
+                out.code,
+                exit::OK,
+                "{} does not validate:\n{}",
+                path.display(),
+                out.human
+            );
+            checked += 1;
+        }
+        // A walk over an empty directory passes every assertion by never
+        // reaching one, which is the same fault as a check reporting clean
+        // because it could not look.
+        assert!(
+            checked >= 20,
+            "checked {checked} document(s) in {}; this repository publishes \
+             two dozen, so the walk found almost nothing",
+            dir.display()
+        );
+    }
+
     /// One registry to a user: the same two verbs reach a corpus and a tool.
     #[test]
     fn list_corpora_and_describe_reach_a_corpus_the_way_they_reach_a_tool() {

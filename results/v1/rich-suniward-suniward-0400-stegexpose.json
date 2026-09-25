@@ -11,9 +11,11 @@
   "corpus": {
     "digest": "sha256:d93e9720af0c3ab7a21dd9e81f2d4b4cbc2f6025fa3d8ef00110d76aea2c97b4",
     "name": "rich-suniward",
-    "pairs": 1000
+    "pairs": 1000,
+    "source": "supplied"
   },
   "declarations": {
+    "configuration": "custom",
     "pairing": "single-variable",
     "self_reported": false,
     "split_discipline": "not-applicable"
@@ -36,7 +38,8 @@
       {
         "determinism": "exact",
         "image": "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5",
-        "name": "stegexpose"
+        "name": "stegexpose",
+        "route": "container"
       }
     ],
     "started_utc": "2026-09-18T20:13:57Z"

@@ -11,9 +11,11 @@
   "corpus": {
     "digest": "sha256:481a17f2592dd6042b9298f436150ae08d0d0c70d0ccffebe647f075166d77b6",
     "name": "round3-q95",
-    "pairs": 200
+    "pairs": 200,
+    "source": "supplied"
   },
   "declarations": {
+    "configuration": "custom",
     "pairing": "single-variable",
     "self_reported": false,
     "split_discipline": "not-applicable"
@@ -36,7 +38,8 @@
       {
         "determinism": "exact",
         "image": "stegobench/aletheia@sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d",
-        "name": "aletheia-spa"
+        "name": "aletheia-spa",
+        "route": "container"
       }
     ],
     "started_utc": "2026-09-18T20:13:57Z"

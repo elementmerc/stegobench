@@ -169,8 +169,11 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                 "subject": {"name": subject,
                             "version": image_digests.get(image, "sha256:unknown"),
                             "kind": "detector"},
+                # Supplied, not fetched: this corpus was built here by the
+                # generators beside this file. Nothing downloaded it, and
+                # saying otherwise would vouch for bytes nobody saw arrive.
                 "corpus": {"name": corpus_name, "digest": corpus_digest,
-                           "pairs": len(rows)},
+                           "source": "supplied", "pairs": len(rows)},
                 "arm": {"embedder": embedder, "domain": domain, "format": fmt,
                         **({"rate": rate} if rate is not None else {})},
                 "metrics": {
@@ -184,7 +187,8 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                 "provenance": {
                     "plugins": [{"name": subject,
                                  "image": f"{image}@{image_digests.get(image, 'sha256:unknown')}",
-                                 "determinism": "exact"}],
+                                 "determinism": "exact",
+                                 "route": "container"}],
                     "harness_version": harness_version,
                     "started_utc": dt.datetime.now(dt.timezone.utc)
                                      .strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -194,6 +198,10 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                 "declarations": {
                     "split_discipline": "not-applicable",
                     "pairing": "single-variable",
+                    # Custom, because these arms are not a registered tier
+                    # whose digest anybody declared in advance. The number is
+                    # comparable with itself rather than with somebody else's.
+                    "configuration": "custom",
                     "self_reported": False,
                 },
             }

@@ -11,9 +11,11 @@
   "corpus": {
     "digest": "sha256:d93e9720af0c3ab7a21dd9e81f2d4b4cbc2f6025fa3d8ef00110d76aea2c97b4",
     "name": "rich-suniward",
-    "pairs": 1000
+    "pairs": 1000,
+    "source": "supplied"
   },
   "declarations": {
+    "configuration": "custom",
     "pairing": "single-variable",
     "self_reported": false,
     "split_discipline": "not-applicable"
@@ -36,7 +38,8 @@
       {
         "determinism": "exact",
         "image": "stegobench/aletheia@sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d",
-        "name": "aletheia-spa"
+        "name": "aletheia-spa",
+        "route": "container"
       }
     ],
     "started_utc": "2026-09-18T20:13:57Z"

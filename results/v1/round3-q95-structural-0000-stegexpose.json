@@ -7,9 +7,11 @@
   "corpus": {
     "digest": "sha256:481a17f2592dd6042b9298f436150ae08d0d0c70d0ccffebe647f075166d77b6",
     "name": "round3-q95",
-    "pairs": 200
+    "pairs": 200,
+    "source": "supplied"
   },
   "declarations": {
+    "configuration": "custom",
     "pairing": "single-variable",
     "self_reported": false,
     "split_discipline": "not-applicable"
@@ -32,7 +34,8 @@
       {
         "determinism": "exact",
         "image": "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5",
-        "name": "stegexpose"
+        "name": "stegexpose",
+        "route": "container"
       }
     ],
     "started_utc": "2026-09-18T20:13:57Z"
