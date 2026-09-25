@@ -175,6 +175,15 @@ pub enum Command {
         /// Which registered detector to ask. See `stegobench list detectors`.
         #[arg(long, value_name = "NAME")]
         detector: String,
+        /// Which registered corpus the directory holds. See
+        /// `stegobench list corpora`.
+        ///
+        /// The run is marked `named` only if that entry declares the digest of
+        /// its records and the directory matches it, so this is a claim the
+        /// harness checks rather than one it takes. Without it, and without a
+        /// declared digest to check against, the run is `custom`.
+        #[arg(long, value_name = "ID")]
+        corpus_id: Option<String>,
         /// Where the per-item answers are kept, and where a resumed run reads
         /// what is already done. Defaults to <corpus>.records.jsonl beside the
         /// corpus.

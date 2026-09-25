@@ -59,6 +59,15 @@ pub struct CorpusEntry {
     /// obligation as their only condition of use.
     #[serde(default)]
     pub citation: Option<String>,
+    /// Which tier of a tiered corpus this entry describes, where it has tiers.
+    ///
+    /// A result carries it so a reader can tell a run over 200 covers from one
+    /// over 10,000 without decoding a name. Declared rather than derived from
+    /// the id: `pentimento-core` happens to end in its tier and nothing
+    /// guarantees the next corpus will, and a benchmark that guesses this
+    /// would mislabel a number rather than decline to label it.
+    #[serde(default)]
+    pub tier: Option<String>,
     pub licence: Licence,
     pub obtain: Obtain,
     /// A digest or manifest reference, where one exists. Most published corpora
@@ -189,6 +198,27 @@ pub struct Integrity {
     /// digest with no stated subject pins nothing a reader can act on.
     #[serde(default)]
     pub sha256_covers: Option<String>,
+    /// The digest `stegobench score` computes over an unpacked copy of this
+    /// corpus, written as `sha256:` and 64 hexadecimal characters.
+    ///
+    /// A different thing from [`Integrity::sha256`], which names whatever its
+    /// publisher chose to hash: an archive, a manifest, a file list. This one
+    /// is defined by the harness. It is taken over every sample's id and the
+    /// digest that sample's own record states, in corpus order, so it survives
+    /// the corpus being extracted from a shard and moved, and two people
+    /// holding the same corpus compute the same value.
+    ///
+    /// **It is what makes a `named` run possible.** A result is marked `named`
+    /// only when the corpus on disk matches a digest an independent registry
+    /// entry declared in advance. Without that, naming a corpus would be the
+    /// person running the benchmark asserting what they are measuring, and the
+    /// one field that is supposed to be set by the harness rather than by them
+    /// would be set by them.
+    ///
+    /// Absent is the ordinary state for a third party corpus nobody has
+    /// computed it for, and such a corpus scores perfectly well as `custom`.
+    #[serde(default)]
+    pub records_sha256: Option<String>,
 }
 
 /// Enough to plan a run against it without downloading it first.
@@ -408,7 +438,7 @@ impl CorpusEntry {
         let Some(i) = &self.integrity else {
             return;
         };
-        if i.manifest.is_none() && i.sha256.is_none() {
+        if i.manifest.is_none() && i.sha256.is_none() && i.records_sha256.is_none() {
             bad.push(
                 "the integrity block is present but empty; remove it rather \
                  than implying a corpus can be checked when it cannot"
@@ -439,6 +469,23 @@ impl CorpusEntry {
                      re-computed by anyone"
                         .into(),
                 );
+            }
+        }
+
+        // Held to a stricter shape than `sha256`, because this one is compared
+        // as text against a value the harness computes and a mismatched prefix
+        // would read as a corpus that changed rather than as a typo.
+        if let Some(d) = &i.records_sha256 {
+            let hex = d.strip_prefix("sha256:");
+            let ok = hex.is_some_and(|h| {
+                h.len() == SHA256_HEX_LEN
+                    && h.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            });
+            if !ok {
+                bad.push(format!(
+                    "integrity.records_sha256 {d:?} is not a corpus digest. It                      is written as \"sha256:\" followed by {SHA256_HEX_LEN}                      lower case hexadecimal characters, exactly as `stegobench                      score` prints it, because the two are compared as text"
+                ));
             }
         }
     }
@@ -870,6 +917,7 @@ base_images = 100
                 manifest: None,
                 sha256: Some(bad.to_string()),
                 sha256_covers: Some("the archive".into()),
+                records_sha256: None,
             });
             refused_for(&e, "hexadecimal characters");
         }
@@ -882,6 +930,7 @@ base_images = 100
             manifest: None,
             sha256: Some(DIGEST.to_uppercase()),
             sha256_covers: Some("the archive".into()),
+            records_sha256: None,
         });
         refused_for(&e, "upper case hex");
     }
@@ -893,12 +942,14 @@ base_images = 100
             manifest: None,
             sha256: Some(DIGEST.into()),
             sha256_covers: None,
+            records_sha256: None,
         });
         refused_for(&e, "does not say");
         e.integrity = Some(Integrity {
             manifest: None,
             sha256: Some(DIGEST.into()),
             sha256_covers: Some("the published archive".into()),
+            records_sha256: None,
         });
         assert_eq!(e.validate(), Ok(()));
     }
@@ -910,6 +961,7 @@ base_images = 100
             manifest: None,
             sha256: None,
             sha256_covers: None,
+            records_sha256: None,
         });
         refused_for(&e, "present but empty");
     }

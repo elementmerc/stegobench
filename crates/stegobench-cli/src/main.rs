@@ -756,6 +756,7 @@ fn cmd_score(
     registry_dir: &Path,
     corpus: &Path,
     detector: &str,
+    corpus_id: Option<&str>,
     records: Option<&Path>,
     out: Option<&Path>,
     timeout: u64,
@@ -823,8 +824,27 @@ fn cmd_score(
         corpus.with_file_name(name)
     });
 
+    // Resolved before the run, so a typo costs a usage error rather than a
+    // corpus walk followed by one.
+    let registered = match corpus_id {
+        None => None,
+        Some(id) => match reg.corpora.get(id) {
+            Some(entry) => Some(entry),
+            None => {
+                return Output::err(
+                    exit::USAGE,
+                    format!(
+                        "no corpus with id {id:?} is registered. \
+                         `stegobench list corpora` shows what is."
+                    ),
+                )
+            }
+        },
+    };
+
     let request = score::Request {
         corpus,
+        registered,
         records,
         timeout: std::time::Duration::from_secs(timeout),
         limit,
@@ -835,7 +855,7 @@ fn cmd_score(
     let report = |line: &str| eprintln!("  {line}");
     let (result, tally) = match score::score(entry, &request, report) {
         Ok(pair) => pair,
-        Err(e) => return Output::err(exit::PLUGIN_FAILED, e.to_string()),
+        Err(e) => return Output::err(e.exit_code(), e.to_string()),
     };
 
     // Validated before it is written, not after. A document this refuses is
@@ -896,6 +916,7 @@ fn run(cli: &Cli) -> Output {
         Command::Score {
             corpus,
             detector,
+            corpus_id,
             records,
             out,
             timeout,
@@ -904,6 +925,7 @@ fn run(cli: &Cli) -> Output {
             &cli.registry,
             corpus,
             detector,
+            corpus_id.as_deref(),
             records.as_deref(),
             out.as_deref(),
             *timeout,
@@ -1471,6 +1493,7 @@ mod tests {
                 dir.path(),
                 &dir.path().join("no-such-corpus"),
                 "ghost",
+                None,
                 None,
                 None,
                 5,

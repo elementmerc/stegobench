@@ -24,6 +24,10 @@ Iwugo, D. (2026). Pentimento Core v1: a steganalysis corpus with its licences \
 attached. https://archive.org/details/pentimento-core-v1\
 """
 
+# Three tiers exist and each is a strict prefix of the next; this entry is the
+# one that is published today.
+tier = "core"
+
 [licence]
 status = "verified"
 spdx = "CC-BY-4.0"

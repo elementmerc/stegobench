@@ -29,6 +29,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use stegobench_core::corpus::CorpusEntry;
 use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
@@ -46,6 +47,12 @@ pub struct Request<'a> {
     pub records: PathBuf,
     pub timeout: Duration,
     pub limit: Option<u64>,
+    /// The registry's entry for this corpus, where the caller named one.
+    ///
+    /// Carries the name, the tier and, if anybody has computed it, the digest
+    /// this run is checked against. See [`Configuration`] for why the check
+    /// rather than the name is what earns `named`.
+    pub registered: Option<&'a CorpusEntry>,
 }
 
 /// Why a run could not produce a result.
@@ -80,6 +87,18 @@ pub enum ScoreError {
         examples: String,
     },
     #[error(
+        "the directory at {path} is not {id}. That corpus is registered with \
+         the digest {want}, and these records come to {got}. Whatever the \
+         directory is called, it is not the corpus you named, and a number \
+         measured here would be filed under a name it does not belong to"
+    )]
+    NotThatCorpus {
+        path: String,
+        id: String,
+        want: String,
+        got: String,
+    },
+    #[error(
         "the corpus at {path} holds {clean} clean and {stego} stego image(s), \
          and a measurement needs both. A detector scored on one side of the \
          question has not been measured, it has been asked a leading one"
@@ -89,6 +108,32 @@ pub enum ScoreError {
         clean: u64,
         stego: u64,
     },
+}
+
+impl ScoreError {
+    /// Which documented exit code this is.
+    ///
+    /// Every one of these used to leave the process with 4, plugin failure,
+    /// including four cases where no plugin was involved and one where nothing
+    /// had run yet. The codes are a contract a script and an agent act on, and
+    /// the distinction that matters to both is whether retrying unchanged
+    /// could work: a refusal will refuse again, a breakage might not.
+    pub fn exit_code(&self) -> i32 {
+        use stegobench_core::exit;
+        match self {
+            // The caller asked for something incoherent. Fix the command.
+            ScoreError::NotADetector { .. } => exit::USAGE,
+            // A claim about the bytes was checked and did not hold.
+            ScoreError::NotThatCorpus { .. } => exit::VERIFY_MISMATCH,
+            // The corpus is unfit for a measurement, and will be as unfit the
+            // second time. Refusals, not breakages.
+            ScoreError::SplitLeaks { .. } | ScoreError::OneSided { .. } => exit::PREFLIGHT_REFUSED,
+            // Something broke: a tool, a disk, a file that is not what it
+            // claimed to be.
+            ScoreError::Run(_) => exit::PLUGIN_FAILED,
+            ScoreError::Corpus(_) | ScoreError::Records { .. } => exit::FAILURE,
+        }
+    }
 }
 
 /// Run the detector over the corpus and build the result document.
@@ -105,6 +150,59 @@ where
             name: entry.name.clone(),
         });
     }
+
+    // WHY NAMING A CORPUS IS NOT ENOUGH TO EARN `named`
+    //
+    // `Configuration` is documented as set by the harness from what it
+    // actually ran, never by the person running it, and that is the whole
+    // value of the field: one somebody can set in their own favour is not
+    // worth having. A `--corpus-id` flag that took the user's word would hand
+    // them exactly that.
+    //
+    // So the flag states a claim and this checks it, against a digest an
+    // INDEPENDENT registry entry declared in advance. Checked HERE, before a
+    // single image is scored, because the answer does not depend on the run
+    // and a Core tier is hours: discovering at the end that the directory was
+    // never the corpus named is discovering it far too late.
+    let claim_holds = match request.registered {
+        None => false,
+        Some(entry) => match entry
+            .integrity
+            .as_ref()
+            .and_then(|i| i.records_sha256.as_deref())
+        {
+            None => {
+                progress(&format!(
+                    "{} is registered but its entry declares no records \
+                     digest, so there is nothing to check this directory \
+                     against and the run is marked custom",
+                    entry.id
+                ));
+                false
+            }
+            Some(want) => {
+                let got = corpus_digest(request.corpus)?;
+                if got.as_deref() == Some(want) {
+                    true
+                } else {
+                    // Refused rather than downgraded. The user asserted
+                    // something about these bytes that is not true of them,
+                    // and filing the run quietly as custom would answer a
+                    // different question from the one they asked.
+                    return Err(ScoreError::NotThatCorpus {
+                        path: request.corpus.display().to_string(),
+                        id: entry.id.clone(),
+                        want: want.to_string(),
+                        got: got.unwrap_or_else(|| {
+                            "nothing, because at least one record states no \
+                             digest for its own image"
+                                .into()
+                        }),
+                    });
+                }
+            }
+        },
+    };
 
     let started = Instant::now();
     let started_utc = now_utc();
@@ -198,6 +296,21 @@ where
         }
     }
 
+    // A prefix of a tier is not the tier, whatever the whole of it hashes to,
+    // and the digest above is taken over the whole corpus rather than over
+    // what was scored.
+    let named = if claim_holds && request.limit.is_none() {
+        Configuration::Named
+    } else {
+        if claim_holds {
+            progress(
+                "this run scored part of the corpus, so it is marked custom \
+                 rather than named: a prefix of a tier is not the tier",
+            );
+        }
+        Configuration::Custom
+    };
+
     let auc = stegobench_metrics::roc_auc(&scores, &labels).unwrap_or(0.5);
     let mut tpr_at_fpr = BTreeMap::new();
     for fpr in [0.01, 0.05, 0.10] {
@@ -214,11 +327,15 @@ where
             kind: SubjectKind::Detector,
         },
         corpus: CorpusRef {
-            name: corpus_name(request.corpus),
-            tier: None,
+            name: match request.registered {
+                Some(e) => e.name.clone(),
+                None => corpus_name(request.corpus),
+            },
+            tier: request.registered.and_then(|e| e.tier.clone()),
             // The user pointed at a directory. Nothing here downloaded it, and
             // saying otherwise would be the harness vouching for bytes it
-            // never saw arrive.
+            // never saw arrive. Naming the corpus does not change that: a
+            // registry entry describes a dataset, it does not deliver one.
             source: CorpusSource::Supplied,
             digest: checks.digest.clone().unwrap_or_default(),
             pairs: labels.len() as u64,
@@ -257,12 +374,7 @@ where
         declarations: Declarations {
             split_discipline: checks.split,
             pairing: checks.pairing,
-            // Always custom, and this is the honest answer rather than a
-            // placeholder. A directory of samples is not a registered tier: it
-            // carries no digest anybody can check and no arm anybody can name,
-            // so it is comparable with itself and nothing else. Scoring a
-            // named tier is a separate route and will say so.
-            configuration: Configuration::Custom,
+            configuration: named,
             trained_on: None,
             self_reported: false,
         },
@@ -948,6 +1060,7 @@ mod tests {
     fn request(dir: &Path, limit: Option<u64>) -> Request<'_> {
         Request {
             corpus: dir,
+            registered: None,
             records: dir.with_extension("records.jsonl"),
             timeout: Duration::from_secs(5),
             limit,
@@ -1634,6 +1747,165 @@ mod tests {
         assert_eq!(checks.pairing, Pairing::SingleVariable);
     }
 
+    /// A registry entry for a corpus, with the digest the test chooses.
+    fn registered_corpus(declared: Option<&str>) -> CorpusEntry {
+        let integrity = match declared {
+            Some(d) => format!("[integrity]\nrecords_sha256 = \"{d}\"\n"),
+            None => String::new(),
+        };
+        toml::from_str(&format!(
+            "id = \"example\"\nname = \"Example Tier\"\ntier = \"nano\"\n\
+             description = \"For a test.\"\n{integrity}\
+             [licence]\nstatus = \"unverified\"\nredistribution = \"unknown\"\n\
+             redistribution_reason = \"A fixture.\"\n\
+             [obtain]\ninstructions = \"A fixture.\"\n\
+             [properties]\nbase_images = 1\nsize_note = \"A fixture.\"\n"
+        ))
+        .expect("parses")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_corpus_matching_the_digest_its_registry_entry_declares_is_named() {
+        // The only way to `named`. The harness is comparing the bytes in front
+        // of it with a claim somebody else wrote down first, which is what
+        // makes the field worth having.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        let digest = corpus_digest(&root).expect("readable").expect("named");
+        let entry = registered_corpus(Some(&digest));
+
+        let mut request = request(&root, None);
+        request.registered = Some(&entry);
+        let (result, _) = score(&sizing_detector(tmp.path()), &request, |_| {}).expect("scored");
+
+        assert_eq!(result.declarations.configuration, Configuration::Named);
+        assert_eq!(result.corpus.name, "Example Tier");
+        assert_eq!(result.corpus.tier.as_deref(), Some("nano"));
+        result.validate().expect("valid");
+    }
+
+    #[test]
+    fn every_way_a_run_can_fail_has_its_own_exit_code() {
+        // They all used to be 4, plugin failure, including four where no
+        // plugin was involved. A script and an agent act on these.
+        use stegobench_core::exit;
+        let cases = [
+            (ScoreError::NotADetector { name: "x".into() }, exit::USAGE),
+            (
+                ScoreError::NotThatCorpus {
+                    path: "p".into(),
+                    id: "i".into(),
+                    want: "a".into(),
+                    got: "b".into(),
+                },
+                exit::VERIFY_MISMATCH,
+            ),
+            (
+                ScoreError::SplitLeaks {
+                    path: "p".into(),
+                    count: 1,
+                    examples: "e".into(),
+                },
+                exit::PREFLIGHT_REFUSED,
+            ),
+            (
+                ScoreError::OneSided {
+                    path: "p".into(),
+                    clean: 1,
+                    stego: 0,
+                },
+                exit::PREFLIGHT_REFUSED,
+            ),
+            (
+                ScoreError::Records {
+                    path: "p".into(),
+                    source: std::io::Error::other("x"),
+                },
+                exit::FAILURE,
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(err.exit_code(), want, "{err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_is_not_the_corpus_it_claims_is_refused() {
+        // Refused rather than downgraded to custom. The user asserted
+        // something about these bytes that is not true of them, and filing the
+        // run quietly as custom would answer a different question from the one
+        // they asked.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        let entry = registered_corpus(Some(&format!("sha256:{}", "0".repeat(64))));
+
+        let mut request = request(&root, None);
+        request.registered = Some(&entry);
+        let err = score(&sizing_detector(tmp.path()), &request, |_| {}).expect_err("refused");
+        assert!(err.to_string().contains("is not example"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn naming_a_corpus_whose_entry_declares_no_digest_stays_custom() {
+        // Nobody has computed the digest for most corpora, and that is the
+        // ordinary state rather than a fault. What must not happen is the name
+        // alone earning `named`, because then the person running the benchmark
+        // sets the field.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        let entry = registered_corpus(None);
+
+        let mut request = request(&root, None);
+        request.registered = Some(&entry);
+        let mut said = Vec::new();
+        let (result, _) = score(&sizing_detector(tmp.path()), &request, |l| {
+            said.push(l.to_string())
+        })
+        .expect("scored");
+
+        assert_eq!(result.declarations.configuration, Configuration::Custom);
+        assert!(
+            said.iter()
+                .any(|l| l.contains("declares no records digest")),
+            "it downgraded silently: {said:?}"
+        );
+        // The name and tier are still carried: they are what the user said,
+        // and the digest beside them is what the harness measured.
+        assert_eq!(result.corpus.name, "Example Tier");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_run_over_a_matching_corpus_is_still_custom() {
+        // A prefix of a tier is not the tier, whatever the whole of it hashes
+        // to, and the digest is taken over the whole corpus rather than over
+        // what was scored.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc", "dd"]);
+        let digest = corpus_digest(&root).expect("readable").expect("named");
+        let entry = registered_corpus(Some(&digest));
+
+        let mut request = request(&root, Some(3));
+        request.registered = Some(&entry);
+        let mut said = Vec::new();
+        let (result, _) = score(&sizing_detector(tmp.path()), &request, |l| {
+            said.push(l.to_string())
+        })
+        .expect("scored");
+
+        assert_eq!(result.declarations.configuration, Configuration::Custom);
+        assert!(
+            said.iter().any(|l| l.contains("prefix of a tier")),
+            "{said:?}"
+        );
+    }
     #[test]
     fn an_embedder_is_refused_rather_than_scored() {
         // Asking an embedder to tell two images apart produces a number that
