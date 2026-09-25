@@ -18,12 +18,12 @@ corpus, and this repository is the harness.
 Two halves, at different stages:
 
 - **A Rust command-line tool** (`stegobench`) that reads a registry of
-  detectors, embedders and corpora, checks whether this machine can run them, and
-  will score a corpus against them. `schema`, `validate`, `list`, `describe`,
-  `doctor`, `completions` and `help` are built and tested. `plan` and `score`
-  are in the command tree and documented, but not built yet: running either
-  today exits with a message saying exactly that, rather than pretending to
-  work.
+  detectors, embedders and corpora, checks whether this machine can run them,
+  and scores a corpus against them. `schema`, `validate`, `list`, `describe`,
+  `doctor`, `score`, `completions` and `help` are built and tested. `plan`, a
+  cost estimate before you commit to a long run, is in the command tree and
+  documented but not built yet: running it today exits with a message saying
+  exactly that, rather than pretending to work.
 - **Python generators** (`generators/`) that build a labelled corpus:
   fetching covers with provenance, embedding stego arms, packing shards, and
   scoring against a detector's HTTP endpoint. This half is older, working,
@@ -185,11 +185,22 @@ published schemas (`result-v1`, `run-v1`, `manifest-v1`, all generated from
 the Rust types that write them, never hand maintained), and `doctor`'s
 two-sided self-test.
 
-**Not built yet:** `stegobench plan` (a cost estimate before you commit to a
-long run) and `stegobench score` (actually running a detector against a
-corpus from the Rust binary). Both are in the command tree today so the
-vocabulary is fixed before anything depends on it, and both refuse clearly
-with exit code 8 rather than doing something partial.
+**`stegobench score` runs.** Point it at a directory of samples and a
+registered detector and it asks about every one, writing each answer as it
+goes, then emits a validated `result-v1` document. The run resumes: if it is
+interrupted, running the same command again picks up where it stopped rather
+than starting over, and it refuses to continue if the corpus changed under the
+records rather than filing answers against the wrong images.
+
+Two honest limits on it today. It reads an UNPACKED corpus directory, so a
+packed tier has to be extracted first. And every such run is marked `custom`
+in the result, because a directory carries no digest anybody can check and no
+arm anybody can name, which makes the number comparable with itself and
+nothing else. Scoring a registered tier is the next piece of work.
+
+**Not built yet:** `stegobench plan`, the cost estimate. It is in the command
+tree so the vocabulary is fixed before anything depends on it, and it refuses
+clearly with exit code 8 rather than doing something partial.
 
 **Thirteen tools are registered** under `plugins/registry/` today: six
 embedders (steghide, outguess, openstego, stegosuite, hstego, and Stegcore's

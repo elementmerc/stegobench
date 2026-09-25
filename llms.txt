@@ -45,11 +45,16 @@ progress still reaches a terminal.
 - `stegobench completions <bash|zsh|fish|powershell>`: shell completion script.
 - `stegobench help <pairing|splits|licences|plugins>`: the reasoning behind
   the harness's hard rules, written for a reader who never opens the repo.
-- `stegobench plan` and `stegobench score`: **scoped in the command tree but
-  not yet built.** Both parse today and exit 8 with a message naming what
-  they are waiting on, rather than pretending to run. Do not treat a
-  non-zero exit from either as a bug in your invocation; it is these
-  commands being honest about not existing yet.
+- `stegobench score --corpus <DIR> --detector <NAME>`: asks the detector
+  about every sample under the directory and writes a `result-v1` document.
+  Resumable: every answer lands in a records file as it is produced, and the
+  same command run again continues rather than restarting. It reads an
+  unpacked corpus directory, and marks every such run `custom`, because a
+  directory carries no digest anybody can check.
+- `stegobench plan`: **scoped in the command tree but not yet built.** It
+  parses today and exits 8 with a message naming what it is waiting on,
+  rather than pretending to run. Do not treat that non-zero exit as a bug in
+  your invocation; it is the command being honest about not existing yet.
 
 ## Exit codes (a contract, not incidental)
 
@@ -84,7 +89,7 @@ the tool itself is the source of truth for its own reasoning:
 
 ## What an agent should not do here
 
-- Do not call `plan` or `score` expecting a working run; they are not built.
+- Do not call `plan` expecting a working run; it is not built.
   See "Command vocabulary" above.
 - Do not treat a registry entry's `image.reference` as safe to run without a
   digest. `stegobench` itself refuses to load one that is not: see `plugins`
