@@ -167,6 +167,14 @@ where
 
     // WHY NAMING A CORPUS IS NOT ENOUGH TO EARN `named`
     //
+    // Started HERE, before the corpus is identified rather than after. The
+    // pre-flight passes below read every record and, for a named run, hash
+    // every image, which on a Core tier is tens of minutes. A reader takes
+    // elapsed_seconds as how long the run took, and time spent establishing
+    // what was being measured is part of how long it took.
+    let started = Instant::now();
+    let started_utc = now_utc();
+
     // `Configuration` is documented as set by the harness from what it
     // actually ran, never by the person running it, and that is the whole
     // value of the field: one somebody can set in their own favour is not
@@ -231,9 +239,6 @@ where
             }
         },
     };
-
-    let started = Instant::now();
-    let started_utc = now_utc();
 
     // The scoring pass. Streams, and every answer is on disk before the next
     // item begins, so an interrupted run resumes rather than restarts.
@@ -714,6 +719,7 @@ struct ArmFacts {
 }
 
 /// What a cover contributes to both checks, gathered in one pass.
+#[derive(Clone)]
 struct Cover {
     split: Option<String>,
     shape: Option<Shape>,
@@ -798,27 +804,30 @@ fn check(request: &Request) -> Result<Checks, ScoreError> {
             .and_then(|n| n.to_str())
             .map(str::to_string);
         let declared = sample.declared_name.clone();
-        let keys: Vec<String> = match (on_disk, declared) {
-            (Some(a), Some(b)) if a == b => vec![a],
-            (a, b) => a.into_iter().chain(b).collect(),
-        };
-        if keys.is_empty() {
-            continue;
-        }
         // Read once, whichever names it goes in under. An unreadable cover is
         // not a corpus defect this should refuse over: the sample reader has
         // already accepted the file, the detector will be asked about it
         // regardless, and the honest consequence is that this pair cannot be
         // compared rather than that the run cannot happen.
         let shape = header::read(&sample.image).ok();
-        for name in keys {
-            covers.insert(
-                name,
-                Cover {
-                    split: sample.split.clone(),
-                    shape,
-                },
-            );
+        let cover = Cover {
+            split: sample.split.clone(),
+            shape,
+        };
+
+        // The record's own name wins, and the name on disk only fills a gap it
+        // left. The two are not equally trustworthy: a stego row joins on
+        // `source_png`, which names a cover the way its RECORD does, and on a
+        // real release the names on disk collide. Every arm restarts its
+        // numbering at 000000, so four clean arms extracted beside a cover
+        // tier all offer `000000.png`, and letting those overwrite an
+        // authoritative entry would silently attach a stego row to the wrong
+        // photograph.
+        if let Some(name) = declared {
+            covers.insert(name, cover.clone());
+        }
+        if let Some(name) = on_disk {
+            covers.entry(name).or_insert(cover);
         }
     }
 
@@ -1839,6 +1848,51 @@ mod tests {
             "the cover was never found, so nothing was compared"
         );
         assert_eq!(checks.split_leaks.count, 1, "the split join did not fire");
+    }
+
+    #[test]
+    fn an_arm_reusing_a_basename_cannot_displace_the_cover_it_collides_with() {
+        // The shape of a real multi arm extraction. Every arm restarts its
+        // numbering at 000000, so several clean arms offer the same name on
+        // disk as a cover tier file, and an overwrite there attaches a stego
+        // row to the wrong photograph without saying anything.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(root.join("cover")).unwrap();
+        std::fs::create_dir_all(root.join("clean-grey")).unwrap();
+
+        // The cover, 64 by 64, extracted as 000000.png but recorded as its
+        // own name in the tier.
+        std::fs::write(root.join("cover/000000.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("cover/000000.json"),
+            r#"{"role":"clean","file":"09710.png","sha256":"a"}"#,
+        )
+        .unwrap();
+        // A clean arm image of a DIFFERENT size, whose own name on disk and
+        // in its record is also 000000.png.
+        std::fs::write(root.join("clean-grey/000000.png"), png(32, 32, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("clean-grey/000000.json"),
+            r#"{"role":"clean","file":"000000.png","sha256":"b"}"#,
+        )
+        .unwrap();
+        // A stego row made from the cover, matching the cover's shape.
+        std::fs::write(root.join("s0.png"), png(64, 64, 8, 2, 7)).unwrap();
+        std::fs::write(
+            root.join("s0.json"),
+            r#"{"role":"stego","source_png":"09710.png","sha256":"c"}"#,
+        )
+        .unwrap();
+
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.compared, 1);
+        assert_eq!(
+            checks.pairing,
+            Pairing::SingleVariable,
+            "the stego row was compared against the wrong image: {}",
+            checks.pairing_breaks.examples()
+        );
     }
 
     #[test]
