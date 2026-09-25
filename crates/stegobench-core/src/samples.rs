@@ -155,6 +155,16 @@ pub struct Sample {
     /// cover and is inherited through [`Sample::cover`]; a caller enforcing
     /// by-cover discipline joins rather than reads it here.
     pub split: Option<String>,
+    /// The name the record gives for its own image, where it gives one.
+    ///
+    /// NOT the name on disk, and the difference is the whole reason this field
+    /// exists. The packer renames every member to its position in the tier, so
+    /// a cover whose record says `file = "09710.png"` is extracted as
+    /// `000123.png`, while a stego row made from it still names `09710.png`
+    /// under `source_png`. A caller joining stego rows to covers by the name on
+    /// disk therefore joins nothing at all on a packed release, and a check
+    /// that cannot look reports clean.
+    pub declared_name: Option<String>,
     /// The digest the record states for its own image, exactly as written.
     ///
     /// A claim, not a measurement: nothing here opens the image to check it.
@@ -500,13 +510,14 @@ impl Samples {
             (Some(_), []) => Err(SampleError::RecordWithoutImage { id }),
             (Some(rec), [image]) => {
                 let value = read_record(&self.current_dir.join(rec))?;
-                let (role, cover, split, digest, arm) = describe(&id, &value)?;
+                let (role, cover, split, declared_name, digest, arm) = describe(&id, &value)?;
                 Ok(Some(Sample {
                     id,
                     image: self.current_dir.join(image),
                     role,
                     cover,
                     split,
+                    declared_name,
                     digest,
                     arm,
                 }))
@@ -614,10 +625,11 @@ fn read_record(path: &Path) -> Result<serde_json::Value, SampleError> {
     })
 }
 
-/// What the record says: which side, which cover, which split, which digest,
-/// and which arm.
+/// What the record says: which side, which cover, which split, which name,
+/// which digest, and which arm.
 type Described = (
     Role,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -714,7 +726,18 @@ fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleErro
         domain: text(object, "domain"),
     };
 
-    Ok((role, cover, split, digest, arm))
+    // Held to the same rule as `source_png`, because it is joined against it.
+    let declared_name = match object.get("file") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            // A manifest may carry a path here rather than a bare name, and the
+            // join only ever needs the last component.
+            let last = s.rsplit(['/', '\\']).next().unwrap_or(s);
+            Some(check_cover_name(id, last)?)
+        }
+        _ => None,
+    };
+
+    Ok((role, cover, split, declared_name, digest, arm))
 }
 
 /// A record field read as a string, or None where it is absent, empty, null or
@@ -967,6 +990,42 @@ mod tests {
         fs::write(bare.path().join("b.png"), b"x").unwrap();
         fs::write(bare.path().join("b.json"), "{}").unwrap();
         assert_eq!(collect(bare.path())[0].digest, None);
+    }
+
+    #[test]
+    fn a_record_reports_the_name_it_gives_its_own_image() {
+        // The name on disk and the name in the record are different things on
+        // a packed release, and a caller joining stego rows to covers needs the
+        // second one. A path in the field is reduced to its last component,
+        // because that is all a join ever uses and it cannot then reach out of
+        // the corpus.
+        let dir = TempDir::new().unwrap();
+        pair(
+            dir.path(),
+            "a/000000",
+            "png",
+            ", \"file\": \"covers/09710.png\"",
+        );
+        assert_eq!(
+            collect(dir.path())[0].declared_name.as_deref(),
+            Some("09710.png")
+        );
+
+        let bare = TempDir::new().unwrap();
+        fs::write(bare.path().join("b.png"), b"x").unwrap();
+        fs::write(bare.path().join("b.json"), "{}").unwrap();
+        assert_eq!(collect(bare.path())[0].declared_name, None);
+    }
+
+    #[test]
+    fn a_file_field_that_is_not_a_name_at_all_is_refused() {
+        let dir = TempDir::new().unwrap();
+        pair(dir.path(), "a/000000", "png", ", \"file\": \"../..\"");
+        let err = Samples::open(dir.path())
+            .unwrap()
+            .find_map(std::result::Result::err)
+            .expect("refused");
+        assert!(err.to_string().contains("plain file name"), "{err}");
     }
 
     #[test]

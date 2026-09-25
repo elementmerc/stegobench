@@ -558,21 +558,42 @@ fn check(request: &Request) -> Result<Checks, ScoreError> {
             continue;
         }
         any_split |= sample.split.is_some();
-        let Some(name) = sample.image.file_name().and_then(|n| n.to_str()) else {
-            continue;
+
+        // Filed under BOTH names a stego row might use to reach it, and the
+        // second one is the one that matters. The packer renames every member
+        // to its position in the tier, so a cover whose record says
+        // `file = "09710.png"` is extracted as `000123.png`, while every stego
+        // row made from it still says `09710.png`. Joining on the name on disk
+        // alone matches nothing on a packed release, and a check that cannot
+        // look reports clean.
+        let on_disk = sample
+            .image
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        let declared = sample.declared_name.clone();
+        let keys: Vec<String> = match (on_disk, declared) {
+            (Some(a), Some(b)) if a == b => vec![a],
+            (a, b) => a.into_iter().chain(b).collect(),
         };
-        covers.insert(
-            name.to_string(),
-            Cover {
-                split: sample.split,
-                // An unreadable cover is not a corpus defect this should refuse
-                // over. The sample reader has already accepted the file, the
-                // detector will be asked about it regardless, and the honest
-                // consequence is that this pair cannot be compared rather than
-                // that the run cannot happen.
-                shape: header::read(&sample.image).ok(),
-            },
-        );
+        if keys.is_empty() {
+            continue;
+        }
+        // Read once, whichever names it goes in under. An unreadable cover is
+        // not a corpus defect this should refuse over: the sample reader has
+        // already accepted the file, the detector will be asked about it
+        // regardless, and the honest consequence is that this pair cannot be
+        // compared rather than that the run cannot happen.
+        let shape = header::read(&sample.image).ok();
+        for name in keys {
+            covers.insert(
+                name,
+                Cover {
+                    split: sample.split.clone(),
+                    shape,
+                },
+            );
+        }
     }
 
     let mut checks = Checks {
@@ -1523,6 +1544,64 @@ mod tests {
         // The format is the only evidence left, and a PNG corpus is a spatial
         // one until something says otherwise.
         assert_eq!(arm.domain, Domain::Spatial);
+    }
+
+    #[test]
+    fn a_cover_renamed_by_the_packer_is_still_found_by_the_name_its_record_gives() {
+        // The shape of a real release, and the one that made both checks inert
+        // before this: every member is renamed to its position in the tier, so
+        // the cover on disk is `000000.png` while every stego row made from it
+        // still names `09710.png`. Joining on the name on disk matches nothing,
+        // and a check that cannot look reports clean.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("000000.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("000000.json"),
+            r#"{"role":"clean","file":"09710.png","split":"test","sha256":"a"}"#,
+        )
+        .unwrap();
+        // A stego twin that is a different size, and in the other split.
+        std::fs::write(root.join("000001.png"), png(48, 48, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("000001.json"),
+            r#"{"role":"stego","file":"000001.png","source_png":"09710.png","split":"train","sha256":"b"}"#,
+        )
+        .unwrap();
+
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(
+            checks.pairing,
+            Pairing::Confounded,
+            "the cover was never found, so nothing was compared"
+        );
+        assert_eq!(checks.split_leaks.count, 1, "the split join did not fire");
+    }
+
+    #[test]
+    fn a_manifest_carrying_a_path_in_its_file_field_still_joins() {
+        // Some manifests write `covers/09710.png` rather than a bare name. The
+        // join only ever needs the last component, and a path in that field
+        // must not reach out of the corpus either.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("000000.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("000000.json"),
+            r#"{"role":"clean","file":"covers/09710.png","sha256":"a"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("000001.png"), png(64, 64, 8, 2, 9)).unwrap();
+        std::fs::write(
+            root.join("000001.json"),
+            r#"{"role":"stego","source_png":"09710.png","sha256":"b"}"#,
+        )
+        .unwrap();
+        let checks = check(&request(&root, None)).expect("checked");
+        assert_eq!(checks.compared, 1);
+        assert_eq!(checks.pairing, Pairing::SingleVariable);
     }
 
     #[test]
