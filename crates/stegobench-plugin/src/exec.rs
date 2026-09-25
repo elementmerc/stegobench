@@ -149,18 +149,20 @@ fn tail(stderr: &[u8]) -> String {
 /// Only reachable when the operating system refuses to report on a process we
 /// have already signalled, and the caller is about to return a timeout error
 /// regardless, so the value is never read as a real exit status.
+///
+/// There is deliberately no fallback arm. A target that is neither Unix nor
+/// Windows fails to compile here, which is the loud answer; a fallback would
+/// invent an exit status on a platform nobody has tested.
 fn exited_nonzero() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
         std::process::ExitStatus::from_raw(9)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "exit 9"])
-            .status()
-            .expect("a shell that can exit")
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(9)
     }
 }
 

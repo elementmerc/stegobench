@@ -90,6 +90,20 @@ must_detect = "fixtures/lsb-0.4bpp.png"   # it must flag this
 must_clear = "fixtures/clean.png"          # and clear this
 ```
 
+A tool is registered one of two ways, never both, and `stegobench list` names
+which one each tool uses:
+
+| Route | What it means for you |
+|---|---|
+| `[image]` | A container, pinned by digest. It runs with no network, and two machines run identical bytes. You need a container runtime |
+| `[binary]` | A program you installed. No sandbox, and the hash pins the file on your machine rather than bytes anybody can pull |
+
+A `[binary]` entry can add `platforms = ["windows"]` where the tool only exists
+on some systems. `stegobench doctor` then says it cannot run here, instead of
+reporting it as missing and sending you to look for a package that does not
+exist for you. Leaving it out means nobody has said, which is not the same as
+saying it runs everywhere.
+
 Both fixtures under `[selftest]` are required. A tool that answers "stego" to
 everything, or "clean" to everything, would otherwise pass a one-sided check;
 `stegobench doctor` runs both directions before believing a tool works. See
@@ -237,6 +251,64 @@ out until it builds, rather than sitting in the registry as a dead reference.
 **stegoveritas, F5, jsteg and jphide are not present.** They're candidates
 for later, not silently dropped: naming them here rather than letting a
 reader discover the gap is the point of this section existing at all.
+
+## Verifying a download
+
+Every file attached to a release is signed, `SHA256SUMS` included. That matters
+because a checksum on its own only tells you the bytes match a list, and
+whoever can serve you a tarball can serve you a matching list. A signature
+tells you the file came out of this repository's release workflow.
+
+Nothing is released yet, so these commands describe what a release will carry
+rather than something you can run today. Replace `v1.2.3` with the tag you
+downloaded.
+
+**The short way**, if you have GitHub's `gh` tool
+([install it](https://cli.github.com/)):
+
+```sh
+gh attestation verify stegobench-v1.2.3-x86_64-unknown-linux-musl.tar.gz \
+    --repo elementmerc/stegobench
+```
+
+That checks GitHub's own record of which workflow run built the file.
+
+**The way that works from anywhere**, including a mirror or an archived copy,
+using [cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
+Download the archive plus its `.sig` and `.pem`, and put them in one directory:
+
+```sh
+cosign verify-blob \
+    --certificate stegobench-v1.2.3-x86_64-unknown-linux-musl.tar.gz.pem \
+    --signature stegobench-v1.2.3-x86_64-unknown-linux-musl.tar.gz.sig \
+    --certificate-identity-regexp '^https://github\.com/elementmerc/stegobench/\.github/workflows/release\.yml@refs/tags/v' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    stegobench-v1.2.3-x86_64-unknown-linux-musl.tar.gz
+```
+
+It prints `Verified OK` and exits 0, or it fails. There's no key to fetch
+first: the signature carries a short lived certificate naming the workflow that
+made it, and cosign checks that certificate against Sigstore's public
+transparency log.
+
+**Check the checksums file the same way**, then use it. Verifying `SHA256SUMS`
+and then running `sha256sum -c` covers every file in one step:
+
+```sh
+cosign verify-blob \
+    --certificate SHA256SUMS.pem \
+    --signature SHA256SUMS.sig \
+    --certificate-identity-regexp '^https://github\.com/elementmerc/stegobench/\.github/workflows/release\.yml@refs/tags/v' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    SHA256SUMS
+
+sha256sum -c SHA256SUMS
+```
+
+The long `--certificate-identity-regexp` line is the part that matters: it says
+which repository, which workflow file and which kind of ref the signature has
+to come from. Drop it and cosign will happily accept a signature from anybody
+at all. `SECURITY.md` says what this does and doesn't prove.
 
 ## Pentimento
 

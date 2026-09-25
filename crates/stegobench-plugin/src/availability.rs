@@ -32,6 +32,14 @@ pub enum Presence {
     /// We could not find out, which is its own answer and must not be
     /// reported as either of the others.
     Unknown { reason: String },
+    /// The entry says this tool does not run on this machine's operating
+    /// system, so it is not missing and installing something will not help.
+    ///
+    /// A separate answer from Absent because the two ask different things of
+    /// the reader. "Not installed" is an instruction; "cannot run here" is a
+    /// fact about the machine, and reporting the second as the first sends
+    /// somebody looking for a package that does not exist.
+    Unsupported { reason: String },
 }
 
 impl Presence {
@@ -63,6 +71,7 @@ impl Availability {
             }
             Presence::Absent { reason } => format!("MISSING   {reason}"),
             Presence::Unknown { reason } => format!("unknown   {reason}"),
+            Presence::Unsupported { reason } => format!("n/a       {reason}"),
         };
         let verified = match self.verified {
             Some(true) => "  verified",
@@ -130,17 +139,9 @@ fn binary_present(entry: &Entry, program: &str) -> Presence {
 /// is what keeps a token out of `doctor --json` output that somebody will paste
 /// into a bug report.
 pub fn check(entry: &Entry) -> Availability {
-    let presence = match (&entry.image, &entry.binary) {
-        (Some(img), _) => image_present(&img.reference),
-        (_, Some(bin)) => match bin.command.first() {
-            Some(program) => binary_present(entry, program),
-            None => Presence::Unknown {
-                reason: "entry declares an empty command".into(),
-            },
-        },
-        _ => Presence::Unknown {
-            reason: "entry declares neither an image nor a binary".into(),
-        },
+    let presence = match unsupported_here(entry) {
+        Some(p) => p,
+        None => present_here(entry),
     };
 
     let missing_secrets = entry
@@ -158,6 +159,46 @@ pub fn check(entry: &Entry) -> Availability {
     }
 }
 
+/// Does this entry rule out the machine we are on?
+///
+/// Only a locally installed program can be ruled out this way. A container is a
+/// Linux image wherever it runs, and on macOS and Windows the container runtime
+/// supplies the Linux to run it in, so a platform list on an image entry would
+/// describe the image's contents rather than where it can be used. An entry
+/// that says nothing is not ruled out: unstated is a question nobody answered,
+/// not a claim that it runs everywhere.
+fn unsupported_here(entry: &Entry) -> Option<Presence> {
+    if entry.platforms.is_empty() || entry.binary.is_none() {
+        return None;
+    }
+    let here = std::env::consts::OS;
+    if entry.platforms.iter().any(|p| p == here) {
+        return None;
+    }
+    Some(Presence::Unsupported {
+        reason: format!(
+            "this entry runs on {} and this machine is {here}, so nothing to \
+             install would make it available",
+            entry.platforms.join(" and ")
+        ),
+    })
+}
+
+fn present_here(entry: &Entry) -> Presence {
+    match (&entry.image, &entry.binary) {
+        (Some(img), _) => image_present(&img.reference),
+        (_, Some(bin)) => match bin.command.first() {
+            Some(program) => binary_present(entry, program),
+            None => Presence::Unknown {
+                reason: "entry declares an empty command".into(),
+            },
+        },
+        _ => Presence::Unknown {
+            reason: "entry declares neither an image nor a binary".into(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +208,60 @@ mod tests {
     }
 
     const SELFTEST: &str = "\n[selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n";
+
+    #[test]
+    fn a_tool_that_cannot_run_here_is_not_reported_as_missing() {
+        // "Not installed" is an instruction and "cannot run on this operating
+        // system" is a fact about the machine. Reporting the second as the
+        // first sends somebody looking for a package that does not exist for
+        // them, which is the whole reason this is a separate answer.
+        let elsewhere = match std::env::consts::OS {
+            "linux" => "windows",
+            _ => "linux",
+        };
+        let e = entry(&format!(
+            "name = \"x\"\nkind = \"detector\"\nlicence = \"X\"\n\
+             platforms = [\"{elsewhere}\"]\n\
+             [binary]\ncommand = [\"definitely-not-installed\"]\n{SELFTEST}"
+        ));
+        let got = check(&e);
+        match &got.presence {
+            Presence::Unsupported { reason } => {
+                assert!(reason.contains(elsewhere), "{reason}");
+                assert!(reason.contains(std::env::consts::OS), "{reason}");
+            }
+            other => panic!("reported as {other:?} rather than unsupported"),
+        }
+        assert!(!got.presence.is_present());
+    }
+
+    #[test]
+    fn a_tool_listing_this_platform_is_checked_normally() {
+        let e = entry(&format!(
+            "name = \"sh\"\nkind = \"detector\"\nlicence = \"X\"\n\
+             platforms = [\"{}\"]\n\
+             [binary]\ncommand = [\"sh\"]\nversion_args = [\"--version\"]\n{SELFTEST}",
+            std::env::consts::OS
+        ));
+        assert!(
+            !matches!(check(&e).presence, Presence::Unsupported { .. }),
+            "a tool that names this platform was ruled out on it"
+        );
+    }
+
+    #[test]
+    fn a_platform_list_does_not_rule_out_a_container() {
+        // A container is a Linux image wherever it runs, and on macOS and
+        // Windows the runtime supplies the Linux to run it in. A platform list
+        // on an image entry would describe the image's contents rather than
+        // where it can be used, so it must not make the tool unavailable.
+        let e = entry(
+            "name = \"x\"\nkind = \"detector\"\nlicence = \"X\"\n\
+             platforms = [\"plan9\"]\n\
+             [image]\nreference = \"r@sha256:abc\"\nsize_mb = 1\nbundled = true\n",
+        );
+        assert!(!matches!(check(&e).presence, Presence::Unsupported { .. }));
+    }
 
     #[test]
     fn a_binary_on_path_is_present_and_pinned_by_its_hash() {

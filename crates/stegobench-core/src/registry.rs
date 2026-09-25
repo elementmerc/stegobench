@@ -47,6 +47,13 @@ pub const BUNDLE_THRESHOLD_MB: u64 = 750;
 /// A sha256 digest written as lowercase hexadecimal: 32 bytes, 64 characters.
 const SHA256_HEX_LEN: usize = 64;
 
+/// The platform names a registry entry may use.
+///
+/// Deliberately the values `std::env::consts::OS` produces rather than prettier
+/// ones, because the check compares against exactly that. A name that reads
+/// well and matches nothing is worse than no field.
+pub const KNOWN_PLATFORMS: &[&str] = &["linux", "macos", "windows"];
+
 /// A registered tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -61,6 +68,22 @@ pub struct Entry {
     /// than a promise.
     #[serde(default)]
     pub maintainer: Maintainer,
+    /// The operating systems this tool can run on.
+    ///
+    /// Empty means the entry does not say, which is the honest default and is
+    /// what every entry written before this field existed means. It is NOT the
+    /// same as "all three": an unstated platform is a question nobody has
+    /// answered, and a run that fails on a Mac should be able to tell the user
+    /// whether the tool cannot run there or merely is not installed.
+    ///
+    /// Only the binary route really needs it. A container is a Linux image
+    /// wherever it runs, and on macOS and Windows the runtime supplies the
+    /// Linux to run it in, so a containerised tool is available anywhere the
+    /// runtime is. A locally installed program is whatever was built for that
+    /// machine, and a Windows-only forensic tool is a real thing this registry
+    /// has to be able to describe rather than quietly fail to find.
+    #[serde(default)]
+    pub platforms: Vec<String>,
     /// How to run it. Exactly one of these must be present.
     #[serde(default)]
     pub image: Option<Image>,
@@ -466,6 +489,20 @@ impl Entry {
             _ => {}
         }
 
+        // A typo here is silent in the worst way: a tool declared for "MacOS"
+        // or "darwin" matches nothing, so `doctor` reports it unsupported on
+        // every machine in the world and the entry looks merely unlucky.
+        for platform in &self.platforms {
+            if !KNOWN_PLATFORMS.contains(&platform.as_str()) {
+                bad.push(format!(
+                    "platform {platform:?} is not one of {}. These are the \
+                     names Rust's own std::env::consts::OS uses, because that \
+                     is what the check compares against",
+                    KNOWN_PLATFORMS.join(", ")
+                ));
+            }
+        }
+
         if let Some(img) = &self.image {
             // The single most common way a result becomes unreproducible.
             //
@@ -624,7 +661,25 @@ impl Entry {
         } else {
             format!("  needs {}", self.secrets.join(", "))
         };
-        format!("{:<16} {:<10} {how}{secrets}", self.name, self.licence)
+        // The route is named rather than left to be inferred from whether the
+        // third column looks like a registry reference. It is the one thing on
+        // this line that changes what the reader has to do next, and what the
+        // run costs them in isolation.
+        format!(
+            "{:<16} {:<18} {:<10} {how}{secrets}",
+            self.name,
+            self.licence,
+            self.route()
+        )
+    }
+
+    /// `container` or `local`: how this tool gets run, in one word.
+    pub fn route(&self) -> &'static str {
+        match (&self.image, &self.binary) {
+            (Some(_), _) => "container",
+            (_, Some(_)) => "local",
+            _ => "unset",
+        }
     }
 }
 

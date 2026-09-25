@@ -198,6 +198,16 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
             )
         };
     } else {
+        // Said once, under the listing, rather than in every entry's
+        // description. The two routes are the only structural choice in this
+        // registry and they cost the reader different things.
+        human.push_str(
+            "\n\ncontainer  runs in a sandbox with no network, pinned by image \
+             digest, so two machines run identical bytes. Needs a container \
+             runtime.\nlocal      runs a program you installed, pinned by the \
+             hash of the file that ran. No sandbox, and the hash is particular \
+             to your build.",
+        );
         let f = reg.footprint();
         human.push_str(&format!(
             "\n\n{} tools in {} images. Default image at most {} MB \
@@ -1261,7 +1271,7 @@ mod tests {
             "arm": {"embedder": "wow", "domain": "spatial", "format": "png"},
             "metrics": {"auc": 0.9, "tpr_at_fpr": {}, "n_clean": 1, "n_stego": 1, "n_error": 0},
             "provenance": {
-                "plugins": [{"name": "x", "image": "sha256:a", "determinism": "nondeterministic"}],
+                "plugins": [{"name": "x", "image": "sha256:a", "determinism": "nondeterministic", "route": "local"}],
                 "harness_version": "0.1.0",
                 "started_utc": "2026-09-25T00:00:00Z",
                 "elapsed_seconds": 1.0,

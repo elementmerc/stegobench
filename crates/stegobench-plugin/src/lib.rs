@@ -220,12 +220,14 @@ mod tests {
         assert_ne!(before, hash_file(&p).unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn which_finds_something_that_exists_and_not_something_that_does_not() {
         assert!(which("sh").is_some(), "sh should be on PATH");
         assert!(which("definitely-not-a-real-program-xyzzy").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_absolute_path_is_used_directly() {
         assert!(which("/bin/sh").is_some() || which("/usr/bin/sh").is_some());

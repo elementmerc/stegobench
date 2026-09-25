@@ -32,9 +32,9 @@ use std::time::{Duration, Instant};
 use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
-    Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Metrics,
-    Pairing, PluginRef, Provenance, Rate, RateUnit, Result1, SplitDiscipline, Subject, SubjectKind,
-    RESULT_SCHEMA_ID,
+    Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Host, Metrics,
+    Pairing, PluginRef, Provenance, Rate, RateUnit, Result1, Route, SplitDiscipline, Subject,
+    SubjectKind, RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Sample, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
@@ -240,6 +240,11 @@ where
                 name: entry.name.clone(),
                 image: subject_version(entry),
                 determinism: Determinism::Nondeterministic,
+                route: if entry.image.is_some() {
+                    Route::Container
+                } else {
+                    Route::Local
+                },
             }],
             harness_version: env!("CARGO_PKG_VERSION").to_string(),
             started_utc,
@@ -247,7 +252,7 @@ where
             // Containers are run with --network=none; a binary entry is a
             // program the operator installed and this cannot speak for it.
             network_reachable: entry.binary.is_some(),
-            host: None,
+            host: Some(host()),
         },
         declarations: Declarations {
             split_discipline: checks.split,
@@ -805,6 +810,25 @@ fn join(request: &Request) -> Result<(Vec<f64>, Vec<bool>, u64), ScoreError> {
     Ok((scores, kept, errored))
 }
 
+/// What machine this ran on, as far as it can be established portably.
+///
+/// The operating system and the architecture always, because both are compile
+/// time constants and both change what a number means: a detector's timing
+/// certainly, and occasionally its answers, where a library dispatches on the
+/// instruction set. The core count where the standard library will say. Memory
+/// has no portable answer at all, and a zero there would read as a measurement
+/// rather than as a gap, so it is left out.
+fn host() -> Host {
+    Host {
+        cores: std::thread::available_parallelism()
+            .ok()
+            .map(|n| n.get() as u32),
+        memory_gb: None,
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
 /// How the subject identifies itself: an image digest, or the binary's hash.
 fn subject_version(entry: &Entry) -> String {
     if let Some(image) = &entry.image {
@@ -969,6 +993,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     /// A detector that scores by file size, so a test can measure without
     /// installing anything.
     fn sizing_detector(dir: &Path) -> Entry {
@@ -994,6 +1019,7 @@ mod tests {
         .expect("parses")
     }
 
+    #[cfg(unix)]
     #[test]
     fn two_runs_over_the_same_corpus_agree_on_every_number() {
         // Baseline Section 2.1 asks for byte-identical output from two runs,
@@ -1024,6 +1050,7 @@ mod tests {
         assert_eq!(first.subject, second.subject);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_resumed_run_reports_the_same_numbers_as_an_uninterrupted_one() {
         // The failure this prevents is the worst kind: a resumed run that
@@ -1093,6 +1120,7 @@ mod tests {
         assert_eq!(checks.split, SplitDiscipline::ByCover);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_cover_split_from_its_twin_stops_the_run() {
         // The whole reason the check exists. A photograph on both sides of the
@@ -1229,6 +1257,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_confounded_corpus_is_scored_and_the_document_says_so() {
         // Deliberately the opposite of what a split leak gets. A second
@@ -1404,6 +1433,7 @@ mod tests {
         assert_eq!(check(&request(&root, None)).expect("checked").digest, None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_digest_reaches_the_result_document() {
         let tmp = tempfile::tempdir().expect("tmp");

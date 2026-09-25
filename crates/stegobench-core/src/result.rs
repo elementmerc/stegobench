@@ -200,9 +200,30 @@ pub struct Provenance {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PluginRef {
     pub name: String,
-    /// Image digest, never a tag.
+    /// Image digest, never a tag. For a locally installed program, the SHA-256
+    /// of the executable that actually ran.
     pub image: String,
     pub determinism: Determinism,
+    /// Which of the two routes produced the digest above, and it decides what
+    /// that digest is worth to somebody else.
+    ///
+    /// A container digest names bytes anybody can pull, so two people's runs
+    /// are comparable by construction. A local binary's hash names bytes on one
+    /// machine: two people who both built the tool from source get different
+    /// hashes for the same version, and neither is wrong. Both are pinned, but
+    /// only one travels, and a reader comparing two results is entitled to know
+    /// which they are holding without having to notice that one digest has a
+    /// repository in front of it.
+    pub route: Route,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    /// A container, run with no network, pinned by image digest.
+    Container,
+    /// A program already installed on the machine that ran it.
+    Local,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -219,9 +240,19 @@ pub enum Determinism {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
-    pub cores: u32,
-    pub memory_gb: u32,
+    /// Optional because no portable way of asking exists for all of these, and
+    /// a zero would read as an answer. Absent means nobody measured it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_gb: Option<u32>,
+    /// `linux`, `macos`, `windows`: the same vocabulary the registry's
+    /// `platforms` field uses, because the two get compared.
     pub os: String,
+    /// `x86_64`, `aarch64`. A detector's timing and sometimes its numbers
+    /// depend on it, and a result that does not say cannot be reproduced on
+    /// purpose.
+    pub arch: String,
 }
 
 /// Claims the harness cannot check, stated so a reader knows what they are
@@ -455,6 +486,7 @@ mod tests {
                     name: "aletheia-rich".into(),
                     image: "ghcr.io/x/y@sha256:abc".into(),
                     determinism: Determinism::Exact,
+                    route: Route::Container,
                 }],
                 harness_version: "0.1.0".into(),
                 started_utc: "2026-09-17T09:02:11Z".into(),

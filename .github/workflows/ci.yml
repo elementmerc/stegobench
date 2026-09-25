@@ -92,9 +92,17 @@ jobs:
         # somebody else's published accuracy when it breaks.
         run: python tools/ci/tier_smoke.py
 
+  # The generators run on all three because they are what a reader runs. The
+  # harness did not, and that was a gap rather than a decision: it registers
+  # tools that only exist on one platform, so it has to be the thing that says
+  # so, on the platform it is saying it from.
   rust:
-    name: Rust workspace
-    runs-on: ubuntu-latest
+    name: Rust workspace, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # rustup ships on the runner and `rust-toolchain.toml` pins the version,
@@ -107,10 +115,29 @@ jobs:
       # cold build is not worth an unpinned dependency.
       - name: Formatting
         run: cargo fmt --all --check
+        if: matrix.os == 'ubuntu-latest'
       - name: Lints, warnings are errors
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
+
+  # Windows compiles but does not yet run the tests, and the split is honest
+  # rather than convenient. The library code is already gated where it touches
+  # Unix, so a compile failure here is a real portability regression and worth
+  # catching. The TESTS are a different matter: a dozen of them drive a shell
+  # script as a stand-in detector, which is the right fixture on a Unix box and
+  # is not a thing on Windows. Running a suite that skips its own subject would
+  # report a green tick for having checked nothing, and that is the failure
+  # this project exists to complain about elsewhere.
+  rust-windows:
+    name: Rust workspace compiles on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Compile, including the test targets
+        run: cargo check --workspace --all-targets
 
   audit:
     name: Dependency audit
