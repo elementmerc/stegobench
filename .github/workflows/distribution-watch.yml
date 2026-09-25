@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# Does every place this project publishes to still serve what we think we sent
+# it?
+#
+# WHY A SCHEDULE AND NOT ONLY A RELEASE STEP
+#
+# A channel can go wrong long after the release. A dataset is taken down, a
+# mirror expires, a docs build starts failing silently, a crate is yanked.
+# Checking only at release time answers the question once and then stops
+# asking, and this project has twice found a wrong public page days after the
+# upload that made it.
+#
+# WHY IT CANNOT BECOME A CHECK NOBODY READS
+#
+# The repository already carries one cautionary example: `docs.yml` is manual
+# only, because a red tick everybody learns to ignore costs more than it
+# reports. This job is built the other way round. It fails only when a channel
+# marked `required` in `tools/release/channels.toml` serves something other
+# than the release, which is a public page saying something untrue. Every
+# channel is `required = false` until somebody has actually published to it, so
+# today this job reports and does not fail, and it becomes load-bearing one
+# channel at a time.
+name: Distribution watch
+
+on:
+  schedule:
+    # 06:00 UTC daily. Late enough that a release published in a UK evening has
+    # propagated, early enough that a takedown is found the next morning.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to check for, without the v"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  channels:
+    name: Every published page states the current release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Read from the workspace rather than passed in, so a scheduled run with
+      # no input still checks something real. A version typed by hand into a
+      # dispatch is what the operator wants to check; the workspace version is
+      # what the repository currently claims to be.
+      - name: Work out which version to look for
+        id: which
+        shell: bash
+        run: |
+          set -euo pipefail
+          typed='${{ inputs.version }}'
+          if [ -n "${typed}" ]; then
+            echo "version=${typed}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "${version}" ]; then
+            echo "::error::could not read the workspace version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check every channel
+        run: |
+          python3 tools/release/verify_published.py \
+            --version "${{ steps.which.outputs.version }}" \
+            --out distribution.json
+
+      # Kept whatever the verdict, because the useful thing about this job is
+      # the history: a channel that has been wrong for three days looks
+      # different from one that broke this morning.
+      - name: Keep the ledger
+        if: always()
+        # The same pin the release workflow already uses and that somebody
+        # resolved with the network available. Never write one of these from
+        # memory: a plausible wrong hash is worse than an obvious blank,
+        # because it looks checked.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: distribution-${{ steps.which.outputs.version }}
+          path: distribution.json
+          retention-days: 90
+          if-no-files-found: warn

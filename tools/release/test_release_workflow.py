@@ -85,6 +85,40 @@ class ActionsArePinnedByCommit(unittest.TestCase):
                         "can be repointed at any commit by whoever owns it.",
                     )
 
+    def test_one_action_is_not_pinned_to_two_different_commits(self) -> None:
+        """Two pins for one action mean somebody wrote a hash from memory.
+
+        A hash cannot be checked by reading it, which is exactly why writing
+        one from memory is tempting and exactly why it is dangerous: a
+        plausible wrong hash looks more checked than a blank does. It happened
+        while this file was being written, in a new workflow that pinned
+        `actions/upload-artifact` to a hash nothing else in the repository
+        agreed with.
+
+        Disagreement is not proof of invention, since a repository can
+        legitimately carry two versions of one action. So this reports the
+        disagreement and names both, rather than deciding which is wrong.
+        """
+        pins: dict[str, set[str]] = {}
+        for workflow in sorted(WORKFLOWS.glob("*.yml")):
+            for match in USES.finditer(workflow.read_text(encoding="utf-8")):
+                ref = match.group("ref")
+                if "@" not in ref:
+                    continue
+                action, pin = ref.split("@", 1)
+                if not FORTY_HEX.match(pin):
+                    continue
+                pins.setdefault(action, set()).add(pin)
+        for action, seen in sorted(pins.items()):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    len(seen), 1,
+                    f"{action} is pinned to {len(seen)} different commits: "
+                    f"{sorted(seen)}. One of them may have been written from "
+                    f"memory. Resolve both against the upstream repository "
+                    f"before trusting either.",
+                )
+
     def test_every_real_pin_records_the_version_it_is(self) -> None:
         """A bare hash is unreviewable. The trailing comment says what it is."""
         for workflow in sorted(WORKFLOWS.glob("*.yml")):
