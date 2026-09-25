@@ -46,8 +46,16 @@ the parts that are deliberately not finished.
   for. `stegobench doctor` then says it cannot run here, separately from its
   count of tools you have not installed.
 - A result records the operating system and the architecture it ran on.
-- `stegobench score` reads an unpacked corpus directory, and marks every such
-  run `custom`, because a directory carries no digest anybody can check.
+- `stegobench score --corpus-id` names the registered corpus a directory
+  holds, and the harness checks the claim instead of taking it. A run is
+  `named` only when the corpus entry declares the digest of its records and
+  the directory matches it; a directory that doesn't is refused before
+  anything is scored.
+- `stegobench score` reads an unpacked corpus directory. A run over one whose
+  registry entry declares no digest is marked `custom`, which is comparable
+  with itself rather than with anybody else's number.
+- Each way a run can fail now exits with its own documented code instead of
+  all of them reporting a plugin failure.
 - `stegobench plan` estimates what a run would cost. It takes the command you
   would type rather than its own flags, so a plan cannot describe a different
   run from the one that would happen.

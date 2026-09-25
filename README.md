@@ -219,11 +219,24 @@ something other than the payload changed, and the result says so and names the
 images. Matching headers prove nothing on their own, so the result distinguishes
 "looked and found nothing" from "could not look".
 
-Two honest limits on it today. It reads an UNPACKED corpus directory, so a
-packed tier has to be extracted first. And every such run is marked `custom`
-in the result, because a directory carries no digest anybody can check and no
-arm anybody can name, which makes the number comparable with itself and
-nothing else. Scoring a registered tier is the next piece of work.
+Point it at a registered corpus and it checks that claim rather than taking
+it:
+
+```sh
+stegobench score --corpus ./pentimento-nano --corpus-id pentimento-core \
+    --detector zsteg
+```
+
+A run is marked `named` only when the corpus entry declares the digest of its
+records and the directory in front of the tool matches it. A directory that
+doesn't match is refused before anything is scored, because you asserted
+something about those bytes that isn't true of them. Most corpora have no such
+digest yet, and those runs are `custom`, carry the registered name and tier,
+and say in one line why. `custom` is a perfectly good run: it's comparable with
+itself rather than with somebody else's.
+
+One honest limit today: it reads an UNPACKED corpus directory, so a packed tier
+has to be extracted first.
 
 **`stegobench plan` estimates before you commit.** It takes the command you
 would run, rather than its own flags, so a plan cannot describe a different
