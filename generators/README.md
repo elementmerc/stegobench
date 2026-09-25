@@ -40,7 +40,8 @@ differ. See `../docs/design/matched-pairs.md`.
 
 ## Reading the table
 
-`CLI` means the module has a `__main__` and is meant to be run.
+`CLI` means the module defines `main(argv)` and is meant to be run, which is
+also how `cli.py` decides what to offer as a `pentimento` subcommand.
 `lib` means other modules import it and running it directly does nothing
 useful.
 
@@ -71,7 +72,7 @@ useful.
 | Module | | What it does |
 |---|---|---|
 | `embedders.py` | lib | The real end-user tools, behind one interface |
-| `tools.py` | CLI | The eight embedders, each with the quirk that makes it different |
+| `tools.py` | lib | The eight embedders, each with the quirk that makes it different. Not a `pentimento` subcommand, but `python3 generators/tools.py` prints which of them can run here |
 | `payloads.py` | lib | Payload bytes that depend on which image they are for, and on nothing else |
 | `embed_adaptive.py` | CLI | Content-adaptive spatial embedding: HUGO, WOW, S-UNIWARD, HILL, MiPOD |
 | `build_adaptive_arms.py` | CLI | The adaptive arms: the hard case, in both domains |
@@ -226,6 +227,6 @@ the corpus" was true rather than merely claimed:
 
     python3 -m unittest discover -s generators -p 'test_*.py'
 
-Fifteen test modules, 361 tests. They run without containers, without network
+Twenty test modules, 551 tests. They run without containers, without network
 and without the corpus: anything needing a real embedder skips with a reason
 rather than passing vacuously.

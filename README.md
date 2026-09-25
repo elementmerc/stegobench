@@ -28,9 +28,11 @@ Two halves, at different stages:
   and what built the corpus behind the numbers in `results/`.
 
 The two halves aren't merged yet. The registry (`plugins/registry/`) is real
-and the Rust `list`/`describe`/`doctor` commands read it live; the actual
-running of a detector against a corpus, end to end, from the Rust binary, is
-the next piece of work, not a finished feature.
+and the Rust `list`/`describe`/`doctor` commands read it live, and `score`
+runs a registered detector over a corpus directory end to end. What it can't
+do yet is score a registered tier: it reads an unpacked directory, so a packed
+tier has to be extracted first and the run is marked `custom`. That, and
+building a corpus from the Rust side, is what the Python half still owns.
 
 ## Three commands to try
 

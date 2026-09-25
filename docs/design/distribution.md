@@ -138,7 +138,7 @@ property being bought.
 The per-tier fractions used to be quoted here. They were derived from an
 earlier assignment, they moved when it did, and nothing recomputed them, so
 they have been taken out rather than left sitting beside two figures that are
-checked. `stegobench` fails the docs figure check on a stale number now, and a
+checked. `generators/check_docs_figures.py` fails on a stale number now, and a
 number nothing can check does not belong next to numbers that something can.
 
 Nobody else tiers a steganalysis corpus. Done properly it is a differentiator;

@@ -1,6 +1,6 @@
 # Stegobench
 
-> A reproducible benchmark for image and audio steganalysis. Build a labelled
+> A reproducible benchmark for image steganalysis. Build a labelled
 > corpus, run detectors over identical bytes, and report numbers somebody else
 > can check.
 
@@ -73,7 +73,7 @@ retry a 3 or a 7 unchanged; read the message, which names the reason.
 in `crates/stegobench-core/src/{result,run,manifest}.rs`. A document you did
 not generate yourself should be checked with `stegobench validate` before you
 trust anything in it, because a result naming a corpus that has since changed
-is exactly the failure `validate`/`verify` exist to catch.
+is exactly the failure `validate` exists to catch.
 
 ## The rules that are not obvious from the flags
 
@@ -91,8 +91,8 @@ the tool itself is the source of truth for its own reasoning:
 
 ## What an agent should not do here
 
-- Do not call `plan` expecting a working run; it is not built.
-  See "Command vocabulary" above.
+- Do not call `plan` expecting the run to happen. It estimates and returns;
+  nothing is scored and nothing is written. See "Command vocabulary" above.
 - Do not treat a registry entry's `image.reference` as safe to run without a
   digest. `stegobench` itself refuses to load one that is not: see `plugins`
   in `stegobench help plugins`.

@@ -2,7 +2,8 @@
 
 ## Install
 
-Python 3.14. The Rust crates need the toolchain pinned in
+Python 3.12 or newer, which is what `pyproject.toml` requires; CI runs 3.14.
+The Rust crates need the toolchain pinned in
 `rust-toolchain.toml`; you do not need it to build or score a corpus.
 
 ```sh
@@ -17,7 +18,7 @@ That is enough to build a corpus, embed every arm and score it.
 | | |
 |---|---|
 | `requirements.txt` | Everything the core needs, pinned to the versions that produced the published numbers |
-| `requirements-optional.txt` | Aletheia for the reference detector and SRM features, matplotlib for charts, `lir` for the likelihood-ratio cross check, the Hansken SDK for the extraction plugin. Tests that need them skip rather than fail |
+| `requirements-optional.txt` | matplotlib for charts, `lir` for the likelihood-ratio cross check, `mlcroissant` for validating the dataset record, `webdataset` for reading a packed shard, the Hansken SDK for the extraction plugin, and a note on where to get Aletheia, the reference detector, which isn't on PyPI under that name. Tests that need any of them skip rather than fail |
 
 ## Check it works
 

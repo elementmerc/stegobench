@@ -93,7 +93,7 @@ doctor` runs `must_detect` and `must_clear` before it believes a tool works,
 and an entry that declares no `[selftest]` at all is refused. An embedder
 declares a `[roundtrip]` table as well, because the question there is
 different: hide a known payload, extract it, and compare the bytes. See
-`steghide.toml` for both tables together.
+`plugins/registry/embedders/steghide.toml` for both tables together.
 
 **The entry describes cost honestly if it declares cost at all.** `[cost]`
 records seconds per image, peak memory and cores per worker. Nothing scores a
