@@ -38,6 +38,14 @@ the parts that are deliberately not finished.
   depth and channel count, and a difference marks the run confounded and names
   the images. A run that could compare nothing says so rather than reading as
   the good case.
+- `stegobench list` names the route each tool takes, container or local, and
+  says once underneath what each costs you. A result records the route beside
+  the digest, because a container digest names bytes anybody can pull and a
+  local binary's hash names bytes on one machine.
+- A registry entry can state the platforms a locally installed tool exists
+  for. `stegobench doctor` then says it cannot run here, separately from its
+  count of tools you have not installed.
+- A result records the operating system and the architecture it ran on.
 - `stegobench score` reads an unpacked corpus directory, and marks every such
   run `custom`, because a directory carries no digest anybody can check.
 - `stegobench plan` estimates what a run would cost. It takes the command you
@@ -107,7 +115,10 @@ the parts that are deliberately not finished.
 ### CI
 
 - The generators are tested on Linux, macOS and Windows, because they're what
-  a reader runs. The Rust workspace is tested on Linux.
+  a reader runs. The Rust workspace is tested on Linux and macOS, and compiled
+  on Windows. Its tests don't run there yet: a dozen of them drive a shell
+  script as a stand in detector, and a suite that skipped its own subject
+  would report a pass for having checked nothing.
 - A tier smoke test selects Nano, Lite and Core and builds Nano, which proves
   the nesting guarantee without claiming a six-day build ran in CI.
 - The documentation site build fails on a dead internal link.
