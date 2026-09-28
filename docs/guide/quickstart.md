@@ -48,8 +48,10 @@ scores against whatever answers on it.
 
 ## Or skip the building
 
-A corpus built with this harness is already published, with its own
-documentation: see [Pentimento](https://github.com/elementmerc/pentimento).
+A corpus ships in the box, a smaller one than you can quote a number from, and
+a bigger one built with this harness is already published with its own
+documentation: see [Getting a corpus](/guide/getting-a-corpus) and
+[Pentimento](https://github.com/elementmerc/pentimento).
 
 ## Before you quote a number
 

@@ -268,6 +268,58 @@ pub enum Command {
         limit: Option<u64>,
     },
 
+    /// Download one tier of a registered corpus, and check what arrives
+    ///
+    /// The registry declares the URL, the SHA-256 and the exact size before
+    /// anything is downloaded, and the bytes are checked against all three.
+    /// Anything else is thrown away rather than kept.
+    ///
+    /// A corpus whose terms do not permit redistribution is refused before a
+    /// connection opens, because fetching somebody else's dataset for you would
+    /// make this project the mirror. `stegobench describe <id>` prints how to
+    /// obtain those yourself.
+    ///
+    /// Interrupting it is safe. The partly downloaded bytes are kept and the
+    /// next run continues from them; nothing that looks complete is ever left
+    /// behind half written.
+    ///
+    /// It does not unpack. It reports the verified file and what it is.
+    ///
+    /// EXIT CODES here: 3 there is nothing to fetch; 5 what arrived is not what
+    /// the registry declared; 7 the terms say no; 8 curl is not on PATH.
+    ///
+    /// Example:
+    ///   stegobench fetch pentimento-core --tier nano
+    Fetch {
+        /// A corpus id as `stegobench list corpora` prints it.
+        #[arg(value_name = "CORPUS")]
+        corpus: String,
+        /// Which tier to fetch: the vocabulary the corpus publishes, such as
+        /// nano, lite or core. `stegobench describe <id>` lists the ones it
+        /// declares a route for.
+        #[arg(long, value_name = "TIER")]
+        tier: String,
+        /// Where verified bytes are kept, laid out by content address.
+        ///
+        /// Defaults to a directory under your user data directory, so the same
+        /// tier fetched from two working directories is downloaded once.
+        #[arg(long, value_name = "DIR", env = "STEGOBENCH_CORPUS_DIR")]
+        dest: Option<std::path::PathBuf>,
+        /// Refuse a route that declares more bytes than this.
+        ///
+        /// Checked against the size the REGISTRY declares, before anything
+        /// opens, so a tier larger than you meant to fetch costs nothing.
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
+        /// Wall-clock ceiling for the whole download, in minutes.
+        ///
+        /// The default fits the largest published tier over an ordinary
+        /// connection. Fetching a small one, set something small: a budget
+        /// sized for the worst case never fires for the ordinary one.
+        #[arg(long, value_name = "MINUTES", default_value = "720")]
+        budget_minutes: u64,
+    },
+
     /// Re-check a result against the corpus it says it measured
     ///
     /// A result names the bytes it was measured on by digest. This recomputes

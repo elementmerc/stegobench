@@ -21,11 +21,12 @@
 //! declining, so a caller that cannot tell them from an error will retry them
 //! forever.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command, ReportFormat};
+use stegobench_cli::fetch;
 use stegobench_cli::help_topics;
 use stegobench_cli::needs;
 use stegobench_cli::registry;
@@ -218,21 +219,17 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
         };
     } else {
         // Said once, under the listing, rather than in every entry's
-        // description. The two routes are the only structural choice in this
-        // registry and they cost the reader different things.
-        // THREE ROUTES, NOT TWO, AND THE LEGEND USED TO NAME TWO.
-        //
-        // It glossed `container` as "runs in a sandbox with no network", which
-        // is true of a container and false of an entry that names an image and
-        // sets `invoke.host`: StegaShield is a service, the image identifies
-        // the subject, and what runs is an adapter on this machine that posts
-        // to an instance over HTTP. A reader who took the legend at its word
-        // would believe a run of it was sandboxed and offline. Both halves of
-        // that are wrong, and the network one is the one that matters.
+        // description. TWO FACTS, NOT ONE: what pins the tool, and what it can
+        // reach. The legend used to carry them as a single word and was wrong
+        // about the third shape, where the image names the subject and an
+        // adapter here does the running. The vocabulary matches
+        // `provenance.plugins[].pinned_by` and `.isolation` in a result, so
+        // the listing and the document say the same words.
         human.push_str(
-            "\n\ncontainer  sandboxed, no network, pinned by image digest. \
+            "\n\ncontainer  pinned by image digest, sandboxed, no network. \
              Needs a container runtime.\nlocal      a program you installed, \
-             pinned by the hash of the file that ran. No sandbox.",
+             pinned by the hash of the file that ran. No sandbox, your \
+             network.",
         );
         // Counted rather than asserted. A sentence saying "one of these is a
         // service" would be a claim about a registry that changes, and the
@@ -246,7 +243,8 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
             human.push_str(&format!(
                 "\n\nSERVICE, not sandboxed, and needs the network: {}. The \
                  image names the subject; an adapter here reaches an instance \
-                 you started.",
+                 you started. Nothing checks that instance was built from that \
+                 image, so a result of it reads `unpinned`.",
                 services.join(", ")
             ));
         }
@@ -1332,7 +1330,12 @@ fn cmd_score(
         outcomes.push((entry.name.clone(), outcome));
     }
 
-    summarise(&outcomes, &out_dir, many)
+    summarise(
+        &outcomes,
+        &out_dir,
+        many,
+        fetch::offer(&resolved.registry).as_ref(),
+    )
 }
 
 /// Where the documents go, decided before any work happens.
@@ -1499,7 +1502,12 @@ where
 /// reader who will one day not bother. So the ratio leads, the skipped
 /// detectors are named with their reasons, and the exit code carries the same
 /// fact for anything that is not a person.
-fn summarise(outcomes: &[(String, Outcome)], out_dir: &Option<PathBuf>, many: bool) -> Output {
+fn summarise(
+    outcomes: &[(String, Outcome)],
+    out_dir: &Option<PathBuf>,
+    many: bool,
+    offer: Option<&fetch::Offer>,
+) -> Output {
     let measured = outcomes
         .iter()
         .filter(|(_, o)| matches!(o, Outcome::Measured { .. }))
@@ -1617,6 +1625,33 @@ fn summarise(outcomes: &[(String, Outcome)], out_dir: &Option<PathBuf>, many: bo
             lines.push(format!(
                 "Next: stegobench report {} --format markdown",
                 dir.display()
+            ));
+        }
+    }
+
+    // WHY THIS DOES NOT PRINT ON EVERY RUN.
+    //
+    // An offer a reader sees after every measurement is an advertisement, and
+    // an advertisement is something people learn to skip. This fires only where
+    // it is the useful next line: a run small enough that the number cannot be
+    // quoted, which is what scoring the shipped starter corpus looks like. A
+    // real tier is thousands of images and never reaches it.
+    let largest = outcomes
+        .iter()
+        .filter_map(|(_, o)| match o {
+            Outcome::Measured { result, .. } => {
+                Some(result.metrics.n_clean + result.metrics.n_stego)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if let Some(offer) = offer {
+        if largest > 0 && largest < fetch::SMALL_RUN_IMAGES {
+            lines.push(format!(
+                "{largest} images is a demonstration, not a measurement. \
+                 Next: {}",
+                offer.line()
             ));
         }
     }
@@ -1742,14 +1777,91 @@ fn cmd_report(paths: &[PathBuf], format: ReportFormat, out: Option<&Path>) -> Ou
     output
 }
 
+/// Download one tier of one corpus.
+///
+/// THE ORDER HERE IS THE POINT.
+///
+/// The corpus is resolved, then the refusal is decided, and only then is a
+/// transport looked for. A corpus this tool may not fetch is refused
+/// identically on a machine with `curl` and on a machine without one, and
+/// neither answer is ever "install curl" to somebody whose real answer is that
+/// the terms say no.
+fn cmd_fetch(
+    resolved: &Resolved,
+    id: &str,
+    tier: &str,
+    dest: Option<&Path>,
+    max_bytes: Option<u64>,
+    budget_minutes: u64,
+) -> Output {
+    let Some(entry) = resolved.registry.corpora.get(id) else {
+        return Output::err(
+            exit::USAGE,
+            format!(
+                "no corpus with id {id:?} is registered. \
+                 `stegobench list corpora` shows what is."
+            ),
+        );
+    };
+    if let Some(refused) = fetch::refusal(entry) {
+        return Output::err(refused.exit_code(), refused.to_string());
+    }
+
+    // Asked before a directory is created, so a mistyped tier leaves nothing
+    // behind. The message is the core's own rather than a second copy of it.
+    if entry.route(tier).is_none() {
+        let e = fetch::Error::Failed(stegobench_core::fetch::FetchError::UnknownTier {
+            id: entry.id.clone(),
+            tier: tier.to_string(),
+            known: entry.download.iter().map(|r| r.tier.clone()).collect(),
+        });
+        return Output::err(e.exit_code(), e.to_string());
+    }
+
+    let limits = fetch::limits(max_bytes, budget_minutes);
+    let dest = dest.map_or_else(fetch::default_dest, Path::to_path_buf);
+    // A pre-flight rather than a discovery an hour in: an unwritable
+    // destination is the same failure whether it is found now or after 48 GB.
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        return Output::err(
+            exit::FAILURE,
+            format!(
+                "cannot use {} to keep the download: {e}. Name a writable \
+                 directory with --dest.",
+                dest.display()
+            ),
+        );
+    }
+    let transport = match fetch::Curl::find(limits) {
+        Ok(t) => t,
+        Err(e) => return Output::err(e.exit_code(), e.to_string()),
+    };
+    let store = stegobench_core::fetch::FileStore::new(&dest);
+
+    let mut stderr = std::io::stderr();
+    let interactive = stderr.is_terminal();
+    let mut renderer = fetch::Renderer::new(&mut stderr, interactive);
+    let outcome = fetch::run(entry, tier, &transport, &store, limits, &mut renderer);
+    let progress_error = renderer.write_error().map(|e| e.to_string());
+    drop(renderer);
+
+    match outcome {
+        Ok(fetched) => {
+            let (json, human) = fetch::describe_success(entry, tier, &fetched, progress_error);
+            Output::ok(json, human)
+        }
+        Err(e) => Output::err(e.exit_code(), e.to_string()),
+    }
+}
+
 /// What a bare `stegobench` prints.
 ///
 /// It used to print the whole help, which is three screens answering a
 /// question nobody typing one word has asked yet. A person who types the bare
 /// name wants to know what this is and what to type next, and both fit in a
 /// few lines. Everything else is one `--help` away and nothing was removed.
-fn cmd_orientation() -> Output {
-    let human = "stegobench measures how good a steganography detector is, by \
+fn cmd_orientation(offer: Option<fetch::Offer>) -> Output {
+    let mut human = "stegobench measures how good a steganography detector is, by \
          running it over images whose answers are already known.\n\
          It does NOT examine your own images (`stegobench help scope`).\n\n  \
          stegobench list detectors    what this installation can run\n  \
@@ -1757,11 +1869,23 @@ fn cmd_orientation() -> Output {
          stegobench help              the reasoning, one topic at a time\n  \
          stegobench --help            every command and flag"
         .to_string();
+    let mut next = vec![
+        "stegobench list detectors".to_string(),
+        "stegobench doctor".to_string(),
+        "stegobench help scope".to_string(),
+    ];
+    // ONE line, and only the one that runs. A reader with nothing to score
+    // needs somewhere to get images, and the offer is generated from the
+    // registry entry so it can never name a route that entry has not declared.
+    if let Some(offer) = &offer {
+        human.push_str(&format!("\n\n  {}", offer.line()));
+        next.push(offer.run.clone());
+    }
     let mut out = Output::ok(
         serde_json::json!({
             "ok": false,
             "error": "no command given",
-            "next": ["stegobench list detectors", "stegobench doctor", "stegobench help scope"],
+            "next": next,
         }),
         human,
     );
@@ -1795,7 +1919,13 @@ fn cmd_wrong_direction(word: &str) -> Output {
 
 fn run(cli: &Cli) -> Output {
     let Some(command) = &cli.command else {
-        return cmd_orientation();
+        // Fail-open: a registry that will not load is a problem for the
+        // commands that need one, and refusing to print three lines of
+        // orientation over it would answer the wrong question.
+        let offer = registry::resolve(cli.registry.as_deref())
+            .ok()
+            .and_then(|r| fetch::offer(&r.registry));
+        return cmd_orientation(offer);
     };
     match command {
         Command::Schema { name } => cmd_schema(name),
@@ -1826,6 +1956,22 @@ fn run(cli: &Cli) -> Output {
                 out.as_deref(),
                 *timeout,
                 *limit,
+            )
+        }),
+        Command::Fetch {
+            corpus,
+            tier,
+            dest,
+            max_bytes,
+            budget_minutes,
+        } => with_registry(cli, |r| {
+            cmd_fetch(
+                r,
+                corpus,
+                tier,
+                dest.as_deref(),
+                *max_bytes,
+                *budget_minutes,
             )
         }),
         Command::Report { paths, format, out } => cmd_report(paths, *format, out.as_deref()),
@@ -2320,7 +2466,7 @@ mod tests {
     /// word is asking what this is, and that answer is short.
     #[test]
     fn a_bare_invocation_points_somewhere_rather_than_printing_everything() {
-        let out = cmd_orientation();
+        let out = cmd_orientation(None);
         assert_eq!(out.code, exit::USAGE);
         assert!(
             out.payload_on_stdout,
@@ -2639,11 +2785,11 @@ mod tests {
             "arm": {"embedder": "wow", "domain": "spatial", "format": "png"},
             "metrics": {"auc": 0.9, "tpr_at_fpr": {}, "n_clean": 1, "n_stego": 1, "n_error": 0},
             "provenance": {
-                "plugins": [{"name": "x", "image": "sha256:a", "determinism": "nondeterministic", "route": "local"}],
+                "plugins": [{"name": "x", "image": "sha256:a", "determinism": "nondeterministic", "pinned_by": "executable-hash", "isolation": "host"}],
                 "harness_version": "0.1.0",
                 "started_utc": "2026-09-25T00:00:00Z",
                 "elapsed_seconds": 1.0,
-                "network_reachable": false
+                "network_reachable": true
             },
             "declarations": {
                 "split_discipline": "not-applicable",

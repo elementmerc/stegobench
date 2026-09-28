@@ -33,6 +33,7 @@ features:
 |---|---|
 | Know what this is before installing anything | [What it is](/guide/what-it-is) |
 | Run it | [Quickstart](/guide/quickstart) |
+| Get images to score | [Getting a corpus](/guide/getting-a-corpus) |
 | Build a corpus | [Build a corpus](/guide/build-a-corpus) |
 | Score a detector that runs as an HTTP service | [A detector behind an HTTP endpoint](/guide/http-detector) |
 | Understand what makes a measurement valid | [Pairing](/guide/pairing) |

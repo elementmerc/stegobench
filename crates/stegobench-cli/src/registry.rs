@@ -293,7 +293,11 @@ fn beside_executable() -> Vec<PathBuf> {
 }
 
 /// This platform's per-user data directory, by its own convention.
-fn user_data_dir() -> Option<PathBuf> {
+///
+/// Public because `fetch` puts its content-addressed corpus store under the
+/// same directory, and two implementations of this would disagree the first
+/// time somebody set XDG_DATA_HOME.
+pub fn user_data_dir() -> Option<PathBuf> {
     if cfg!(target_os = "windows") {
         return non_empty("APPDATA").map(PathBuf::from);
     }

@@ -51,6 +51,15 @@ progress still reaches a terminal.
   and whether images derived from it may be republished. Terms nobody has
   read are marked unverified rather than guessed at, and republication is
   refused on anything unverified.
+- `stegobench fetch <corpus> --tier <TIER>`: download one tier of a registered
+  corpus over the route its registry entry declares, and check the bytes
+  against the SHA-256 and the size that entry declared in advance. A corpus
+  whose terms do not permit redistribution is refused before anything opens,
+  because fetching it on a user's behalf would make this project the mirror;
+  exits 7 for that, 3 where there is no route to fetch, 5 where what arrived is
+  not what was declared. It resumes an interrupted download and never leaves a
+  half-written file at the path that means verified. It does not unpack: it
+  reports one verified file and what it is. `curl` carries the bytes.
 - `stegobench doctor`: checks whether this machine can run what the registry
   claims. With self-tests enabled (the default) it asks each present tool to
   score a known planted signal and a known clean fixture, because a tool that
