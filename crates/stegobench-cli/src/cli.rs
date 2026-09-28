@@ -172,24 +172,48 @@ pub enum Command {
         no_selftest: bool,
     },
 
-    /// Score a corpus with a detector
+    /// Score a corpus with one detector, several, or every registered one
     ///
-    /// Reads every sample under --corpus, asks the detector about each one,
-    /// and writes a result-v1 document naming the exact bytes it measured.
+    /// Reads every sample under --corpus, asks each detector about each one,
+    /// and writes one result-v1 document per detector naming the exact bytes
+    /// it measured. `stegobench report` turns those documents into a table.
     ///
-    /// The run is resumable. Every answer is written to the records file as it
-    /// is produced, and running the same command again picks up where it
-    /// stopped rather than starting over.
+    /// The corpus is established once however many detectors are asked. The
+    /// digest, the image check, the pairing check and the split check are
+    /// properties of the bytes, so they are paid for once and shared.
+    ///
+    /// The run is resumable, per detector. Every answer is written to that
+    /// detector's records file as it is produced, and running the same command
+    /// again picks up where it stopped rather than starting over.
+    ///
+    /// A detector that is not installed is reported and skipped rather than
+    /// ending the command, and a detector that fails does not lose the others'
+    /// work. The exit code says whether every detector asked for was actually
+    /// measured: see EXIT CODES below.
+    ///
+    /// EXIT CODES particular to this command. 0 means every detector asked
+    /// for produced a result. 3 means at least one was skipped because it is
+    /// not available here and none failed at run time. 4 means at least one
+    /// failed while running. Codes 3 and 4 are returned even when other
+    /// detectors succeeded and their documents were written, so a zero never
+    /// means "some of them".
     ///
     /// Example:
     ///   stegobench score --corpus ./pentimento-nano --detector zsteg
+    ///
+    /// Example, every registered detector at once:
+    ///   stegobench score --corpus ./pentimento-nano --detector all --out ./results
     Score {
         /// A directory of samples: images with a JSON record beside each.
         #[arg(long, value_name = "DIR")]
         corpus: std::path::PathBuf,
         /// Which registered detector to ask. See `stegobench list detectors`.
-        #[arg(long, value_name = "NAME")]
-        detector: String,
+        ///
+        /// Repeatable, and `all` means every registered detector. With more
+        /// than one, --out and --records name DIRECTORIES rather than files
+        /// and each detector gets its own file inside them.
+        #[arg(long, value_name = "NAME", num_args = 1.., required = true)]
+        detector: Vec<String>,
         /// Which registered corpus the directory holds. See
         /// `stegobench list corpora`.
         ///
@@ -200,11 +224,25 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         corpus_id: Option<String>,
         /// Where the per-item answers are kept, and where a resumed run reads
-        /// what is already done. Defaults to <corpus>.records.jsonl beside the
-        /// corpus.
+        /// what is already done.
+        ///
+        /// Defaults to <corpus>.<detector>.records.jsonl beside the corpus.
+        /// The detector's name is in it deliberately: two detectors sharing
+        /// one records file would resume from each other's answers and each
+        /// report the other's numbers as its own.
+        ///
+        /// With more than one detector this is a DIRECTORY, and each
+        /// detector's records go in <dir>/<detector>.records.jsonl.
         #[arg(long, value_name = "FILE")]
         records: Option<std::path::PathBuf>,
         /// Where to write the result-v1 document. Defaults to stdout.
+        ///
+        /// With more than one detector this is a DIRECTORY, created if it is
+        /// not there, and each document is written to <dir>/<detector>.json.
+        /// Several documents cannot share one file or one stdout, so with no
+        /// --out they go to <corpus>.results/ beside the corpus and the
+        /// command says where. Run `stegobench report <dir>` for one table
+        /// over all of them.
         #[arg(long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
         /// Seconds any single image is given before the detector is killed and

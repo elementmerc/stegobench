@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command, ReportFormat};
 use stegobench_cli::help_topics;
+use stegobench_cli::needs;
 use stegobench_cli::report;
 use stegobench_cli::score;
 use stegobench_core::registry::{Kind, Registry};
@@ -35,6 +36,7 @@ use stegobench_plugin::availability::Presence;
 use stegobench_plugin::{availability, selftest, Verified};
 
 /// What a subcommand produced: a JSON value for stdout, and human text for stderr.
+#[cfg_attr(test, derive(Debug))]
 struct Output {
     json: serde_json::Value,
     human: String,
@@ -213,6 +215,15 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
         // Said once, under the listing, rather than in every entry's
         // description. The two routes are the only structural choice in this
         // registry and they cost the reader different things.
+        // THREE ROUTES, NOT TWO, AND THE LEGEND USED TO NAME TWO.
+        //
+        // It glossed `container` as "runs in a sandbox with no network", which
+        // is true of a container and false of an entry that names an image and
+        // sets `invoke.host`: StegaShield is a service, the image identifies
+        // the subject, and what runs is an adapter on this machine that posts
+        // to an instance over HTTP. A reader who took the legend at its word
+        // would believe a run of it was sandboxed and offline. Both halves of
+        // that are wrong, and the network one is the one that matters.
         human.push_str(
             "\n\ncontainer  runs in a sandbox with no network, pinned by image \
              digest, so two machines run identical bytes. Needs a container \
@@ -220,6 +231,26 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
              hash of the file that ran. No sandbox, and the hash is particular \
              to your build.",
         );
+        // Counted rather than asserted. A sentence saying "one of these is a
+        // service" would be a claim about a registry that changes, and the
+        // point of this listing is that it cannot go stale.
+        let services = wanted
+            .iter()
+            .filter(|e| e.invoke.as_ref().is_some_and(|i| i.host))
+            .map(|e| e.name.as_str())
+            .collect::<Vec<_>>();
+        if !services.is_empty() {
+            human.push_str(&format!(
+                "\n\n{} listed as `container` above {} in fact a SERVICE: {}. \
+                 The image identifies the subject, an adapter on this machine \
+                 reaches an instance you started, and the network is not \
+                 merely available to it, it is required. Not sandboxed.",
+                services.len(),
+                if services.len() == 1 { "is" } else { "are" },
+                services.join(", ")
+            ));
+        }
+        human.push_str("\n\n`stegobench doctor` says what each one still needs from you.");
         let f = reg.footprint();
         human.push_str(&format!(
             "\n\n{} tools in {} images. Default image at most {} MB \
@@ -244,20 +275,29 @@ fn cmd_describe(dir: &Path, name: &str) -> Output {
         Ok(r) => r,
         Err(o) => return o,
     };
+    // The needs block goes FIRST, above the entry, because it is the question
+    // somebody typing `describe` is usually asking. The TOML below it is the
+    // whole truth and is what they read second. One shape for every subject:
+    // a container, a binary, a service and a corpus all answer here, so a
+    // reader never has to know which of the four they are holding.
     if let Some(e) = reg.entries.get(name) {
-        return Output::ok(
-            serde_json::to_value(e).unwrap_or(serde_json::Value::Null),
-            toml::to_string_pretty(e).unwrap_or_else(|_| format!("{e:#?}")),
-        );
+        let needs = needs::of_tool(e, &availability::check(e));
+        let mut json = serde_json::to_value(e).unwrap_or(serde_json::Value::Null);
+        if let Some(map) = json.as_object_mut() {
+            map.insert("needs".into(), needs.to_json());
+        }
+        return Output::ok(json, describe_block(&needs, e.name.as_str(), e, "tool"));
     }
     // One vocabulary: a corpus id is looked up in the same breath as a tool
     // name, because a user should not have to know which of the two a thing is
     // before they can ask about it.
     if let Some(c) = reg.corpora.get(name) {
-        return Output::ok(
-            serde_json::to_value(c).unwrap_or(serde_json::Value::Null),
-            toml::to_string_pretty(c).unwrap_or_else(|_| format!("{c:#?}")),
-        );
+        let needs = needs::of_corpus(c);
+        let mut json = serde_json::to_value(c).unwrap_or(serde_json::Value::Null);
+        if let Some(map) = json.as_object_mut() {
+            map.insert("needs".into(), needs.to_json());
+        }
+        return Output::ok(json, describe_block(&needs, c.id.as_str(), c, "corpus"));
     }
     let known: Vec<_> = reg
         .entries
@@ -274,6 +314,32 @@ fn cmd_describe(dir: &Path, name: &str) -> Output {
     )
 }
 
+/// What `describe` prints: the needs block, then the entry in full.
+///
+/// One renderer for a tool and for a corpus, on purpose. They are different
+/// types with different fields, and the thing a reader wants first is the same
+/// for both: whether they can use it, and what to type if not.
+fn describe_block<T: serde::Serialize + std::fmt::Debug>(
+    needs: &needs::Needs,
+    name: &str,
+    entry: &T,
+    kind: &str,
+) -> String {
+    let body = toml::to_string_pretty(entry).unwrap_or_else(|_| format!("{entry:#?}"));
+    let steps = needs.block();
+    if steps.is_empty() {
+        return format!(
+            "{name}  [{}]\nEverything this {kind} needs is here. Whether it \
+             WORKS is what `stegobench doctor` asks and this does not.\n\n{body}",
+            needs.readiness.word()
+        );
+    }
+    format!(
+        "{name}  [{}]\nWhat this {kind} needs from you:\n{steps}\n\n{body}",
+        needs.readiness.word()
+    )
+}
+
 fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
     let reg = match load_registry(dir) {
         Ok(r) => r,
@@ -286,6 +352,9 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
     // operating system is not a thing the reader failed to install, and a
     // count that lumps the two together reads as a job of work waiting.
     let mut unsupported = 0;
+    // Present, absent and "nobody can say" are three answers, and the third
+    // one is a real state rather than a soft no. See the match below.
+    let mut undetermined = 0;
 
     for entry in reg.entries.values() {
         let mut check = availability::check(entry);
@@ -304,6 +373,13 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
         };
         match &check.presence {
             Presence::Unsupported { .. } => unsupported += 1,
+            // Counted apart from `missing`, because it is not one. A service
+            // whose address nobody has supplied is not a thing the reader
+            // failed to install, and the summary line used to say "13 not
+            // installed" over a registry where one of the thirteen needed an
+            // `export` rather than a `docker pull`. That sends somebody
+            // looking for a package that does not exist.
+            Presence::Unknown { .. } => undetermined += 1,
             p if !p.is_present() => missing += 1,
             _ => {}
         }
@@ -326,16 +402,45 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
             }
             _ => check.summary(),
         };
-        rows.push((check, verdict, detail));
+        // Computed from the availability answer already paid for, so nothing
+        // here asks the container runtime a second time.
+        let needs = needs::of_tool(entry, &check);
+        rows.push((check, verdict, detail, needs));
     }
 
-    let mut human: Vec<String> = rows.iter().map(|(_, _, d)| d.clone()).collect();
+    // One line per tool, and under the ones that need something, the lines to
+    // type. Indented under their own tool rather than gathered at the bottom,
+    // so a reader scanning thirteen rows finds the instruction beside the
+    // problem rather than having to match names up afterwards.
+    let mut human: Vec<String> = Vec::new();
+    for (_, _, detail, needs) in &rows {
+        human.push(detail.clone());
+        let block = needs.block();
+        if !block.is_empty() {
+            for line in block.lines() {
+                human.push(format!("  {line}"));
+            }
+        }
+    }
+    let needing = rows
+        .iter()
+        .filter(|(_, _, _, n)| n.readiness == needs::Readiness::NeedsYou)
+        .count();
     human.push(String::new());
     human.push(format!(
         "{} tool(s): {passed} verified, {answered} answering, {broken} broken, \
-         {missing} not installed, {skipped} not checked.",
+         {missing} not installed, {undetermined} undetermined, {skipped} not \
+         checked.",
         rows.len()
     ));
+    if undetermined > 0 {
+        human.push(format!(
+            "{undetermined} of those is something nobody here can answer yet, \
+             not something to install: a service needs the address of your own \
+             instance, and a container image cannot be looked for without a \
+             runtime. Its line says which."
+        ));
+    }
     if unsupported > 0 {
         human.push(format!(
             "{unsupported} of those cannot run on {} at all, so nothing to \
@@ -359,16 +464,25 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
                 .into(),
         );
     }
+    if needing > 0 {
+        human.push(format!(
+            "{needing} tool(s) need something from you, and the lines to type \
+             are indented under each one. `stegobench describe <name>` prints \
+             the same thing with the whole entry beside it."
+        ));
+    }
 
     let json = serde_json::json!({
         "checked": rows.len(),
+        "needing_action": needing,
         "verified": passed,
         "broken": broken,
         "missing": missing,
         "unsupported_here": unsupported,
+        "undetermined": undetermined,
         "not_checked": skipped,
         "answering": answered,
-        "tools": rows.iter().map(|(c, v, d)| serde_json::json!({
+        "tools": rows.iter().map(|(c, v, d, n)| serde_json::json!({
             "name": c.name,
             "present": c.presence.is_present(),
             "verified": c.verified,
@@ -380,11 +494,18 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
             },
             "detail": d,
             "missing_secrets": c.missing_secrets,
+            // The same field name and the same shape as `describe`'s, so a
+            // script reads one structure whichever command it called.
+            "needs": n.to_json(),
         })).collect::<Vec<_>>(),
     });
 
     let mut out = Output::ok(json, human.join("\n"));
-    if missing > 0 || broken > 0 {
+    // An undetermined tool counts, and it did not used to only because it was
+    // being counted as missing. A machine where a service's address has never
+    // been set is not a machine `doctor` should pronounce fit: nothing has
+    // established that the tool can be reached at all.
+    if missing > 0 || broken > 0 || undetermined > 0 {
         out.code = exit::ENVIRONMENT_UNFIT;
     }
     out
@@ -690,11 +811,9 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
         Ok(r) => r,
         Err(o) => return o,
     };
-    let Some(entry) = reg.entries.get(detector) else {
-        return Output::err(
-            exit::USAGE,
-            format!("no tool named {detector:?} is registered."),
-        );
+    let entries = match resolve_detectors(&reg, detector) {
+        Ok(e) => e,
+        Err(o) => return o,
     };
 
     // Counted rather than guessed from the directory size. Walking the corpus
@@ -719,44 +838,97 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
     // answered half the question somebody asks before committing six hours.
     let (configuration, why) = plan_configuration(&reg, corpus_id.as_deref(), limit.is_some());
 
-    let per_image = entry.cost.seconds_per_image;
-    let seconds = per_image.map(|s| s * items as f64);
     // One JSON line per answer, measured at roughly sixty bytes on the real
-    // records this writes.
-    let records_mb = (items as f64 * 60.0) / 1_048_576.0;
+    // records this writes, and one records file per detector.
+    let records_mb = (items as f64 * 60.0 * entries.len() as f64) / 1_048_576.0;
+
+    let mut per_detector = Vec::new();
+    let mut lines = Vec::new();
+    // Summed only over the detectors that declare a rate. A total that
+    // silently treated an unmeasured tool as free would be the plan lying
+    // about the one thing it is for, so the count of unestimated ones is
+    // carried beside the total rather than folded into it.
+    let mut total_seconds = 0.0f64;
+    let mut unestimated = 0usize;
+    for entry in &entries {
+        let per_image = entry.cost.seconds_per_image;
+        let seconds = per_image.map(|s| s * items as f64);
+        match seconds {
+            Some(s) => total_seconds += s,
+            None => unestimated += 1,
+        }
+        let duration = match seconds {
+            Some(s) => format!("about {}", human_duration(s)),
+            None => "unknown: it declares no seconds_per_image".to_string(),
+        };
+        lines.push(format!("{:<16} {duration}", entry.name));
+        per_detector.push(serde_json::json!({
+            "detector": entry.name,
+            "seconds_per_image": per_image,
+            "estimated_seconds": seconds,
+        }));
+    }
 
     let mut value = serde_json::Map::new();
     value.insert("items".into(), serde_json::json!(items));
-    value.insert("detector".into(), serde_json::json!(detector));
-    value.insert("seconds_per_image".into(), serde_json::json!(per_image));
-    value.insert("estimated_seconds".into(), serde_json::json!(seconds));
+    value.insert(
+        "detectors".into(),
+        serde_json::json!(entries.iter().map(|e| &e.name).collect::<Vec<_>>()),
+    );
+    value.insert("per_detector".into(), serde_json::json!(per_detector));
+    value.insert("estimated_seconds".into(), serde_json::json!(total_seconds));
+    value.insert(
+        "unestimated_detectors".into(),
+        serde_json::json!(unestimated),
+    );
     value.insert("records_mb".into(), serde_json::json!(records_mb));
     value.insert("configuration".into(), serde_json::json!(configuration));
     value.insert(
         "worst_case_seconds".into(),
-        serde_json::json!(items * timeout),
+        serde_json::json!(items * timeout * entries.len() as u64),
     );
 
-    let duration = match seconds {
-        Some(s) => format!("about {}", human_duration(s)),
-        // Said rather than defaulted. A tool with no measured rate cannot be
-        // estimated, and inventing a number here would be the plan lying
-        // about the one thing it is for.
-        None => format!(
-            "unknown: {detector:?} declares no seconds_per_image, so nothing \
-             here can estimate how long it takes"
-        ),
-    };
-    Output::ok(
-        serde_json::Value::Object(value),
-        format!(
-            "{items} item(s) to score with {detector}. Time: {duration}. \
-             Records file: about {records_mb:.1} MB. Worst case, if every \
-             item hit the {timeout}s deadline: {}.\nThe result would be \
-             {configuration}: {why}",
-            human_duration((items * timeout) as f64)
-        ),
-    )
+    let mut human = format!(
+        "{items} item(s) to score with each of {} detector(s):\n",
+        entries.len()
+    );
+    human.push_str(&lines.join("\n"));
+    let estimated = entries.len() - unestimated;
+    if estimated == 0 {
+        // "Total: about 0 seconds" over a set where nothing could be estimated
+        // is a number that reads as free and means nothing was measured. No
+        // total is the honest output.
+        human.push_str(
+            "\n\nNo total: not one of these declares a seconds_per_image, so \
+             nothing here can estimate how long the run takes. The worst case \
+             below is the only bound there is.",
+        );
+    } else {
+        human.push_str(&format!(
+            "\n\nTotal: about {}, over the {estimated} detector(s) that \
+             declare a rate.",
+            human_duration(total_seconds),
+        ));
+        if unestimated > 0 {
+            // Said plainly rather than left for somebody to work out from the
+            // rows. A total that reads as the whole job when it covers five of
+            // seven is worse than no total.
+            human.push_str(&format!(
+                " {unestimated} of them declare no rate, so the real total is \
+                 larger by an amount nothing here can estimate."
+            ));
+        }
+    }
+    human.push_str(&format!(
+        "\nThe corpus is walked once however many detectors are asked, so \
+         adding one costs its own scoring pass and nothing else.\nRecords \
+         files: about {records_mb:.1} MB in total. Worst case, if every item \
+         hit the {timeout}s deadline for every detector: {}.\nEach result \
+         would be {configuration}: {why}",
+        human_duration((items * timeout * entries.len() as u64) as f64)
+    ));
+
+    Output::ok(serde_json::Value::Object(value), human)
 }
 
 /// Whether the run being planned would earn a `named` result, and why.
@@ -829,11 +1001,101 @@ fn human_duration(seconds: f64) -> String {
     format!("{:.1} hours", seconds / 3_600.0)
 }
 
+/// What happened to one detector of a `score` command.
+///
+/// Three outcomes, kept apart because they call for different things from the
+/// reader and because two of them must never be read as the third. A skipped
+/// detector is not a measured one that scored badly; it is a number that does
+/// not exist.
+enum Outcome {
+    Measured {
+        result: Box<Result1>,
+        tally: stegobench_plugin::runner::Tally,
+        written: Option<PathBuf>,
+    },
+    /// Not available on this machine, so nothing ran. Not fatal to the others.
+    Skipped { why: String },
+    /// It was available and the run did not produce a usable result.
+    Failed { why: String, code: i32 },
+}
+
+/// Which detectors a `--detector` list names, in a deterministic order.
+///
+/// `all` is the whole registry's detectors rather than every entry: an
+/// embedder cannot be asked to tell two images apart, and quietly including
+/// one so it could be refused a moment later would be a worse answer than not
+/// including it. Named explicitly, an embedder is still refused, because
+/// somebody who typed its name has asked a question and is owed the answer.
+fn resolve_detectors<'a>(
+    reg: &'a Registry,
+    asked: &[String],
+) -> Result<Vec<&'a stegobench_core::registry::Entry>, Output> {
+    if asked.iter().any(|d| d == "all") {
+        if asked.len() > 1 {
+            return Err(Output::err(
+                exit::USAGE,
+                "`--detector all` already means every registered detector, so \
+                 naming others beside it asks for two different things. Use \
+                 `all` on its own, or list the ones you want."
+                    .to_string(),
+            ));
+        }
+        let mut all = reg.of_kind(Kind::Detector);
+        // Sorted by name, so two runs of the same command write the same files
+        // in the same order however the registry happened to be read.
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        if all.is_empty() {
+            return Err(Output::err(
+                exit::USAGE,
+                "`--detector all` was asked for and no detectors are \
+                 registered, so there is nothing to score with. \
+                 `stegobench list detectors` says where it looked."
+                    .to_string(),
+            ));
+        }
+        return Ok(all);
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for name in asked {
+        let Some(entry) = reg.entries.get(name) else {
+            return Err(Output::err(
+                exit::USAGE,
+                format!(
+                    "no tool named {name:?} is registered. \
+                     `stegobench list detectors` shows what is."
+                ),
+            ));
+        };
+        // Refused here rather than after the corpus is walked. An embedder
+        // hides a payload; it cannot be asked to tell two images apart, and
+        // somebody who typed its name has asked for something impossible
+        // rather than something unavailable.
+        if entry.kind == Kind::Embedder {
+            return Err(Output::err(
+                exit::USAGE,
+                format!(
+                    "{name} is registered as an embedder, and an embedder \
+                     cannot be asked to tell two images apart. \
+                     `stegobench list detectors` shows what can."
+                ),
+            ));
+        }
+        // A name given twice is one measurement, not two. Silently scoring it
+        // twice would write the second run over the first and report two.
+        if seen.insert(name.clone()) {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_score(
     registry_dir: &Path,
     corpus: &Path,
-    detector: &str,
+    detectors: &[String],
     corpus_id: Option<&str>,
     records: Option<&Path>,
     out: Option<&Path>,
@@ -844,66 +1106,14 @@ fn cmd_score(
         Ok(r) => r,
         Err(o) => return o,
     };
-    let Some(entry) = reg.entries.get(detector) else {
-        return Output::err(
-            exit::USAGE,
-            format!(
-                "no tool named {detector:?} is registered. \
-                 `stegobench list detectors` shows what is."
-            ),
-        );
+    let entries = match resolve_detectors(&reg, detectors) {
+        Ok(e) => e,
+        Err(o) => return o,
     };
+    let many = entries.len() > 1;
 
-    // Asked before the corpus is walked, because the answer does not depend on
-    // the corpus and the walk is the expensive half. A run over a Core tier
-    // that discovers thirty seconds in that the detector was never installed
-    // has spent those thirty seconds finding out something it knew at the
-    // start. Baseline Section 2.1: pre-flight everything, before a long job
-    // rather than halfway through.
-    //
-    // Presence only. The self-test is `doctor`'s job and costs a container
-    // pull; refusing to start a run because a fixture is missing would be a
-    // different and much more annoying gate.
-    match availability::check(entry).presence {
-        Presence::Present { .. } => {}
-        Presence::Unsupported { reason } => {
-            return Output::err(
-                exit::PREFLIGHT_REFUSED,
-                format!("{detector} cannot run on this machine: {reason}"),
-            )
-        }
-        Presence::Absent { reason } => {
-            return Output::err(
-                exit::PREFLIGHT_REFUSED,
-                format!(
-                    "{detector} is registered but is not on this machine: \
-                     {reason}. `stegobench doctor` checks every registered \
-                     tool at once"
-                ),
-            )
-        }
-        Presence::Unknown { reason } => {
-            return Output::err(
-                exit::PREFLIGHT_REFUSED,
-                format!(
-                    "whether {detector} can run here could not be established: \
-                     {reason}. Refusing rather than starting a run that may \
-                     produce nothing"
-                ),
-            )
-        }
-    }
-
-    // The records file sits beside the corpus by default, named after it, so
-    // two runs over two corpora cannot resume from each other's answers.
-    let records = records.map(PathBuf::from).unwrap_or_else(|| {
-        let mut name = corpus.file_name().unwrap_or_default().to_os_string();
-        name.push(".records.jsonl");
-        corpus.with_file_name(name)
-    });
-
-    // Resolved before the run, so a typo costs a usage error rather than a
-    // corpus walk followed by one.
+    // Resolved before anything runs, so a typo costs a usage error rather than
+    // a corpus walk followed by one.
     let registered = match corpus_id {
         None => None,
         Some(id) => match reg.corpora.get(id) {
@@ -920,63 +1130,499 @@ fn cmd_score(
         },
     };
 
-    let request = score::Request {
-        corpus,
-        registered,
-        records,
-        timeout: std::time::Duration::from_secs(timeout),
-        limit,
-    };
+    // A destination that cannot hold several documents is a usage error, and
+    // it is raised before anything runs rather than after an hour. The
+    // DIRECTORY itself is not created until at least one detector can run, so
+    // a command that refuses leaves nothing behind.
+    if many {
+        for (flag, path) in [("--out", out), ("--records", records)] {
+            if path.is_some_and(|p| p.is_file()) {
+                return Output::err(
+                    exit::USAGE,
+                    format!(
+                        "{} is a file, and scoring {} detectors writes one \
+                         {} each, so {flag} has to name a directory here.",
+                        path.expect("checked").display(),
+                        entries.len(),
+                        if flag == "--out" {
+                            "result document"
+                        } else {
+                            "records file"
+                        }
+                    ),
+                );
+            }
+        }
+    }
 
     // Progress goes to stderr, so `--json` on stdout stays machine readable
     // while a person can still watch a run that takes hours.
-    let report = |line: &str| eprintln!("  {line}");
-    let (result, tally) = match score::score(entry, &request, report) {
-        Ok(pair) => pair,
+    let say = |line: &str| eprintln!("  {line}");
+
+    // Availability is asked for EVERY detector before the corpus is touched,
+    // and the answers are kept. A seven-detector command should say at the
+    // start which of the seven it can actually run, not discover the fourth is
+    // missing after three hours. Presence only: the self-test is `doctor`'s
+    // job and costs a container pull.
+    let mut runnable = Vec::new();
+    let mut outcomes: Vec<(String, Outcome)> = Vec::new();
+    for entry in &entries {
+        match availability::check(entry).presence {
+            Presence::Present { .. } => runnable.push(*entry),
+            Presence::Unsupported { reason } => outcomes.push((
+                entry.name.clone(),
+                Outcome::Skipped {
+                    why: format!("cannot run on this machine: {reason}"),
+                },
+            )),
+            Presence::Absent { reason } => outcomes.push((
+                entry.name.clone(),
+                Outcome::Skipped {
+                    why: format!("is registered but is not on this machine: {reason}"),
+                },
+            )),
+            Presence::Unknown { reason } => outcomes.push((
+                entry.name.clone(),
+                Outcome::Skipped {
+                    why: format!("whether it can run here could not be established: {reason}"),
+                },
+            )),
+        }
+    }
+
+    // With one detector asked for and that one unavailable, nothing was
+    // measured and the corpus is not worth walking. Kept as the refusal it has
+    // always been, with the same exit code, rather than becoming a zero-result
+    // "run" that happens to have skipped everything.
+    if runnable.is_empty() {
+        let why = outcomes
+            .iter()
+            .map(|(name, o)| match o {
+                Outcome::Skipped { why } => format!("{name} {why}"),
+                _ => format!("{name} was not run"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        return Output::err(
+            exit::PREFLIGHT_REFUSED,
+            format!(
+                "nothing was measured: not one of the {} detector(s) asked for \
+                 is available here.\n  {why}\n`stegobench doctor` checks every \
+                 registered tool at once and says what each one needs.",
+                entries.len()
+            ),
+        );
+    }
+    for (name, outcome) in &outcomes {
+        if let Outcome::Skipped { why } = outcome {
+            say(&format!("SKIPPING {name}: {why}"));
+        }
+    }
+
+    // Created only now that something is going to be written into it. A
+    // refusal above leaves no empty directory beside the corpus.
+    let out_dir = match resolve_out(corpus, out, many) {
+        Ok(d) => d,
+        Err(o) => return o,
+    };
+
+    // The expensive half, once. Every refusal it can raise is a fact about the
+    // corpus, so it applies to all the detectors equally and there is nothing
+    // partial to report: the whole command stops.
+    say(&format!(
+        "establishing what the corpus is, once, for {} detector(s)",
+        runnable.len()
+    ));
+    let prepared = match score::prepare(corpus, registered, limit, say) {
+        Ok(p) => p,
         Err(e) => return Output::err(e.exit_code(), e.to_string()),
+    };
+    say(&format!(
+        "corpus established in {:.1}s: {} item(s) to score with each detector",
+        prepared.preflight_seconds(),
+        prepared.items()
+    ));
+
+    for (i, entry) in runnable.iter().enumerate() {
+        let records_path = records_for(corpus, records, &out_dir, &entry.name, many);
+        // Counted against what CAN run rather than against what was asked for,
+        // so "1 of 2" beside a third skipped detector does not read as a
+        // miscount. The ratio of asked to measured is the summary's job and it
+        // says it in full at the end.
+        say(&format!(
+            "scoring with {} ({} of {} that can run here)",
+            entry.name,
+            i + 1,
+            runnable.len()
+        ));
+        let outcome = run_one(
+            entry,
+            &prepared,
+            &records_path,
+            timeout,
+            out,
+            out_dir.as_deref(),
+            many,
+            say,
+        );
+        outcomes.push((entry.name.clone(), outcome));
+    }
+
+    summarise(&outcomes, &out_dir, many)
+}
+
+/// Where the documents go, decided before any work happens.
+///
+/// `Ok(None)` means one detector writing to stdout or to the single file the
+/// caller named. `Ok(Some(dir))` means a directory holding one document per
+/// detector, created here so a failure to create it is a usage error rather
+/// than something discovered after the first hour of scoring.
+fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<PathBuf>, Output> {
+    if !many {
+        return Ok(None);
+    }
+    let dir = match out {
+        Some(p) => p.to_path_buf(),
+        // Beside the corpus and named after it, so two corpora scored on one
+        // machine cannot write over each other's documents.
+        None => {
+            let mut name = corpus.file_name().unwrap_or_default().to_os_string();
+            name.push(".results");
+            corpus.with_file_name(name)
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Err(Output::err(
+            exit::FAILURE,
+            format!("could not create {} for the results: {e}", dir.display()),
+        ));
+    }
+    Ok(Some(dir))
+}
+
+/// Where one detector's per-item answers are kept.
+///
+/// THE NAME CARRIES THE DETECTOR, AND IT DID NOT USED TO
+///
+/// The default was `<corpus>.records.jsonl`, keyed on the corpus alone. Two
+/// detectors over one corpus therefore shared a records file, and the second
+/// one RESUMED from the first one's answers: it reported the first detector's
+/// scores under its own name, with a resumed count that looked like a feature.
+/// A records file is a record of what one subject said about one corpus, so
+/// the name says both.
+fn records_for(
+    corpus: &Path,
+    records: Option<&Path>,
+    out_dir: &Option<PathBuf>,
+    detector: &str,
+    many: bool,
+) -> PathBuf {
+    let file = format!("{detector}.records.jsonl");
+    match (records, many) {
+        // One detector and an explicit path: exactly what the caller asked
+        // for, because they named one run's file and there is one run.
+        (Some(p), false) => p.to_path_buf(),
+        // Several detectors: the caller named a directory to keep them in.
+        (Some(p), true) => p.join(file),
+        (None, true) => match out_dir {
+            Some(dir) => dir.join(file),
+            None => corpus.with_file_name(file),
+        },
+        (None, false) => {
+            let mut name = corpus.file_name().unwrap_or_default().to_os_string();
+            name.push(format!(".{file}"));
+            corpus.with_file_name(name)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one<P>(
+    entry: &stegobench_core::registry::Entry,
+    prepared: &score::Prepared,
+    records: &Path,
+    timeout: u64,
+    out: Option<&Path>,
+    out_dir: Option<&Path>,
+    many: bool,
+    say: P,
+) -> Outcome
+where
+    P: Fn(&str),
+{
+    if let Some(parent) = records.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Outcome::Failed {
+                    why: format!("could not create {} for the records: {e}", parent.display()),
+                    code: exit::FAILURE,
+                };
+            }
+        }
+    }
+
+    let (result, tally) = match score::score_one(
+        entry,
+        prepared,
+        records,
+        std::time::Duration::from_secs(timeout),
+        |line: &str| say(line),
+    ) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return Outcome::Failed {
+                why: e.to_string(),
+                code: e.exit_code(),
+            }
+        }
     };
 
     // Validated before it is written, not after. A document this refuses is
     // one no reader should have been handed in the first place.
     if let Err(problems) = result.validate() {
-        return Output::err(
-            exit::SCHEMA_INVALID,
-            format!(
+        return Outcome::Failed {
+            why: format!(
                 "the run finished but produced a result that does not \
                  validate, which is a bug in this harness rather than in the \
                  detector:\n  {}",
                 problems.join("\n  ")
             ),
-        );
+            code: exit::SCHEMA_INVALID,
+        };
     }
 
     let body = match serde_json::to_string_pretty(&result) {
         Ok(b) => b,
-        Err(e) => return Output::err(exit::FAILURE, format!("could not write the result: {e}")),
+        Err(e) => {
+            return Outcome::Failed {
+                why: format!("could not write the result: {e}"),
+                code: exit::FAILURE,
+            }
+        }
     };
-    if let Some(path) = out {
+
+    // Written as this detector completes rather than at the end of the
+    // command, so an interrupted seven-detector run keeps what it already
+    // measured. That is the whole reason the loop is shaped this way.
+    let destination = match (many, out_dir, out) {
+        (true, Some(dir), _) => Some(dir.join(format!("{}.json", entry.name))),
+        (false, _, Some(path)) => Some(path.to_path_buf()),
+        _ => None,
+    };
+    if let Some(path) = &destination {
         if let Err(e) = std::fs::write(path, format!("{body}\n")) {
-            return Output::err(
-                exit::FAILURE,
-                format!("could not write the result to {}: {e}", path.display()),
-            );
+            return Outcome::Failed {
+                why: format!("could not write the result to {}: {e}", path.display()),
+                code: exit::FAILURE,
+            };
         }
     }
 
-    let value = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
-    Output::ok(
-        value,
-        format!(
-            "{} scored, {} resumed, {} could not be answered. AUC {:.4} over \
-             {} clean and {} stego image(s).",
-            tally.scored,
-            tally.resumed,
-            result.metrics.n_error,
-            result.metrics.auc,
-            result.metrics.n_clean,
-            result.metrics.n_stego,
-        ),
-    )
+    Outcome::Measured {
+        result: Box::new(result),
+        tally,
+        written: destination,
+    }
+}
+
+/// One line per detector and one line saying how many of them are real.
+///
+/// WHY THE COUNT IS ALWAYS PRINTED, EVEN WHEN IT IS `7 of 7`
+///
+/// The reader of a benchmark summary is deciding whether they have a baseline.
+/// "AUC 0.83, 0.61, 0.55" over a registry of seven says nothing about the four
+/// that are missing, and a reader who has to count the rows to find out is a
+/// reader who will one day not bother. So the ratio leads, the skipped
+/// detectors are named with their reasons, and the exit code carries the same
+/// fact for anything that is not a person.
+fn summarise(outcomes: &[(String, Outcome)], out_dir: &Option<PathBuf>, many: bool) -> Output {
+    let measured = outcomes
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Measured { .. }))
+        .count();
+    let skipped = outcomes
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Skipped { .. }))
+        .count();
+    let failed = outcomes
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Failed { .. }))
+        .count();
+
+    let mut lines = Vec::new();
+    for (name, outcome) in outcomes {
+        match outcome {
+            Outcome::Measured {
+                result,
+                tally,
+                written,
+            } => lines.push(format!(
+                "{name:<16} AUC {:.4} over {} clean and {} stego image(s). \
+                 {} scored, {} resumed, {} could not be answered.{}",
+                result.metrics.auc,
+                result.metrics.n_clean,
+                result.metrics.n_stego,
+                tally.scored,
+                tally.resumed,
+                result.metrics.n_error,
+                match written {
+                    Some(p) => format!(" Written to {}.", p.display()),
+                    None => String::new(),
+                }
+            )),
+            Outcome::Skipped { why } => {
+                lines.push(format!("{name:<16} NOT MEASURED, skipped: {why}"))
+            }
+            Outcome::Failed { why, .. } => {
+                lines.push(format!("{name:<16} NOT MEASURED, failed: {why}"))
+            }
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "{measured} of {} detector(s) measured.",
+        outcomes.len()
+    ));
+    if skipped > 0 || failed > 0 {
+        lines.push(format!(
+            "{} detector(s) produced NO number at all ({skipped} skipped, \
+             {failed} failed) and are named above. A table built from these \
+             documents covers the {measured} that ran and nothing else.",
+            skipped + failed
+        ));
+    }
+
+    // A DIRECTORY IS NOT A RUN, AND A READER WILL TREAT IT AS ONE.
+    //
+    // A detector measured last week leaves its document behind. If it is
+    // skipped this week, `stegobench report <dir>` still finds that document
+    // and puts its number in the table, beside numbers from today, with
+    // nothing in either the table or this summary saying so. The count above
+    // would read "2 of 3" while the directory holds three. Nothing is deleted,
+    // because a measurement is not this command's to throw away; it is named
+    // instead, which is the half a reader cannot work out for themselves.
+    if let Some(dir) = out_dir {
+        // Everything in the directory that this run did not write, not only
+        // the detectors it asked for and missed. A document from a detector
+        // nobody named today is exactly as invisible in the resulting table,
+        // and a run of five detectors into a directory that already held
+        // seven produces a seven-row table under a "5 of 5 measured" summary.
+        let written: std::collections::BTreeSet<&Path> = outcomes
+            .iter()
+            .filter_map(|(_, o)| match o {
+                Outcome::Measured { written, .. } => written.as_deref(),
+                _ => None,
+            })
+            .collect();
+        let mut stale: Vec<String> = Vec::new();
+        // A directory that cannot be read is not reported as clean: the
+        // warning is skipped and the reason is carried instead, because
+        // "nothing stale here" and "could not look" are different facts.
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "json") && !written.contains(&*path) {
+                        stale.push(path.display().to_string());
+                    }
+                }
+                stale.sort();
+            }
+            Err(e) => lines.push(format!(
+                "Could not list {} to check for documents left from earlier \
+                 runs: {e}. A report over it may cover more than this run did.",
+                dir.display()
+            )),
+        }
+        if !stale.is_empty() {
+            lines.push(format!(
+                "WARNING: {} document(s) here were NOT measured by this run \
+                 and are left over from an earlier one: {}. `stegobench report \
+                 {}` will include them beside today's numbers, dated to when \
+                 they were made. Move them aside if this run is meant to be \
+                 the whole table.",
+                stale.len(),
+                stale.join(", "),
+                dir.display()
+            ));
+        }
+    }
+    if many {
+        if let Some(dir) = out_dir {
+            lines.push(format!(
+                "Next: stegobench report {} --format markdown",
+                dir.display()
+            ));
+        }
+    }
+
+    // The code says the same thing the count says, for a caller that is not a
+    // person. A failure outranks a skip because the two ask for different
+    // things: a skip is something to install, a failure is something to
+    // investigate, and reporting the louder one first is the honest order.
+    let code = if failed > 0 {
+        exit::PLUGIN_FAILED
+    } else if skipped > 0 {
+        exit::PREFLIGHT_REFUSED
+    } else {
+        exit::OK
+    };
+
+    let json = serde_json::json!({
+        "ok": code == exit::OK,
+        "requested": outcomes.len(),
+        "measured": measured,
+        "skipped": skipped,
+        "failed": failed,
+        "results_dir": out_dir.as_ref().map(|d| d.display().to_string()),
+        "detectors": outcomes.iter().map(|(name, o)| match o {
+            Outcome::Measured { result, tally, written } => serde_json::json!({
+                "name": name,
+                "status": "measured",
+                "written": written.as_ref().map(|p| p.display().to_string()),
+                "scored": tally.scored,
+                "resumed": tally.resumed,
+                "result": serde_json::to_value(result.as_ref())
+                    .unwrap_or(serde_json::Value::Null),
+            }),
+            Outcome::Skipped { why } => serde_json::json!({
+                "name": name, "status": "skipped", "reason": why,
+            }),
+            Outcome::Failed { why, code } => serde_json::json!({
+                "name": name, "status": "failed", "reason": why, "exit_code": code,
+            }),
+        }).collect::<Vec<_>>(),
+    });
+
+    // ONE DETECTOR STILL BEHAVES EXACTLY AS IT ALWAYS DID.
+    //
+    // The whole multi-detector apparatus is the wrong shape for a command that
+    // asked one question. A single run that worked puts the result document on
+    // stdout, so `--json | jq` and `--json | stegobench validate -` keep
+    // working, and a single run that failed returns its own exit code with its
+    // own message rather than the summary's coarser one: an embedder refused
+    // is a usage error and a one-sided corpus is a pre-flight refusal, and
+    // flattening both to "a detector failed" would lose the distinction the
+    // codes exist to carry.
+    if !many {
+        match outcomes.first() {
+            Some((_, Outcome::Measured { result, .. })) => {
+                let mut output = Output::ok(
+                    serde_json::to_value(result.as_ref()).unwrap_or(serde_json::Value::Null),
+                    lines.join("\n"),
+                );
+                output.code = code;
+                return output;
+            }
+            Some((_, Outcome::Failed { why, code })) => return Output::err(*code, why.clone()),
+            _ => {}
+        }
+    }
+
+    let mut output = Output::ok(json, lines.join("\n"));
+    output.code = code;
+    output
 }
 
 /// Turns result documents into a table, and refuses to turn them into a
@@ -1055,7 +1701,7 @@ fn run(cli: &Cli) -> Output {
         } => cmd_score(
             &cli.registry,
             corpus,
-            detector,
+            detector.as_slice(),
             corpus_id.as_deref(),
             records.as_deref(),
             out.as_deref(),
@@ -1712,6 +2358,510 @@ mod tests {
         assert!(out.human.contains("could not write the report"));
     }
 
+    /// A registry holding one detector that works and one that is not here.
+    ///
+    /// Both are needed in the same registry, because the behaviour under test
+    /// is what happens to the good one when the other is missing, and a test
+    /// with only one of them cannot see it.
+    #[cfg(unix)]
+    fn registry_with_one_present_and_one_missing(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let reg = dir.join("registry");
+        std::fs::create_dir_all(&reg).unwrap();
+
+        let script = dir.join("size.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\n\
+             wc -c < \"$1\" | tr -d ' ' | awk '{print $1/1000}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        std::fs::write(
+            reg.join("sizer.toml"),
+            format!(
+                "name = \"sizer\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+                 [binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+                 [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+                 [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"\n\
+                 [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+                script.display().to_string()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            reg.join("ghost.toml"),
+            "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
+             version_args = [\"--version\"]\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+        )
+        .unwrap();
+        reg
+    }
+
+    /// A PNG header with `padding` bytes after it, so a stego image is the
+    /// same shape as its cover and only larger.
+    fn test_png(padding: usize) -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&32u32.to_be_bytes());
+        v.extend_from_slice(&32u32.to_be_bytes());
+        v.extend_from_slice(&[8, 2, 0, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v.extend_from_slice(&vec![0u8; padding]);
+        v
+    }
+
+    fn scratch_corpus(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        for i in 0..3 {
+            std::fs::write(root.join(format!("c{i}.png")), test_png(0)).unwrap();
+            std::fs::write(
+                root.join(format!("c{i}.json")),
+                r#"{"role":"clean","sha256":"0"}"#,
+            )
+            .unwrap();
+            std::fs::write(root.join(format!("s{i}.png")), test_png(64)).unwrap();
+            std::fs::write(
+                root.join(format!("s{i}.json")),
+                format!(r#"{{"role":"stego","source_png":"c{i}.png","sha256":"0"}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    /// THE FAILURE THIS WHOLE COMMAND HAS TO AVOID.
+    ///
+    /// A baseline over several detectors where one is missing must not exit
+    /// zero, because a zero is read as "every detector I asked for was
+    /// measured" and a script will read it that way forever. The other
+    /// detector's work still has to survive.
+    #[cfg(unix)]
+    #[test]
+    fn one_missing_detector_does_not_lose_the_others_and_never_exits_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["ghost".to_string(), "sizer".to_string()],
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
+
+        assert_eq!(
+            out.code,
+            exit::PREFLIGHT_REFUSED,
+            "a run that measured one of two detectors exited {}: {}",
+            out.code,
+            out.human
+        );
+        assert_ne!(out.code, exit::OK, "{}", out.human);
+
+        // The good one's work survived and is on disk.
+        let written = out_dir.join("sizer.json");
+        assert!(written.exists(), "{}", out.human);
+        assert_eq!(cmd_validate(&written).code, exit::OK);
+
+        // And the summary says so in words a person reads, not only in a code.
+        assert!(
+            out.human.contains("1 of 2 detector(s) measured"),
+            "{}",
+            out.human
+        );
+        assert!(out.human.contains("NOT MEASURED"), "{}", out.human);
+        assert_eq!(out.json["measured"], serde_json::json!(1));
+        assert_eq!(out.json["skipped"], serde_json::json!(1));
+        assert_eq!(out.json["requested"], serde_json::json!(2));
+        assert_eq!(out.json["ok"], serde_json::json!(false));
+    }
+
+    /// A directory is not a run, and a reader will treat it as one.
+    ///
+    /// A detector measured yesterday leaves its document behind. Skipped
+    /// today, that document is still in the directory and `report` will put
+    /// its number in the table. Nothing is deleted, because a measurement is
+    /// not this command's to throw away, but the summary has to say it.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_left_from_an_earlier_run_of_a_now_skipped_detector_is_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // Stand in for last week's run of a detector that is gone today.
+        std::fs::write(out_dir.join("ghost.json"), "{}").unwrap();
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["ghost".to_string(), "sizer".to_string()],
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
+        assert!(
+            out.human.contains("NOT measured by this run"),
+            "a stale document went unmentioned: {}",
+            out.human
+        );
+        assert!(out.human.contains("ghost.json"), "{}", out.human);
+        assert!(
+            out_dir.join("ghost.json").exists(),
+            "the stale document was deleted rather than named"
+        );
+    }
+
+    /// The same hazard from the other direction, which the narrow version of
+    /// the check missed entirely: a document from a detector nobody named
+    /// today is exactly as invisible in the resulting table.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_from_a_detector_this_run_never_asked_for_is_named_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("somebody-elses-tool.json"), "{}").unwrap();
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["sizer".to_string(), "ghost".to_string()],
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
+        assert!(
+            out.human.contains("somebody-elses-tool.json"),
+            "a document nobody asked about today went unmentioned: {}",
+            out.human
+        );
+    }
+
+    /// And a clean directory says nothing, so the warning stays worth reading.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_that_wrote_every_document_in_its_directory_warns_about_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        std::fs::copy(reg.join("sizer.toml"), reg.join("sizer2.toml")).unwrap();
+        let text = std::fs::read_to_string(reg.join("sizer2.toml"))
+            .unwrap()
+            .replace("name = \"sizer\"", "name = \"sizer2\"");
+        std::fs::write(reg.join("sizer2.toml"), text).unwrap();
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["sizer".to_string(), "sizer2".to_string()],
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(
+            !out.human.contains("NOT measured by this run"),
+            "warned about documents it had just written itself: {}",
+            out.human
+        );
+    }
+
+    /// Two detectors sharing one records file was a live bug: the second
+    /// resumed from the first one's answers and reported them as its own.
+    #[cfg(unix)]
+    #[test]
+    fn two_detectors_over_one_corpus_do_not_resume_from_each_others_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        // A second working detector, so two of them actually run.
+        std::fs::copy(reg.join("sizer.toml"), reg.join("sizer2.toml")).unwrap();
+        let text = std::fs::read_to_string(reg.join("sizer2.toml"))
+            .unwrap()
+            .replace("name = \"sizer\"", "name = \"sizer2\"");
+        std::fs::write(reg.join("sizer2.toml"), text).unwrap();
+
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["sizer".to_string(), "sizer2".to_string()],
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+
+        // Each scored all six items itself. A resumed count above zero here
+        // would mean one of them read the other's file.
+        for d in out.json["detectors"].as_array().expect("rows") {
+            assert_eq!(d["scored"], serde_json::json!(6), "{d}");
+            assert_eq!(
+                d["resumed"],
+                serde_json::json!(0),
+                "{} resumed from another detector's records: {d}",
+                d["name"]
+            );
+        }
+        assert!(out_dir.join("sizer.records.jsonl").exists());
+        assert!(out_dir.join("sizer2.records.jsonl").exists());
+    }
+
+    /// A resumed multi-detector run picks up per detector, so an interrupted
+    /// baseline does not re-score what it already measured.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_run_of_the_same_command_resumes_each_detector_separately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+        let args = ["sizer".to_string()];
+
+        let first = cmd_score(&reg, &corpus, &args, None, None, Some(&out_dir), 5, None);
+        assert_eq!(first.code, exit::OK, "{}", first.human);
+
+        let second = cmd_score(&reg, &corpus, &args, None, None, Some(&out_dir), 5, None);
+        assert_eq!(second.code, exit::OK, "{}", second.human);
+        assert!(
+            second.human.contains("6 resumed"),
+            "the second run re-scored instead of resuming: {}",
+            second.human
+        );
+    }
+
+    /// With no `--out` and several detectors the documents still land
+    /// somewhere findable, and the command says where rather than leaving the
+    /// reader to guess.
+    #[cfg(unix)]
+    #[test]
+    fn several_detectors_with_no_out_write_beside_the_corpus_and_say_where() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["sizer".to_string(), "ghost".to_string()],
+            None,
+            None,
+            None,
+            5,
+            None,
+        );
+        let expected = tmp.path().join("corpus.results");
+        assert!(expected.join("sizer.json").exists(), "{}", out.human);
+        assert!(
+            out.human.contains(&expected.display().to_string()),
+            "the command did not say where it wrote: {}",
+            out.human
+        );
+        assert!(out.human.contains("stegobench report"), "{}", out.human);
+    }
+
+    /// One detector still behaves exactly as it always did: the document on
+    /// stdout, nothing invented around it.
+    #[cfg(unix)]
+    #[test]
+    fn a_single_detector_still_puts_the_result_document_on_stdout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["sizer".to_string()],
+            None,
+            None,
+            None,
+            5,
+            None,
+        );
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert_eq!(
+            out.json["schema"],
+            serde_json::json!(stegobench_core::result::RESULT_SCHEMA_ID),
+            "a single run stopped emitting the result document itself"
+        );
+        assert!(out.json["metrics"]["auc"].is_number());
+    }
+
+    /// Asking for every detector when none of them is here is not a run that
+    /// measured nothing; it is a refusal, and it keeps the exit code it has
+    /// always had.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_where_no_detector_is_available_refuses_rather_than_reporting_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = tmp.path().join("registry");
+        std::fs::create_dir_all(&reg).unwrap();
+        std::fs::write(
+            reg.join("ghost.toml"),
+            "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
+             version_args = [\"--version\"]\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+        )
+        .unwrap();
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_score(
+            &reg,
+            &corpus,
+            &["all".to_string()],
+            None,
+            None,
+            None,
+            5,
+            None,
+        );
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert!(out.human.contains("nothing was measured"), "{}", out.human);
+        assert!(!corpus.with_file_name("corpus.results").exists());
+    }
+
+    #[test]
+    fn all_beside_a_named_detector_is_a_usage_error_rather_than_a_guess() {
+        let reg = Registry::load(&shipped_registry()).expect("loads");
+        let err = resolve_detectors(&reg, &["all".into(), "zsteg".into()]).expect_err("refused");
+        assert_eq!(err.code, exit::USAGE);
+        assert!(err
+            .human
+            .contains("already means every registered detector"));
+    }
+
+    #[test]
+    fn all_is_every_detector_and_never_an_embedder() {
+        let reg = Registry::load(&shipped_registry()).expect("loads");
+        let picked = resolve_detectors(&reg, &["all".into()]).expect("resolved");
+        assert!(picked.len() >= 5, "resolved only {}", picked.len());
+        assert!(picked.iter().all(|e| e.kind == Kind::Detector));
+        // Sorted, so two runs of the same command write the same files in the
+        // same order.
+        let names: Vec<_> = picked.iter().map(|e| e.name.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn naming_an_embedder_is_refused_before_the_corpus_is_touched() {
+        let reg = Registry::load(&shipped_registry()).expect("loads");
+        let embedder = reg
+            .of_kind(Kind::Embedder)
+            .first()
+            .map(|e| e.name.clone())
+            .expect("the shipped registry has embedders");
+        let err = resolve_detectors(&reg, std::slice::from_ref(&embedder)).expect_err("refused");
+        assert_eq!(err.code, exit::USAGE);
+        assert!(err
+            .human
+            .contains("cannot be asked to tell two images apart"));
+    }
+
+    #[test]
+    fn the_same_detector_named_twice_is_one_measurement() {
+        let reg = Registry::load(&shipped_registry()).expect("loads");
+        let picked = resolve_detectors(&reg, &["zsteg".into(), "zsteg".into()]).expect("resolved");
+        assert_eq!(picked.len(), 1);
+    }
+
+    /// `doctor` and `describe` answer the same question the same way,
+    /// whichever kind of thing is asked about. The service is the case that
+    /// forces this: it is the one a user could only discover by running it.
+    #[test]
+    fn doctor_and_describe_both_say_what_a_tool_needs_and_agree() {
+        let dir = shipped_registry();
+        let doctor = cmd_doctor(&dir, Path::new("fixtures"), true);
+        assert!(
+            doctor.json["needing_action"].is_number(),
+            "doctor does not report how many tools need something"
+        );
+        for tool in doctor.json["tools"].as_array().expect("rows") {
+            assert!(
+                tool["needs"]["readiness"].is_string(),
+                "{} has no readiness: {tool}",
+                tool["name"]
+            );
+            assert!(tool["needs"]["steps"].is_array());
+        }
+
+        // And `describe` carries the identical structure for the same tool.
+        let described = cmd_describe(&dir, "stegashield");
+        assert_eq!(described.code, exit::OK);
+        assert!(described.json["needs"]["readiness"].is_string());
+        assert!(
+            described.human.contains("What this tool needs from you")
+                || described
+                    .human
+                    .contains("Everything this tool needs is here"),
+            "{}",
+            described.human
+        );
+
+        // A corpus answers in the same shape, which is the whole point: a
+        // reader should not have to know which kind of thing they typed.
+        let corpus = cmd_describe(&dir, "reveal");
+        assert_eq!(corpus.code, exit::OK);
+        assert!(corpus.json["needs"]["steps"].is_array());
+        assert!(
+            corpus.human.contains("What this corpus needs from you"),
+            "{}",
+            corpus.human
+        );
+    }
+
+    /// The legend under `list` called every image entry a sandbox with no
+    /// network, which is false for a service and false in the direction that
+    /// matters most.
+    #[test]
+    fn the_list_legend_does_not_call_a_service_a_sandbox() {
+        let out = cmd_list(&shipped_registry(), "detectors");
+        assert_eq!(out.code, exit::OK);
+        assert!(
+            out.human.contains("in fact a SERVICE"),
+            "the legend still presents every container entry as sandboxed: {}",
+            out.human
+        );
+        assert!(out.human.contains("stegashield"), "{}", out.human);
+    }
+
     /// Drives the binary's own code to every exit code the contract in
     /// `stegobench_core::exit` names, or records plainly why a given code
     /// cannot be reached yet.
@@ -1760,7 +2910,7 @@ mod tests {
             let out = cmd_score(
                 dir.path(),
                 &dir.path().join("no-such-corpus"),
-                "ghost",
+                &["ghost".to_string()],
                 None,
                 None,
                 None,

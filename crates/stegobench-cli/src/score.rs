@@ -22,6 +22,21 @@
 //! It is worth naming because it is the one place a bigger corpus eventually
 //! bites, and a reader of this file should meet that fact here rather than
 //! discover it at ten times the scale.
+//!
+//! WHY THE WORK IS IN TWO HALVES
+//!
+//! [`prepare`] establishes what the corpus IS: its digest, whether it is the
+//! corpus a registry entry named, whether every image is the file its record
+//! describes, whether a cover and its stego twin land on the same side of the
+//! split, and what each item's label is. None of those answers depends on
+//! which detector is asked, and on a Core tier they cost tens of minutes and a
+//! full read of every byte.
+//!
+//! [`score_one`] then asks one detector, and can be called again for the next
+//! one against the same [`Prepared`]. Scoring seven detectors therefore pays
+//! for the corpus once rather than seven times, which is the difference
+//! between an afternoon and a day and a half, and the reason a baseline over
+//! the whole registry is a command somebody will actually run.
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -109,6 +124,20 @@ pub enum ScoreError {
         stego: u64,
     },
     #[error(
+        "{name} answered about {answered} image(s), and no ROC AUC can be \
+         computed from those answers, so this run has no headline number. \
+         {why}\n\nA result-v1 document has to carry an AUC, and the value \
+         that would have been written is 0.5, which is exactly the figure \
+         that means a detector carries no information at all. Publishing it \
+         would be indistinguishable from publishing a measurement that came \
+         out at chance, so the run is refused instead and nothing is written."
+    )]
+    NoAuc {
+        name: String,
+        answered: usize,
+        why: String,
+    },
+    #[error(
         "{id} is not the image its own record describes. The record states \
          {want} and the file on disk is {got}. A run cannot be named over a \
          corpus whose images and records disagree: the digest that names the \
@@ -143,14 +172,66 @@ impl ScoreError {
             // second time. Refusals, not breakages.
             ScoreError::SplitLeaks { .. } | ScoreError::OneSided { .. } => exit::PREFLIGHT_REFUSED,
             // Something broke: a tool, a disk, a file that is not what it
-            // claimed to be.
-            ScoreError::Run(_) => exit::PLUGIN_FAILED,
+            // claimed to be. A run whose answers cannot be turned into a
+            // metric belongs here rather than with the refusals: the corpus
+            // was fit to measure and what came back was not fit to rank, so
+            // retrying against a fixed tool genuinely could work.
+            ScoreError::Run(_) | ScoreError::NoAuc { .. } => exit::PLUGIN_FAILED,
             ScoreError::Corpus(_) | ScoreError::Records { .. } => exit::FAILURE,
         }
     }
 }
 
+/// Everything about the corpus that does not depend on which detector is asked.
+///
+/// Built once by [`prepare`] and handed to [`score_one`] for each detector in
+/// turn. A field here is a property of the bytes on disk; anything that varies
+/// with the subject stays out.
+pub struct Prepared {
+    corpus: PathBuf,
+    limit: Option<u64>,
+    /// The registry entry's own name and tier for the corpus, copied out so a
+    /// `Prepared` does not borrow the registry for its whole life.
+    registered: Option<(String, Option<String>)>,
+    checks: Checks,
+    /// Whether the directory was proved to be the corpus a registry entry
+    /// named, images included.
+    claim_holds: bool,
+    /// One label per scorable item, in corpus order, truncated by `limit`.
+    ///
+    /// Held once for the whole command rather than re-walked per detector. It
+    /// is one bool per item, so a Core tier is 344 KB, which is an order of
+    /// magnitude below the score vector the metrics pass already needs.
+    labels: Vec<bool>,
+    /// When the shared preparation began, and how long it took.
+    ///
+    /// Every result written from this `Prepared` reports `started_utc` as the
+    /// moment preparation began and folds `preflight` into its own elapsed
+    /// time. Both are true of each result: establishing what the corpus was is
+    /// work that result rests on. What no result claims is the time spent on
+    /// the OTHER detectors, because waiting for a different measurement is not
+    /// part of making this one.
+    started_utc: String,
+    preflight: Duration,
+}
+
+impl Prepared {
+    /// How many items each detector will be asked about.
+    pub fn items(&self) -> u64 {
+        self.labels.len() as u64
+    }
+
+    /// Seconds spent establishing what the corpus is, before any detector ran.
+    pub fn preflight_seconds(&self) -> f64 {
+        self.preflight.as_secs_f64()
+    }
+}
+
 /// Run the detector over the corpus and build the result document.
+///
+/// The single-detector path, kept as one call. It is [`prepare`] followed by
+/// [`score_one`], and a caller scoring several detectors uses those two
+/// directly so the corpus is established once.
 pub fn score<P>(
     entry: &Entry,
     request: &Request,
@@ -159,12 +240,48 @@ pub fn score<P>(
 where
     P: FnMut(&str),
 {
+    // Asked before the corpus is touched. An embedder cannot be scored however
+    // good the corpus is, and finding that out after a Core-tier walk would be
+    // finding it out far too late.
+    refuse_embedder(entry)?;
+    let prepared = prepare(
+        request.corpus,
+        request.registered,
+        request.limit,
+        &mut progress,
+    )?;
+    score_one(
+        entry,
+        &prepared,
+        &request.records,
+        request.timeout,
+        &mut progress,
+    )
+}
+
+fn refuse_embedder(entry: &Entry) -> Result<(), ScoreError> {
     if entry.kind == Kind::Embedder {
         return Err(ScoreError::NotADetector {
             name: entry.name.clone(),
         });
     }
+    Ok(())
+}
 
+/// Establish what the corpus is, once, before any detector is asked anything.
+///
+/// Every refusal this can raise is a fact about the corpus rather than about a
+/// tool, so raising them here means a seven-detector command refuses before it
+/// spends an hour on the first one rather than after.
+pub fn prepare<P>(
+    corpus: &Path,
+    registered: Option<&CorpusEntry>,
+    limit: Option<u64>,
+    mut progress: P,
+) -> Result<Prepared, ScoreError>
+where
+    P: FnMut(&str),
+{
     // WHY NAMING A CORPUS IS NOT ENOUGH TO EARN `named`
     //
     // Started HERE, before the corpus is identified rather than after. The
@@ -186,7 +303,7 @@ where
     // single image is scored, because the answer does not depend on the run
     // and a Core tier is hours: discovering at the end that the directory was
     // never the corpus named is discovering it far too late.
-    let claim_holds = match request.registered {
+    let claim_holds = match registered {
         None => false,
         Some(entry) => match entry
             .integrity
@@ -203,7 +320,7 @@ where
                 false
             }
             Some(want) => {
-                let got = corpus_digest(request.corpus)?;
+                let got = corpus_digest(corpus)?;
                 if got.as_deref() == Some(want) {
                     // The manifest is the one the registry named. Now check
                     // that the images are the ones the manifest describes,
@@ -214,7 +331,7 @@ where
                          declares; checking the images against their own \
                          records before naming the run",
                     );
-                    let checked = verify_bytes(request.corpus, &mut progress)?;
+                    let checked = verify_bytes(corpus, &mut progress)?;
                     progress(&format!(
                         "{checked} image(s) are the files their records \
                          describe"
@@ -226,7 +343,7 @@ where
                     // and filing the run quietly as custom would answer a
                     // different question from the one they asked.
                     return Err(ScoreError::NotThatCorpus {
-                        path: request.corpus.display().to_string(),
+                        path: corpus.display().to_string(),
                         id: entry.id.clone(),
                         want: want.to_string(),
                         got: got.unwrap_or_else(|| {
@@ -240,59 +357,16 @@ where
         },
     };
 
-    // The scoring pass. Streams, and every answer is on disk before the next
-    // item begins, so an interrupted run resumes rather than restarts.
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&request.records)
-        .map_err(|e| ScoreError::Records {
-            path: request.records.display().to_string(),
-            source: e,
-        })?;
-    let mut sink = JsonLines::new(file);
-
-    // Streamed, not collected. Building a Vec of 344,357 items here would put
-    // the corpus back in memory one layer above the runner that was written
-    // specifically not to hold it.
-    let mut feed = Feed::open(request)?;
-    let tally = runner::score(
-        entry,
-        &mut feed,
-        &request.records,
-        &mut sink,
-        request.timeout,
-        |t| progress(&format!("{} scored, {} errored", t.scored, t.errored)),
-    )?;
-    // A corpus defect part way through is a failure, not a short run. Checked
-    // after the loop because the iterator cannot return one.
-    if let Some(e) = feed.fault {
-        return Err(ScoreError::Corpus(e));
-    }
-
-    // The metrics pass. Labels come from the corpus and scores from the
-    // records, joined by position, because both are produced in the same
-    // deterministic order and the runner refuses to continue when they
-    // disagree.
-    let (scores, labels, errored) = join(request)?;
-    let n_stego = labels.iter().filter(|l| **l).count() as u64;
-    let n_clean = labels.len() as u64 - n_stego;
-    if n_clean == 0 || n_stego == 0 {
-        return Err(ScoreError::OneSided {
-            path: request.corpus.display().to_string(),
-            clean: n_clean,
-            stego: n_stego,
-        });
-    }
-
-    // Checked before a number is computed from the corpus, because a corpus
-    // that leaks a cover across the boundary produces a confident wrong
-    // answer, and producing it first and mentioning the problem afterwards is
-    // how a bad number gets quoted.
-    let checks = check(request)?;
+    // Checked before a single image is scored, because a corpus that leaks a
+    // cover across the boundary produces a confident wrong answer, and
+    // producing it first and mentioning the problem afterwards is how a bad
+    // number gets quoted. It used to run after the scoring pass, which was
+    // defensible for one detector and indefensible for seven: a corpus this
+    // refuses would have cost every one of them a full run first.
+    let checks = check(corpus)?;
     if !checks.split_leaks.is_empty() {
         return Err(ScoreError::SplitLeaks {
-            path: request.corpus.display().to_string(),
+            path: corpus.display().to_string(),
             count: checks.split_leaks.count,
             examples: checks.split_leaks.examples(),
         });
@@ -332,23 +406,195 @@ where
     // A prefix of a tier is not the tier, whatever the whole of it hashes to,
     // and the digest above is taken over the whole corpus rather than over
     // what was scored.
-    let named = if claim_holds && request.limit.is_none() {
+    if claim_holds && limit.is_some() {
+        progress(
+            "this run scored part of the corpus, so it is marked custom \
+             rather than named: a prefix of a tier is not the tier",
+        );
+    }
+
+    // Read once here rather than once per detector. Walking the corpus for
+    // labels is cheap next to hashing it, but it is still a walk of every
+    // record on disk, and seven of them over a Core tier is seven times
+    // 344,357 file reads for an answer that cannot have changed.
+    let mut labels = Vec::new();
+    for sample in Samples::open(corpus)? {
+        labels.push(sample?.role == Role::Stego);
+        if limit.is_some_and(|n| labels.len() as u64 >= n) {
+            break;
+        }
+    }
+
+    // The corpus itself is one-sided, which no detector can fix. Refused here
+    // so a seven-detector command says so once, before anything runs, rather
+    // than seven times after seven full runs. `score_one` asks the same
+    // question again of what the detector actually ANSWERED, which is a
+    // different fact and can only be known afterwards.
+    let stego = labels.iter().filter(|l| **l).count() as u64;
+    let clean = labels.len() as u64 - stego;
+    if clean == 0 || stego == 0 {
+        return Err(ScoreError::OneSided {
+            path: corpus.display().to_string(),
+            clean,
+            stego,
+        });
+    }
+
+    Ok(Prepared {
+        corpus: corpus.to_path_buf(),
+        limit,
+        registered: registered.map(|e| (e.name.clone(), e.tier.clone())),
+        checks,
+        claim_holds,
+        labels,
+        started_utc,
+        preflight: started.elapsed(),
+    })
+}
+
+/// Ask one detector about a corpus [`prepare`] has already established.
+///
+/// Callable repeatedly against the same [`Prepared`]. Nothing it does touches
+/// the corpus beyond reading the images the detector is handed, so the second
+/// detector costs a scoring pass and nothing else.
+pub fn score_one<P>(
+    entry: &Entry,
+    prepared: &Prepared,
+    records: &Path,
+    timeout: Duration,
+    mut progress: P,
+) -> Result<(Result1, Tally), ScoreError>
+where
+    P: FnMut(&str),
+{
+    refuse_embedder(entry)?;
+
+    // The scoring pass. Streams, and every answer is on disk before the next
+    // item begins, so an interrupted run resumes rather than restarts.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(records)
+        .map_err(|e| ScoreError::Records {
+            path: records.display().to_string(),
+            source: e,
+        })?;
+    let mut sink = JsonLines::new(file);
+
+    // Streamed, not collected. Building a Vec of 344,357 items here would put
+    // the corpus back in memory one layer above the runner that was written
+    // specifically not to hold it.
+    let mut feed = Feed::open(&prepared.corpus, prepared.limit)?;
+    let own_started = Instant::now();
+    let tally = runner::score(entry, &mut feed, records, &mut sink, timeout, |t| {
+        progress(&format!("{} scored, {} errored", t.scored, t.errored))
+    })?;
+    // A corpus defect part way through is a failure, not a short run. Checked
+    // after the loop because the iterator cannot return one.
+    if let Some(e) = feed.fault {
+        return Err(ScoreError::Corpus(e));
+    }
+
+    // The metrics pass. Labels came from the corpus in `prepare` and scores
+    // come from the records, joined by position, because both are produced in
+    // the same deterministic order and the runner refuses to continue when
+    // they disagree.
+    let (scores, labels, errored) = join(records, &prepared.labels)?;
+    let n_stego = labels.iter().filter(|l| **l).count() as u64;
+    let n_clean = labels.len() as u64 - n_stego;
+    if n_clean == 0 || n_stego == 0 {
+        return Err(ScoreError::OneSided {
+            path: prepared.corpus.display().to_string(),
+            clean: n_clean,
+            stego: n_stego,
+        });
+    }
+
+    let checks = &prepared.checks;
+
+    // A confounded corpus is reported rather than refused, which is the
+    // opposite of what a split leak gets, and the difference is deliberate.
+    // A leak makes a number wrong while looking right. A second variable
+    // between the clean and stego halves is a real property of some arms, kept
+    // on purpose to demonstrate what it does, so the run happens and the
+    // document says what it measured.
+    match checks.pairing {
+        Pairing::Confounded => progress(&format!(
+            "WARNING: {} stego image(s) differ from their cover in more than \
+             the payload, for example: {}. This run measures that difference \
+             as well as the payload, and the result says so",
+            checks.pairing_breaks.count,
+            checks.pairing_breaks.examples()
+        )),
+        Pairing::Unverified => progress(
+            "the pairing rule could not be checked: no stego image here names \
+             a cover this could read alongside it. The result says unverified \
+             rather than claiming the rule held",
+        ),
+        Pairing::SingleVariable => {
+            if checks.unreadable > 0 {
+                progress(&format!(
+                    "{} of {} stego image(s) could not be compared with their \
+                     cover, so the pairing check covered the rest",
+                    checks.unreadable,
+                    checks.unreadable + checks.compared
+                ));
+            }
+        }
+    }
+
+    let named = if prepared.claim_holds && prepared.limit.is_none() {
         Configuration::Named
     } else {
-        if claim_holds {
-            progress(
-                "this run scored part of the corpus, so it is marked custom \
-                 rather than named: a prefix of a tier is not the tier",
-            );
-        }
         Configuration::Custom
     };
 
-    let auc = stegobench_metrics::roc_auc(&scores, &labels).unwrap_or(0.5);
+    // NOTHING HERE INVENTS A NUMBER WHEN THE METRIC CANNOT BE COMPUTED.
+    //
+    // This line used to read `.unwrap_or(0.5)`, and 0.5 is the one value that
+    // must never be a fallback: it is exactly what an AUC says when a detector
+    // carries no information. A run that could not be measured was therefore
+    // published as a run that came out at chance, and no field in the document
+    // told the two apart. That is the class of fault this project exists to
+    // correct, so it is refused rather than defaulted.
+    //
+    // `result-v1` requires the field, so the choice is refuse or lie, and it
+    // is not this code's to make the field optional.
+    let auc = match stegobench_metrics::roc_auc(&scores, &labels) {
+        Some(auc) => auc,
+        None => {
+            return Err(ScoreError::NoAuc {
+                name: entry.name.clone(),
+                answered: scores.len(),
+                why: why_no_auc(&scores, &labels),
+            })
+        }
+    };
     let mut tpr_at_fpr = BTreeMap::new();
     for fpr in [0.01, 0.05, 0.10] {
-        if let Some(tpr) = stegobench_metrics::tpr_at_fpr(&scores, &labels, fpr) {
-            tpr_at_fpr.insert(format!("{fpr:.2}"), tpr);
+        match stegobench_metrics::tpr_at_fpr(&scores, &labels, fpr) {
+            Some(tpr) => {
+                tpr_at_fpr.insert(format!("{fpr:.2}"), tpr);
+            }
+            // Unreachable given the AUC above succeeded: these three budgets
+            // are constants inside [0, 1], and the only other way this answers
+            // None is a curve that could not be drawn, which is the same
+            // condition the AUC just cleared. It is checked rather than
+            // assumed, because a silently missing key in the published map
+            // would read as "this detector was measured and reached nothing at
+            // that budget", which is a different and much worse claim.
+            None => {
+                return Err(ScoreError::NoAuc {
+                    name: entry.name.clone(),
+                    answered: scores.len(),
+                    why: format!(
+                        "the AUC could be computed but the detection rate at a \
+                         false-alarm budget of {fpr:.2} could not, which should \
+                         not be possible and is a bug in this harness rather \
+                         than in the detector. Please report it."
+                    ),
+                })
+            }
         }
     }
 
@@ -360,11 +606,14 @@ where
             kind: SubjectKind::Detector,
         },
         corpus: CorpusRef {
-            name: match request.registered {
-                Some(e) => e.name.clone(),
-                None => corpus_name(request.corpus),
+            name: match &prepared.registered {
+                Some((name, _)) => name.clone(),
+                None => corpus_name(&prepared.corpus),
             },
-            tier: request.registered.and_then(|e| e.tier.clone()),
+            tier: prepared
+                .registered
+                .as_ref()
+                .and_then(|(_, tier)| tier.clone()),
             // The user pointed at a directory. Nothing here downloaded it, and
             // saying otherwise would be the harness vouching for bytes it
             // never saw arrive. Naming the corpus does not change that: a
@@ -390,6 +639,25 @@ where
                 name: entry.name.clone(),
                 image: subject_version(entry),
                 determinism: Determinism::Nondeterministic,
+                // KNOWN TO BE WRONG FOR ONE SHAPE OF ENTRY, AND LEFT WRONG
+                // DELIBERATELY RATHER THAN SWAPPED FOR A DIFFERENT WRONG.
+                //
+                // An entry can declare an image AND `invoke.host`, meaning the
+                // image names the subject while a host adapter is what
+                // actually runs: StegaShield is a service, and scoring an
+                // image means posting it to an instance. Neither value here
+                // tells the truth about that. `container` says it ran in a
+                // sandbox with no network, which is false. `local` would say
+                // the digest beside it is the hash of the executable that ran,
+                // which is also false: it is the image digest that names the
+                // subject, and the adapter's own hash is a different number.
+                //
+                // Changing `result-v1` to carry a third value is a schema
+                // decision with the operator, so this keeps the value it has
+                // always written and `network_reachable` below now tells the
+                // truth on its own. A reader of a StegaShield result sees a
+                // container route beside a reachable network, which is exactly
+                // the combination that says the sandbox claim does not hold.
                 route: if entry.image.is_some() {
                     Route::Container
                 } else {
@@ -397,11 +665,24 @@ where
                 },
             }],
             harness_version: env!("CARGO_PKG_VERSION").to_string(),
-            started_utc,
-            elapsed_seconds: started.elapsed().as_secs_f64(),
-            // Containers are run with --network=none; a binary entry is a
-            // program the operator installed and this cannot speak for it.
-            network_reachable: entry.binary.is_some(),
+            started_utc: prepared.started_utc.clone(),
+            // The shared pre-flight plus this detector's own pass. Both are
+            // work this number rests on. What it does NOT include is time
+            // spent on the other detectors of the same command: waiting for a
+            // different measurement is not part of making this one.
+            elapsed_seconds: prepared.preflight.as_secs_f64() + own_started.elapsed().as_secs_f64(),
+            // Three routes, three answers, and the one-line version used to
+            // get two of them wrong.
+            //
+            // A container is launched with `--network=none` (see
+            // `stegobench_plugin::selftest`), so nothing inside it can reach
+            // anything. A locally installed binary runs here with this
+            // machine's network and nothing constrains it. A host adapter runs
+            // here too, and for a service entry the network is not merely
+            // reachable, it is the only way the tool is asked anything at all,
+            // so reporting it as unreachable was the most misleading of the
+            // three.
+            network_reachable: !runs_in_container(entry),
             host: Some(host()),
         },
         declarations: Declarations {
@@ -413,6 +694,53 @@ where
         },
     };
     Ok((result, tally))
+}
+
+/// Which of the conditions stopped an AUC being computed, in words.
+///
+/// `roc_auc` answers `None` and does not say why, which is the right shape for
+/// a metrics crate with no dependencies and the wrong thing to hand a user.
+/// The three conditions call for three different actions, so they are told
+/// apart here rather than collapsed into "could not compute AUC", which sends
+/// somebody to read the source.
+fn why_no_auc(scores: &[f64], labels: &[bool]) -> String {
+    if scores.len() != labels.len() {
+        return format!(
+            "{} score(s) came back against {} label(s). The two are built from \
+             the same records in the same order, so a mismatch is a bug in \
+             this harness rather than anything you did. Please report it with \
+             this message.",
+            scores.len(),
+            labels.len()
+        );
+    }
+    let nan = scores.iter().filter(|s| s.is_nan()).count();
+    if nan > 0 {
+        return format!(
+            "{nan} of the {} answer(s) are not numbers. A value that cannot be \
+             ordered cannot be ranked, and a ranking that quietly skipped it \
+             would be measured on a subset nobody named. This is the \
+             detector's output, so the fix is with the tool or its parser: \
+             `stegobench doctor` runs its self-test.",
+            scores.len()
+        );
+    }
+    let stego = labels.iter().filter(|l| **l).count();
+    let clean = labels.len() - stego;
+    if clean == 0 || stego == 0 {
+        return format!(
+            "the detector answered about {clean} clean and {stego} stego \
+             image(s), and both sides are needed. Whatever the corpus holds, \
+             this tool produced a usable answer for only one of them, so there \
+             is nothing to tell apart."
+        );
+    }
+    format!(
+        "{} answer(s) were usable and the ranking over them still could not be \
+         formed. This is a bug in this harness rather than anything you did; \
+         please report it with this message.",
+        scores.len()
+    )
 }
 
 /// The items to score, one at a time, stopping at `limit` where one is set.
@@ -429,14 +757,24 @@ struct Feed {
 }
 
 impl Feed {
-    fn open(request: &Request) -> Result<Self, ScoreError> {
+    fn open(corpus: &Path, limit: Option<u64>) -> Result<Self, ScoreError> {
         Ok(Self {
-            samples: Samples::open(request.corpus)?,
-            limit: request.limit,
+            samples: Samples::open(corpus)?,
+            limit,
             taken: 0,
             fault: None,
         })
     }
+}
+
+/// Whether a run of this entry happens inside a container, which is the only
+/// route that is sandboxed away from the network.
+///
+/// An entry naming an image is not enough. `invoke.host` says the thing that
+/// runs is a program on this machine, and the image reference is then the
+/// subject's identity rather than a description of what executes.
+fn runs_in_container(entry: &Entry) -> bool {
+    entry.image.is_some() && !entry.invoke.as_ref().is_some_and(|i| i.host)
 }
 
 impl Iterator for Feed {
@@ -759,13 +1097,13 @@ struct Cover {
 /// chooses. It costs a second walk of the directory tree, because a cover can
 /// sort after the arm that used it and the map has to be complete before any
 /// row is judged against it.
-fn check(request: &Request) -> Result<Checks, ScoreError> {
+fn check(corpus: &Path) -> Result<Checks, ScoreError> {
     let mut covers: HashMap<String, Cover> = HashMap::new();
     let mut any_split = false;
     let mut digest = CorpusDigest::new();
     let mut facts = ArmFacts::default();
 
-    for sample in Samples::open(request.corpus)? {
+    for sample in Samples::open(corpus)? {
         let sample = sample?;
 
         // Folded into a walk that was happening anyway.
@@ -842,7 +1180,7 @@ fn check(request: &Request) -> Result<Checks, ScoreError> {
         arm: arm_of(&facts),
     };
 
-    for sample in Samples::open(request.corpus)? {
+    for sample in Samples::open(corpus)? {
         let sample = sample?;
         if sample.role != Role::Stego {
             continue;
@@ -997,18 +1335,12 @@ fn difference(cover: Shape, stego: Shape) -> Option<String> {
 }
 
 /// Scores and labels, joined by position.
-fn join(request: &Request) -> Result<(Vec<f64>, Vec<bool>, u64), ScoreError> {
-    let mut labels = Vec::new();
-    for sample in Samples::open(request.corpus)? {
-        let sample = sample?;
-        labels.push(sample.role == Role::Stego);
-        if request.limit.is_some_and(|n| labels.len() as u64 >= n) {
-            break;
-        }
-    }
-
-    let file = std::fs::File::open(&request.records).map_err(|e| ScoreError::Records {
-        path: request.records.display().to_string(),
+///
+/// The labels are handed in rather than re-read, because they are a property
+/// of the corpus and every detector of one command shares them.
+fn join(records: &Path, labels: &[bool]) -> Result<(Vec<f64>, Vec<bool>, u64), ScoreError> {
+    let file = std::fs::File::open(records).map_err(|e| ScoreError::Records {
+        path: records.display().to_string(),
         source: e,
     })?;
     let mut scores = Vec::new();
@@ -1190,7 +1522,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         corpus(&root, 2, 2);
-        let feed = Feed::open(&request(&root, None)).expect("opens");
+        let feed = Feed::open(&root, None).expect("opens");
         let ids: Vec<String> = feed.map(|w| w.id).collect();
         assert_eq!(ids, ["c000", "c001", "s000", "s001"]);
     }
@@ -1202,7 +1534,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         corpus(&root, 4, 4);
-        let feed = Feed::open(&request(&root, Some(3))).expect("opens");
+        let feed = Feed::open(&root, Some(3)).expect("opens");
         assert_eq!(feed.count(), 3);
     }
 
@@ -1216,7 +1548,7 @@ mod tests {
         corpus(&root, 2, 2);
         // An image with no record beside it.
         std::fs::write(root.join("orphan.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        let mut feed = Feed::open(&request(&root, None)).expect("opens");
+        let mut feed = Feed::open(&root, None).expect("opens");
         let seen = feed.by_ref().count();
         assert!(
             feed.fault.is_some(),
@@ -1342,7 +1674,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         split_corpus(&root, false);
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert!(
             checks.split_leaks.is_empty(),
             "{}",
@@ -1362,7 +1694,7 @@ mod tests {
         let root = tmp.path().join("corpus");
         split_corpus(&root, true);
 
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.split_leaks.count, 1);
         assert!(
             checks.split_leaks.examples().contains("c0.png"),
@@ -1383,7 +1715,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         corpus(&root, 2, 2);
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert!(checks.split_leaks.is_empty());
         assert_eq!(checks.split, SplitDiscipline::NotApplicable);
     }
@@ -1408,7 +1740,7 @@ mod tests {
             r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
         )
         .unwrap();
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert!(
             checks.split_leaks.is_empty(),
             "{}",
@@ -1435,7 +1767,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         pair(&root, &png(64, 64, 8, 2, 128));
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert!(checks.pairing_breaks.is_empty());
         assert_eq!(checks.compared, 1);
         assert_eq!(checks.pairing, Pairing::SingleVariable);
@@ -1449,7 +1781,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         pair(&root, &png(63, 64, 8, 2, 0));
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.pairing, Pairing::Confounded);
         assert_eq!(checks.pairing_breaks.count, 1);
         assert!(
@@ -1471,7 +1803,7 @@ mod tests {
         jpeg.push(3);
         jpeg.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
         pair(&root, &jpeg);
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.pairing, Pairing::Confounded);
         let seen = checks.pairing_breaks.examples();
         assert!(seen.contains("PNG") && seen.contains("JPEG"), "{seen}");
@@ -1483,7 +1815,7 @@ mod tests {
             let tmp = tempfile::tempdir().expect("tmp");
             let root = tmp.path().join("corpus");
             pair(&root, &stego);
-            let checks = check(&request(&root, None)).expect("checked");
+            let checks = check(&root).expect("checked");
             assert_eq!(checks.pairing, Pairing::Confounded);
         }
     }
@@ -1546,7 +1878,7 @@ mod tests {
             r#"{"role":"stego","source_png":"c0.png","sha256":"0"}"#,
         )
         .unwrap();
-        let checks = check(&request(&unreadable, None)).expect("checked");
+        let checks = check(&unreadable).expect("checked");
         assert_eq!(checks.pairing, Pairing::Unverified);
         assert_eq!(checks.unreadable, 1);
         assert_eq!(checks.compared, 0);
@@ -1557,7 +1889,7 @@ mod tests {
         std::fs::write(unlinked.join("c0.json"), r#"{"role":"clean","sha256":"0"}"#).unwrap();
         std::fs::write(unlinked.join("s0.png"), png(64, 64, 8, 2, 1)).unwrap();
         std::fs::write(unlinked.join("s0.json"), r#"{"role":"stego","sha256":"0"}"#).unwrap();
-        let checks = check(&request(&unlinked, None)).expect("checked");
+        let checks = check(&unlinked).expect("checked");
         assert_eq!(checks.pairing, Pairing::Unverified);
         assert_eq!(checks.compared, 0);
     }
@@ -1578,7 +1910,7 @@ mod tests {
             r#"{"role":"stego","source_png":"c0.bmp","sha256":"0"}"#,
         )
         .unwrap();
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.compared, 1);
         assert_eq!(checks.pairing, Pairing::SingleVariable);
     }
@@ -1600,7 +1932,7 @@ mod tests {
             )
             .unwrap();
         }
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.pairing_breaks.count, 12);
         assert_eq!(checks.pairing_breaks.examples.len(), MAX_EXAMPLES);
     }
@@ -1644,8 +1976,8 @@ mod tests {
         let there = tmp.path().join("somewhere/else/entirely");
         digested(&here, &["aa", "bb", "cc"]);
         digested(&there, &["aa", "bb", "cc"]);
-        let a = check(&request(&here, None)).expect("checked").digest;
-        let b = check(&request(&there, None)).expect("checked").digest;
+        let a = check(&here).expect("checked").digest;
+        let b = check(&there).expect("checked").digest;
         assert!(a.is_some(), "no digest was computed");
         assert_eq!(a, b);
     }
@@ -1658,8 +1990,8 @@ mod tests {
         digested(&a, &["aa", "bb", "cc"]);
         digested(&b, &["aa", "bb", "cd"]);
         assert_ne!(
-            check(&request(&a, None)).expect("checked").digest,
-            check(&request(&b, None)).expect("checked").digest
+            check(&a).expect("checked").digest,
+            check(&b).expect("checked").digest
         );
     }
 
@@ -1671,7 +2003,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         digested(&root, &["aa", "", "cc"]);
-        assert_eq!(check(&request(&root, None)).expect("checked").digest, None);
+        assert_eq!(check(&root).expect("checked").digest, None);
     }
 
     #[cfg(unix)]
@@ -1718,7 +2050,7 @@ mod tests {
             r#","tool":"wow","arm":"wow-0200","rate":0.2,"rate_unit":"bits per pixel","domain":"spatial""#,
             "png",
         );
-        let arm = check(&request(&root, None)).expect("checked").arm;
+        let arm = check(&root).expect("checked").arm;
         assert_eq!(arm.embedder, "wow");
         assert_eq!(arm.domain, Domain::Spatial);
         assert_eq!(arm.format, "png");
@@ -1734,10 +2066,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         armed(&root, r#","tool":"hugo","domain":"spatial""#, "png");
-        assert_eq!(
-            check(&request(&root, None)).expect("checked").arm.embedder,
-            "hugo"
-        );
+        assert_eq!(check(&root).expect("checked").arm.embedder, "hugo");
     }
 
     #[test]
@@ -1752,7 +2081,7 @@ mod tests {
             r#","tool":"outguess","rate":0.05,"rate_unit":"fraction of the capacity outguess reports","domain":"jpeg-dct""#,
             "jpg",
         );
-        let arm = check(&request(&root, None)).expect("checked").arm;
+        let arm = check(&root).expect("checked").arm;
         assert_eq!(arm.embedder, "outguess");
         assert_eq!(arm.domain, Domain::Jpeg);
         assert_eq!(arm.format, "jpeg", "jpg and jpeg are one format");
@@ -1771,7 +2100,7 @@ mod tests {
             r#","tool":"juniward","rate":0.4,"rate_unit":"bits per non-zero AC coefficient","domain":"jpeg-dct""#,
             "jpg",
         );
-        let arm = check(&request(&root, None)).expect("checked").arm;
+        let arm = check(&root).expect("checked").arm;
         assert_eq!(arm.rate, None);
         assert_eq!(arm.embedder, "juniward");
     }
@@ -1797,7 +2126,7 @@ mod tests {
             )
             .unwrap();
         }
-        let arm = check(&request(&root, None)).expect("checked").arm;
+        let arm = check(&root).expect("checked").arm;
         assert_eq!(arm.embedder, "mixed");
         assert_eq!(arm.domain, Domain::Mixed);
     }
@@ -1809,7 +2138,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         armed(&root, "", "png");
-        let arm = check(&request(&root, None)).expect("checked").arm;
+        let arm = check(&root).expect("checked").arm;
         assert_eq!(arm.embedder, "unstated");
         assert_eq!(arm.rate, None);
         // The format is the only evidence left, and a PNG corpus is a spatial
@@ -1841,7 +2170,7 @@ mod tests {
         )
         .unwrap();
 
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(
             checks.pairing,
             Pairing::Confounded,
@@ -1885,7 +2214,7 @@ mod tests {
         )
         .unwrap();
 
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.compared, 1);
         assert_eq!(
             checks.pairing,
@@ -1915,7 +2244,7 @@ mod tests {
             r#"{"role":"stego","source_png":"09710.png","sha256":"b"}"#,
         )
         .unwrap();
-        let checks = check(&request(&root, None)).expect("checked");
+        let checks = check(&root).expect("checked");
         assert_eq!(checks.compared, 1);
         assert_eq!(checks.pairing, Pairing::SingleVariable);
     }
@@ -1959,6 +2288,133 @@ mod tests {
         result.validate().expect("valid");
     }
 
+    /// THE CLAIM THE TWO-HALVES REFACTOR RESTS ON, MEASURED RATHER THAN
+    /// DESCRIBED.
+    ///
+    /// Scoring seven detectors over a Core tier must not hash 344,357 images
+    /// seven times. The byte verification is the most expensive thing this
+    /// module does and it emits one distinctive progress line, so counting
+    /// that line across a two-detector run is a direct measurement of how many
+    /// times the corpus was established.
+    #[cfg(unix)]
+    #[test]
+    fn the_expensive_corpus_work_happens_once_however_many_detectors_are_asked() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        digested(&root, &["aa", "bb", "cc"]);
+        let digest = corpus_digest(&root).expect("readable").expect("named");
+        let entry = registered_corpus(Some(&digest));
+
+        let mut lines: Vec<String> = Vec::new();
+        let prepared = prepare(&root, Some(&entry), None, |l: &str| {
+            lines.push(l.to_string())
+        })
+        .expect("prepared");
+
+        let verified = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|l| l.contains("are the files their records describe"))
+                .count()
+        };
+        assert_eq!(
+            verified(&lines),
+            1,
+            "the byte check should have run exactly once: {lines:?}"
+        );
+
+        // Two detectors against the one `Prepared`. Different records files,
+        // so neither resumes from the other.
+        let detector = sizing_detector(tmp.path());
+        let after = lines.len();
+        for name in ["first", "second"] {
+            let records = tmp.path().join(format!("{name}.jsonl"));
+            score_one(
+                &detector,
+                &prepared,
+                &records,
+                Duration::from_secs(5),
+                |l: &str| lines.push(l.to_string()),
+            )
+            .unwrap_or_else(|e| panic!("{name} failed: {e}"));
+        }
+        assert_eq!(
+            verified(&lines),
+            1,
+            "a detector re-ran the byte check: {:?}",
+            &lines[after..]
+        );
+
+        // And the shared preparation is genuinely attributed to each result
+        // rather than dropped: both name the same start.
+        let one = score_one(
+            &detector,
+            &prepared,
+            &tmp.path().join("third.jsonl"),
+            Duration::from_secs(5),
+            |_| {},
+        )
+        .expect("third")
+        .0;
+        assert_eq!(one.provenance.started_utc, prepared.started_utc);
+        assert!(one.provenance.elapsed_seconds >= prepared.preflight_seconds());
+        assert_eq!(one.declarations.configuration, Configuration::Named);
+    }
+
+    /// A container is sandboxed with no network; a local program and a host
+    /// adapter are not. The one-line version got two of the three wrong, and
+    /// the service case got it backwards: the network is not merely reachable
+    /// for one of those, it is the only way the tool is asked anything.
+    #[test]
+    fn what_a_result_says_about_the_network_is_true_for_all_three_routes() {
+        let digest = "5".repeat(64);
+        let container: Entry = toml::from_str(&format!(
+            "name = \"c\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"ghcr.io/x/y@sha256:{digest}\"\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n"
+        ))
+        .expect("parses");
+        let local: Entry = toml::from_str(
+            "name = \"l\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"sh\"]\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+        )
+        .expect("parses");
+        let service: Entry = toml::from_str(&format!(
+            "name = \"s\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"ghcr.io/x/s@sha256:{digest}\"\n\
+             [invoke]\nhost = true\nadapter = \"a.py\"\nentrypoint = \"python3\"\n\
+             argv = [\"{{adapter}}\", \"{{file}}\"]\nparser = \"number\"\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n"
+        ))
+        .expect("parses");
+
+        assert!(runs_in_container(&container));
+        assert!(!runs_in_container(&local));
+        assert!(
+            !runs_in_container(&service),
+            "an entry naming an image AND invoke.host does not run in that \
+             image, so a result claiming a sandbox and no network is false \
+             about both halves"
+        );
+    }
+
+    /// Proved end to end rather than through the helper alone, because the
+    /// field a reader acts on is the one in the document.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_run_reports_the_network_as_reachable_in_the_document() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 2, 2);
+        let (result, _) =
+            score(&sizing_detector(tmp.path()), &request(&root, None), |_| {}).expect("scored");
+        assert!(
+            result.provenance.network_reachable,
+            "a program on this machine runs with this machine's network"
+        );
+    }
+
     #[test]
     fn every_way_a_run_can_fail_has_its_own_exit_code() {
         // They all used to be 4, plugin failure, including four where no
@@ -1998,10 +2454,91 @@ mod tests {
                 },
                 exit::FAILURE,
             ),
+            (
+                ScoreError::NoAuc {
+                    name: "x".into(),
+                    answered: 4,
+                    why: "w".into(),
+                },
+                exit::PLUGIN_FAILED,
+            ),
         ];
         for (err, want) in cases {
             assert_eq!(err.exit_code(), want, "{err}");
         }
+    }
+
+    /// The fallback that used to sit on the AUC, and why it could not stay.
+    ///
+    /// `.unwrap_or(0.5)` wrote the one value an AUC must never default to: 0.5
+    /// is exactly what the metric says when a detector carries no information,
+    /// so a run that could not be measured was published as a run that came
+    /// out at chance, and no field in the document told the two apart.
+    #[test]
+    fn a_run_with_no_computable_auc_refuses_rather_than_publishing_a_half() {
+        let err = ScoreError::NoAuc {
+            name: "zsteg".into(),
+            answered: 12,
+            why: why_no_auc(&[1.0, f64::NAN], &[false, true]),
+        };
+        let text = err.to_string();
+        assert_eq!(err.exit_code(), stegobench_core::exit::PLUGIN_FAILED);
+        // The reader is told which condition fired, not merely that one did.
+        assert!(text.contains("not numbers"), "{text}");
+        // And is told why 0.5 in particular could not be the fallback, since
+        // that is the whole argument.
+        assert!(text.contains("0.5"), "{text}");
+        assert!(text.contains("nothing is written"), "{text}");
+    }
+
+    /// Three conditions, three actions, so three messages rather than one.
+    #[test]
+    fn every_reason_an_auc_cannot_be_computed_is_named_separately() {
+        let mismatch = why_no_auc(&[1.0, 2.0], &[true]);
+        assert!(mismatch.contains("2 score(s)") && mismatch.contains("1 label(s)"));
+        assert!(
+            mismatch.contains("bug in this harness"),
+            "a length mismatch is not the user's doing: {mismatch}"
+        );
+
+        let nan = why_no_auc(&[f64::NAN, 1.0], &[true, false]);
+        assert!(
+            nan.contains("1 of the 2 answer(s) are not numbers"),
+            "{nan}"
+        );
+        assert!(
+            nan.contains("stegobench doctor"),
+            "a NaN from a detector needs a next step: {nan}"
+        );
+
+        let one_sided = why_no_auc(&[1.0, 2.0], &[true, true]);
+        assert!(one_sided.contains("0 clean and 2 stego"), "{one_sided}");
+
+        // And the residual case is not silently dressed up as one of the
+        // three. It cannot be reached from `roc_auc`'s own contract, so it
+        // says it is a bug rather than inventing a cause.
+        let residual = why_no_auc(&[1.0, 2.0], &[true, false]);
+        assert!(residual.contains("bug in this harness"), "{residual}");
+    }
+
+    /// The four conditions above are what `roc_auc` itself answers `None` to,
+    /// asserted against the crate rather than against this file's memory of
+    /// it. If the metrics crate grows a fifth, this fails and the diagnosis
+    /// above gets updated rather than quietly falling through to "a bug".
+    #[test]
+    fn the_conditions_this_diagnoses_are_the_ones_the_metric_actually_refuses() {
+        assert_eq!(stegobench_metrics::roc_auc(&[1.0, 2.0], &[true]), None);
+        assert_eq!(
+            stegobench_metrics::roc_auc(&[f64::NAN, 1.0], &[true, false]),
+            None
+        );
+        assert_eq!(
+            stegobench_metrics::roc_auc(&[1.0, 2.0], &[true, true]),
+            None
+        );
+        // And a well-formed input still produces one, so the test above is
+        // not passing because nothing works.
+        assert!(stegobench_metrics::roc_auc(&[1.0, 2.0], &[false, true]).is_some());
     }
 
     #[cfg(unix)]
