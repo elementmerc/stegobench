@@ -113,10 +113,13 @@ impl Source {
     }
 
     /// One line naming the registry that answered.
+    ///
+    /// The path is the answer. How it was found belongs in `--json` for
+    /// somebody debugging two registries, not in front of everybody else.
     pub fn line(&self) -> String {
         match self.path() {
-            Some(p) => format!("registry: {} ({})", p.display(), self.how()),
-            None => format!("registry: built in ({})", self.how()),
+            Some(p) => format!("registry  {}", p.display()),
+            None => "registry  built in".to_string(),
         }
     }
 }
@@ -164,12 +167,13 @@ impl Resolved {
 /// Why no registry could be produced.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    // A named registry is never quietly swapped for another one, which is why
+    // this is a failure rather than a fall back to the built-in copy. The
+    // reader needs the path and the two ways out, not the reasoning.
     #[error(
-        "{source}\n\nLooked in {path}, which you named with --registry or \
-         STEGOBENCH_REGISTRY. A registry you point at is used as given and is \
-         never quietly swapped for another one, so this is a failure rather \
-         than a fall back to the built-in copy: fix the path, or drop the flag \
-         to let stegobench find one."
+        "{source}\n\
+         {path} was named with --registry or STEGOBENCH_REGISTRY. Fix the \
+         path, or drop the flag to let stegobench find one."
     )]
     Named {
         path: String,
@@ -177,11 +181,10 @@ pub enum Error {
         source: Box<stegobench_core::registry::RegistryError>,
     },
     #[error(
-        "this build of stegobench carries no built-in registry, and none was \
-         found on disk.\n\nLooked for a directory called `plugins/registry` \
-         under {searched}.\n\nPoint --registry or STEGOBENCH_REGISTRY at the \
-         directory of tool descriptions, or run stegobench from a checkout of \
-         the repository."
+        "no registry found, and this build carries no built-in copy.\n\
+         Looked for `plugins/registry` under: {searched}\n\
+         Point --registry at a directory of tool descriptions, or run \
+         stegobench from a checkout."
     )]
     NoneAnywhere { searched: String },
     #[error("the registry compiled into this binary is not loadable, which is a bug: {0}")]
@@ -509,9 +512,14 @@ mod tests {
             "got {err:?}, which is not the named-path failure"
         );
         let text = err.to_string();
+        // The path the user named, and the two ways out. Not the reasoning.
         assert!(
-            text.contains("never quietly swapped"),
-            "the message does not say why it refused: {text}"
+            text.contains(&missing.display().to_string()),
+            "the message does not name the path that was asked for: {text}"
+        );
+        assert!(
+            text.contains("--registry") && text.contains("drop the flag"),
+            "the message does not say what to do next: {text}"
         );
     }
 
@@ -530,7 +538,7 @@ mod tests {
         assert_eq!(resolved.source, Source::BuiltIn);
         assert_eq!(resolved.source.path(), None);
         assert_eq!(resolved.source.tag(), "built-in");
-        assert!(resolved.source.line().contains("built in"));
+        assert_eq!(resolved.source.line(), "registry  built in");
         assert!(!resolved.registry.entries.is_empty());
     }
 

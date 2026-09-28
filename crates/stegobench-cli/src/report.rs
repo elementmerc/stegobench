@@ -249,21 +249,13 @@ impl Group {
     pub fn comparability(&self) -> String {
         match self.configuration {
             Configuration::Named => format!(
-                "These runs are `named`: each was measured over the whole of \
-                 {}, whose digest was declared in advance. A figure here may \
-                 be quoted beside anybody else's `named` run over the same \
-                 corpus digest, and beside nothing else. It is not comparable \
-                 with a number measured on any other corpus, whatever the two \
-                 corpora are called.",
+                "NAMED: quotable beside another `named` run over this same \
+                 digest of {}, and beside nothing else.",
                 self.corpus_name
             ),
             Configuration::Custom => format!(
-                "These runs are `custom`: {} is not a registered tier whose \
-                 digest anybody declared in advance, so each figure here is \
-                 comparable with itself and with nothing else. That is not a \
-                 warning about the measurement; it is the honest label for \
-                 one. What it rules out is quoting a figure here beside \
-                 somebody else's number.",
+                "CUSTOM: {} declared no digest in advance. Quote these \
+                 figures beside nothing else.",
                 self.corpus_name
             ),
         }
@@ -470,27 +462,22 @@ fn to_row(source: &Path, r: Result1) -> Row {
     let mut flags = Vec::new();
     match r.declarations.pairing {
         Pairing::SingleVariable => {}
-        Pairing::Confounded => flags.push(
-            "CONFOUNDED: the clean and stego images differ in something \
-             besides the payload"
-                .to_string(),
-        ),
-        Pairing::Unverified => flags.push(
-            "PAIRING UNVERIFIED: nothing could be compared, so no claim that \
-             only the payload differs"
-                .to_string(),
-        ),
+        // These repeat on every flagged row, so each is a label and a clause,
+        // not a sentence. `stegobench help pairing` and `help splits` carry
+        // the reasoning.
+        Pairing::Confounded => {
+            flags.push("CONFOUNDED: the pair differs in more than the payload".to_string())
+        }
+        Pairing::Unverified => {
+            flags.push("PAIRING UNVERIFIED: nothing could be compared".to_string())
+        }
     }
     if r.declarations.split_discipline == SplitDiscipline::ByFile {
-        flags.push(
-            "SPLIT BY FILE: a cover and its stego twin can land on opposite \
-             sides, which inflates every number here"
-                .to_string(),
-        );
+        flags.push("SPLIT BY FILE: inflates every number here".to_string());
     }
     if r.metrics.n_error > 0 {
         flags.push(format!(
-            "{} image(s) could not be scored and are not in this number",
+            "{} image(s) unscored and not counted",
             r.metrics.n_error
         ));
     }
@@ -499,28 +486,20 @@ fn to_row(source: &Path, r: Result1) -> Row {
         .as_deref()
         .is_some_and(|t| t == r.corpus.name)
     {
-        flags.push(
-            "TRAINED ON THIS CORPUS: a detector scored on what it trained on \
-             is not being measured"
-                .to_string(),
-        );
+        flags.push("TRAINED ON THIS CORPUS: not being measured".to_string());
     }
     if r.declarations.self_reported {
         flags.push("self-reported, not re-run by anybody else".to_string());
     }
     if r.corpus.digest.is_empty() {
-        flags.push(
-            "no corpus digest, so nobody can check which bytes this was \
-             measured on"
-                .to_string(),
-        );
+        flags.push("NO CORPUS DIGEST: nobody can check which bytes this measured".to_string());
     }
     if r.provenance
         .plugins
         .iter()
         .any(|p| p.determinism == Determinism::Nondeterministic)
     {
-        flags.push("a plugin here is nondeterministic: two runs need not agree".to_string());
+        flags.push("NONDETERMINISTIC: two runs need not agree".to_string());
     }
     if r.provenance.network_reachable {
         flags.push("the plugins could reach the network during this run".to_string());
@@ -819,8 +798,8 @@ fn incompleteness(report: &Report) -> Option<String> {
         return None;
     }
     let mut s = format!(
-        "THIS REPORT IS INCOMPLETE. {} file(s) were found and could not be \
-         turned into a row, so the tables below are missing them:\n",
+        "THIS REPORT IS INCOMPLETE. {} file(s) could not be turned into a \
+         row:\n",
         report.skipped.len()
     );
     for skip in &report.skipped {
@@ -840,21 +819,15 @@ fn preamble(report: &Report) -> String {
         display_list(&report.asked_for),
         report.groups.len()
     );
+    // Both lines are load-bearing and both are one line. Why a corpus
+    // boundary is not comparable, and why an ordering is not a ranking, live
+    // in `stegobench help reports`.
     if !report.any_cross_group_comparison_is_valid() {
-        s.push('\n');
-        s.push_str(
-            "The tables are separate because the figures in them are not \
-             comparable with each other. A number measured on one corpus and \
-             a number measured on another are measurements of two \
-             populations, not two scores on one scale, and a `custom` run is \
-             comparable with itself alone. Nothing here may be read across a \
-             table boundary.\n",
-        );
+        s.push_str("Nothing may be read across a table boundary.\n");
     }
-    s.push('\n');
     s.push_str(
-        "Rows are ordered by arm and then by detector, never by score. This \
-         is not a ranking and no ranking can be derived from it.\n",
+        "Ordered by arm then detector, never by score. Not a ranking. \
+         (`stegobench help reports`)\n",
     );
     s
 }
@@ -880,8 +853,7 @@ fn render_text(report: &Report) -> String {
             group.corpus_name,
             configuration_str(group.configuration),
             if group.corpus_digest.is_empty() {
-                "none: this corpus cannot be named, so nobody can check which \
-                 bytes these numbers came from"
+                "none, so nobody can check which bytes these numbers came from"
             } else {
                 &group.corpus_digest
             },
@@ -931,19 +903,14 @@ fn render_text(report: &Report) -> String {
                 "{}",
                 wrap(
                     &format!(
-                        "Nothing was flagged on any of the {} row(s) in this \
-                         table. The pairing, split and unscored counts above \
-                         are the conditions each figure was measured under.",
+                        "Nothing was flagged on any of the {} row(s).",
                         group.rows.len()
                     ),
                     78
                 )
             );
         } else {
-            let _ = writeln!(
-                out,
-                "Conditions on these rows, read them before quoting a figure:"
-            );
+            let _ = writeln!(out, "Conditions, read before quoting a figure:");
             for row in &flagged {
                 let _ = writeln!(
                     out,
@@ -978,8 +945,8 @@ fn render_text(report: &Report) -> String {
             out,
             "{}",
             wrap(
-                "  --format csv names the source file behind every row, and \
-                 carries the full digests.",
+                "  --format csv carries the full digests and each row's \
+                 source file.",
                 78
             )
         );
@@ -1541,7 +1508,7 @@ mod tests {
         .write(dir.path(), "a.json");
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         let text = flat(&render(&report, ReportFormat::Text));
-        assert!(text.contains("7 image(s) could not be scored"), "{text}");
+        assert!(text.contains("7 image(s) unscored"), "{text}");
         assert!(text.contains("TRAINED ON THIS CORPUS"), "{text}");
     }
 
@@ -1574,9 +1541,8 @@ mod tests {
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         assert_eq!(report.groups.len(), 2);
         assert!(!report.any_cross_group_comparison_is_valid());
-        assert!(
-            flat(&render(&report, ReportFormat::Text)).contains("not comparable with each other")
-        );
+        assert!(flat(&render(&report, ReportFormat::Text))
+            .contains("Nothing may be read across a table boundary"));
     }
 
     /// The label is not the bytes. Two documents naming one corpus with two
@@ -1617,7 +1583,7 @@ mod tests {
             assert_eq!(group.rows.len(), 1, "a group mixed the two");
         }
         let text = flat(&render(&report, ReportFormat::Text));
-        assert!(text.contains("comparable with itself and with nothing else"));
+        assert!(text.contains("Quote these figures beside nothing else"));
     }
 
     #[test]
@@ -1846,8 +1812,8 @@ mod tests {
         .write(dir.path(), "a.json");
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         let text = flat(&render(&report, ReportFormat::Text));
-        assert!(text.contains("no corpus digest"), "{text}");
-        assert!(text.contains("cannot be named"), "{text}");
+        assert!(text.contains("NO CORPUS DIGEST"), "{text}");
+        assert!(text.contains("nobody can check which bytes"), "{text}");
         assert!(render(&report, ReportFormat::Markdown).contains("carries no digest"));
     }
 
@@ -1914,7 +1880,7 @@ mod tests {
         .unwrap();
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         assert_eq!(report.groups[0].rows[0].route, "mixed");
-        assert!(flat(&render(&report, ReportFormat::Text)).contains("nondeterministic"));
+        assert!(flat(&render(&report, ReportFormat::Text)).contains("NONDETERMINISTIC"));
     }
 
     #[test]
@@ -1969,7 +1935,7 @@ mod tests {
     fn the_text_conditions_list_only_the_rows_with_something_to_say() {
         let report = build(&[shipped_results()]).unwrap();
         let text = flat(&render(&report, ReportFormat::Text));
-        assert!(text.contains("Conditions on these rows"), "{text}");
+        assert!(text.contains("Conditions, read before quoting"), "{text}");
         // Derived from the report rather than typed, so adding a result to
         // the repository does not make this test wrong about arithmetic it
         // is not testing.
@@ -2095,7 +2061,7 @@ mod tests {
         );
         assert!(json["groups"][0]["comparability"]
             .as_str()
-            .is_some_and(|s| s.contains("comparable")));
+            .is_some_and(|s| s.starts_with("NAMED:") || s.starts_with("CUSTOM:")));
         assert!(json["groups"][0]["rows"][0]["corpus"]["digest"]
             .as_str()
             .is_some_and(|d| d.len() > 8));

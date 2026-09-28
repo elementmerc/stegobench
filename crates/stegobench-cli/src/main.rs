@@ -133,11 +133,7 @@ fn with_registry(cli: &Cli, f: impl FnOnce(&Resolved) -> Output) -> Output {
 /// has to be visible, and it is, in both the text and the JSON.
 fn corpora_block(reg: &Registry, where_from: &str) -> String {
     if reg.corpora.is_empty() {
-        return format!(
-            "No corpora are registered in {where_from}. A corpus entry declares \
-             where a dataset lives and what its terms permit; nothing here \
-             means nothing has been declared."
-        );
+        return format!("no corpora registered in {where_from}");
     }
     let mut text = reg
         .corpora
@@ -150,10 +146,12 @@ fn corpora_block(reg: &Registry, where_from: &str) -> String {
         .values()
         .filter(|c| c.licence.redistribution.allows_publishing())
         .count();
+    // The use/publish split stays: it is the distinction the `redistribution`
+    // field exists for, and a reader who misses it republishes something they
+    // may only measure against.
     text.push_str(&format!(
-        "\n\n{} corpora, {publishable} of which may be republished. \
-         `describe <id>` prints the terms in full; a corpus you may use is not \
-         always one you may publish.",
+        "\n\n{} corpora, {publishable} republishable. Using one is not \
+         publishing it; `describe <id>` prints the terms.",
         reg.corpora.len()
     ));
     text
@@ -167,7 +165,7 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
     // the answer.
     let where_from = match resolved.source.path() {
         Some(p) => p.display().to_string(),
-        None => "the registry compiled into this binary".to_string(),
+        None => "built in".to_string(),
     };
     let corpora_from = match resolved.source.path() {
         Some(p) => format!("{}/corpora", p.display()),
@@ -209,16 +207,11 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
         // whether the registry is empty or merely has nothing of this kind,
         // because those two call for different actions.
         human = if reg.entries.is_empty() {
-            format!(
-                "No tools are registered in {where_from}, so there is nothing \
-                 to list as {kind:?}. A tool entry declares how to run a \
-                 detector or an embedder; nothing here means nothing has been \
-                 declared, which is not the same as nothing existing."
-            )
+            format!("no tools registered in {where_from}")
         } else {
             format!(
-                "{} tool(s) are registered in {where_from}, but none of them is \
-                 a {}. `list all` prints every one.",
+                "none of the {} tool(s) in {where_from} is a {}. `list all` \
+                 prints every one.",
                 reg.entries.len(),
                 kind.trim_end_matches('s')
             )
@@ -237,11 +230,9 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
         // would believe a run of it was sandboxed and offline. Both halves of
         // that are wrong, and the network one is the one that matters.
         human.push_str(
-            "\n\ncontainer  runs in a sandbox with no network, pinned by image \
-             digest, so two machines run identical bytes. Needs a container \
-             runtime.\nlocal      runs a program you installed, pinned by the \
-             hash of the file that ran. No sandbox, and the hash is particular \
-             to your build.",
+            "\n\ncontainer  sandboxed, no network, pinned by image digest. \
+             Needs a container runtime.\nlocal      a program you installed, \
+             pinned by the hash of the file that ran. No sandbox.",
         );
         // Counted rather than asserted. A sentence saying "one of these is a
         // service" would be a claim about a registry that changes, and the
@@ -253,21 +244,17 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
             .collect::<Vec<_>>();
         if !services.is_empty() {
             human.push_str(&format!(
-                "\n\n{} listed as `container` above {} in fact a SERVICE: {}. \
-                 The image identifies the subject, an adapter on this machine \
-                 reaches an instance you started, and the network is not \
-                 merely available to it, it is required. Not sandboxed.",
-                services.len(),
-                if services.len() == 1 { "is" } else { "are" },
+                "\n\nSERVICE, not sandboxed, and needs the network: {}. The \
+                 image names the subject; an adapter here reaches an instance \
+                 you started.",
                 services.join(", ")
             ));
         }
-        human.push_str("\n\n`stegobench doctor` says what each one still needs from you.");
+        human.push_str("\n\n`stegobench doctor` says what each one still needs.");
         let f = reg.footprint();
         human.push_str(&format!(
-            "\n\n{} tools in {} images. Default image at most {} MB \
-             (they share base layers, so the built image is smaller); \
-             {:.1} GB more available on demand.",
+            "\n\n{} tools in {} images. Up to {} MB bundled, {:.1} GB more on \
+             demand.",
             f.tools,
             f.unique_images,
             f.bundled_mb,
@@ -343,13 +330,13 @@ fn describe_block<T: serde::Serialize + std::fmt::Debug>(
     let steps = needs.block();
     if steps.is_empty() {
         return format!(
-            "{name}  [{}]\nEverything this {kind} needs is here. Whether it \
-             WORKS is what `stegobench doctor` asks and this does not.\n\n{body}",
+            "{name}  [{}]\nNothing needed. `stegobench doctor` says whether \
+             this {kind} works.\n\n{body}",
             needs.readiness.word()
         );
     }
     format!(
-        "{name}  [{}]\nWhat this {kind} needs from you:\n{steps}\n\n{body}",
+        "{name}  [{}]\nNeeds from you:\n{steps}\n\n{body}",
         needs.readiness.word()
     )
 }
@@ -453,40 +440,26 @@ fn cmd_doctor(resolved: &Resolved, fixtures: &Path, no_selftest: bool) -> Output
     ));
     if undetermined > 0 {
         human.push(format!(
-            "{undetermined} of those is something nobody here can answer yet, \
-             not something to install: a service needs the address of your own \
-             instance, and a container image cannot be looked for without a \
-             runtime. Its line says which."
+            "{undetermined} undetermined: nothing to install would settle it. \
+             Its line says what it needs."
         ));
     }
     if unsupported > 0 {
         human.push(format!(
-            "{unsupported} of those cannot run on {} at all, so nothing to \
-             install would change it.",
+            "{unsupported} cannot run on {} at all.",
             std::env::consts::OS
         ));
     }
     if answered > 0 {
-        human.push(
-            "An answering subject is installed and responding. Whether it \n\
-             detects anything is what the benchmark measures, not what this \n\
-             check decides."
-                .into(),
-        );
+        human.push("answering: installed and responding, not proved accurate.".into());
     }
     if skipped > 0 {
         // Never let "we did not look" read as "it is fine".
-        human.push(
-            "A tool that was not checked is not a tool that works. Each skipped \n\
-             line says why."
-                .into(),
-        );
+        human.push("not checked is not the same as working; each line says why.".into());
     }
     if needing > 0 {
         human.push(format!(
-            "{needing} tool(s) need something from you, and the lines to type \
-             are indented under each one. `stegobench describe <name>` prints \
-             the same thing with the whole entry beside it."
+            "{needing} need something from you, indented under each."
         ));
     }
 
@@ -659,9 +632,8 @@ fn cmd_verify(file: &Path, corpus: &Path) -> Output {
             exit::VERIFY_MISMATCH,
             format!(
                 "{} names no corpus digest, so there is nothing to check it \
-                 against. A result written over a corpus whose records state \
-                 no digests of their own carries none, and cannot be verified \
-                 by this route",
+                 against. A corpus whose records state no digests produces a \
+                 result that cannot be verified this way",
                 file.display()
             ),
         );
@@ -673,11 +645,9 @@ fn cmd_verify(file: &Path, corpus: &Path) -> Output {
             return Output::err(
                 exit::VERIFY_MISMATCH,
                 format!(
-                    "the corpus at {} cannot be named: at least one of its \
-                     records states no digest for its own image, so no digest \
-                     over it would mean what {} claims",
-                    corpus.display(),
-                    file.display()
+                    "the corpus at {} cannot be named: at least one record \
+                     states no digest for its own image",
+                    corpus.display()
                 ),
             )
         }
@@ -708,8 +678,7 @@ fn cmd_verify(file: &Path, corpus: &Path) -> Output {
             format!(
                 "{} and the corpus at {} are not about each other.\n  \
                  the document claims {claimed}\n  the corpus is    {found}\n\
-                 Whatever the two are called, the number in that document was \
-                 not measured on these images",
+                 That number was not measured on these images.",
                 file.display(),
                 corpus.display()
             ),
@@ -735,9 +704,8 @@ fn cmd_completions(shell: clap_complete::Shell) -> Output {
                 exit::FAILURE,
                 format!(
                     "the {shell} completion generator produced {} bytes that \
-                     are not valid UTF-8, so the script cannot be written. \
-                     This is a bug in stegobench or clap_complete, not in \
-                     your shell; please report it with this message: {e}",
+                     are not valid UTF-8. This is a bug in stegobench; please \
+                     report it with this message: {e}",
                     e.as_bytes().len()
                 ),
             )
@@ -747,9 +715,8 @@ fn cmd_completions(shell: clap_complete::Shell) -> Output {
         return Output::err(
             exit::FAILURE,
             format!(
-                "the {shell} completion generator produced an empty script. \
-                 Writing that to a completion directory would look like it \
-                 worked and complete nothing, so it is refused instead"
+                "the {shell} completion generator produced an empty script, \
+                 which would complete nothing. Refused rather than written"
             ),
         );
     }
@@ -820,9 +787,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     else {
         return Output::err(
             exit::USAGE,
-            "only `score` can be planned today. Nothing else here runs long \
-             enough to be worth estimating."
-                .to_string(),
+            "only `score` can be planned today.".to_string(),
         );
     };
 
@@ -923,32 +888,28 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         // is a number that reads as free and means nothing was measured. No
         // total is the honest output.
         human.push_str(
-            "\n\nNo total: not one of these declares a seconds_per_image, so \
-             nothing here can estimate how long the run takes. The worst case \
-             below is the only bound there is.",
+            "\n\nNo total: none of these declares a seconds_per_image. The \
+             worst case below is the only bound there is.",
         );
     } else {
         human.push_str(&format!(
-            "\n\nTotal: about {}, over the {estimated} detector(s) that \
-             declare a rate.",
+            "\n\nTotal          about {}, over the {estimated} that declare a \
+             rate",
             human_duration(total_seconds),
         ));
         if unestimated > 0 {
-            // Said plainly rather than left for somebody to work out from the
-            // rows. A total that reads as the whole job when it covers five of
-            // seven is worse than no total.
+            // A total that reads as the whole job when it covers five of seven
+            // is worse than no total.
             human.push_str(&format!(
-                " {unestimated} of them declare no rate, so the real total is \
-                 larger by an amount nothing here can estimate."
+                "\n               {unestimated} declare none, so the real \
+                 total is larger"
             ));
         }
     }
     human.push_str(&format!(
-        "\nThe corpus is walked once however many detectors are asked, so \
-         adding one costs its own scoring pass and nothing else.\nRecords \
-         files: about {records_mb:.1} MB in total. Worst case, if every item \
-         hit the {timeout}s deadline for every detector: {}.\nEach result \
-         would be {configuration}: {why}",
+        "\nRecords        about {records_mb:.1} MB\nWorst case     {} (every \
+         item hitting the {timeout}s deadline)\nConfiguration  {configuration}: \
+         {why}",
         human_duration((items * timeout * entries.len() as u64) as f64)
     ));
 
@@ -969,9 +930,8 @@ fn plan_configuration(
     let Some(id) = corpus_id else {
         return (
             "custom",
-            "no --corpus-id was given, so there is no registered corpus to \
-             check this directory against. A custom result is comparable \
-             with itself rather than with anybody else's number"
+            "no --corpus-id, so nothing to check this directory against. \
+             Comparable with itself, not with anybody else's number"
                 .into(),
         );
     };
@@ -989,27 +949,20 @@ fn plan_configuration(
     {
         return (
             "custom",
-            format!(
-                "{id} is registered but declares no records digest, so there \
-                 is nothing to check this directory against"
-            ),
+            format!("{id} declares no records digest, so there is nothing to check against"),
         );
     }
     if limited {
         return (
             "custom",
-            "--limit scores part of the corpus, and a prefix of a tier is \
-             not the tier"
-                .into(),
+            "--limit scores part of the corpus, and a prefix of a tier is not the tier".into(),
         );
     }
     (
         "named",
         format!(
-            "{id} declares a records digest. If this directory matches it \
-             the result can be quoted beside anybody else's run over the \
-             same corpus, and if it does not `score` refuses before \
-             anything runs"
+            "{id} declares a records digest. `score` checks this directory \
+             against it and refuses if it disagrees"
         ),
     )
 }
@@ -1058,8 +1011,7 @@ fn resolve_detectors<'a>(
         if asked.len() > 1 {
             return Err(Output::err(
                 exit::USAGE,
-                "`--detector all` already means every registered detector, so \
-                 naming others beside it asks for two different things. Use \
+                "`--detector all` already means every registered detector. Use \
                  `all` on its own, or list the ones you want."
                     .to_string(),
             ));
@@ -1071,9 +1023,9 @@ fn resolve_detectors<'a>(
         if all.is_empty() {
             return Err(Output::err(
                 exit::USAGE,
-                "`--detector all` was asked for and no detectors are \
-                 registered, so there is nothing to score with. \
-                 `stegobench list detectors` says where it looked."
+                "no detectors are registered, so `--detector all` has nothing \
+                 to score with. `stegobench list detectors` says where it \
+                 looked."
                     .to_string(),
             ));
         }
@@ -1100,9 +1052,9 @@ fn resolve_detectors<'a>(
             return Err(Output::err(
                 exit::USAGE,
                 format!(
-                    "{name} is registered as an embedder, and an embedder \
-                     cannot be asked to tell two images apart. \
-                     `stegobench list detectors` shows what can."
+                    "{name} is an embedder: it hides payloads, it cannot tell \
+                     two images apart. `stegobench list detectors` shows what \
+                     can."
                 ),
             ));
         }
@@ -1187,19 +1139,13 @@ fn unlabelled_corpus(corpus: &Path) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{} holds {images} image(s) and not one record saying which of them \
-         hides anything, so there is nothing here to be right or wrong \
-         about.\n\n\
-         Stegobench measures DETECTORS, using images whose answers were fixed \
-         before any detector saw them. It does not examine images to find out \
-         what is in them. If your question is \"is something hidden in these \
-         pictures\", you want a detector pointed at your own files, and \
-         stegobench is how you find out whether to trust one.\n\n\
-         `stegobench help scope` sets out the difference and where to go \
-         instead.\n\
-         `stegobench list detectors` names every detector registered here.\n\
-         `stegobench help pairing` explains what a corpus has to carry before \
-         a number measured on it means anything.",
+        "{} holds {images} image(s) and no records saying which of them hides \
+         anything, so there is nothing to be right or wrong about.\n\n\
+         Stegobench measures DETECTORS against labelled images; it does not \
+         examine your own.\n\
+         `stegobench help scope`      the difference, and where to go instead\n\
+         `stegobench list detectors`  what is registered here\n\
+         `stegobench help pairing`    what a corpus has to carry first",
         corpus.display()
     ))
 }
@@ -1258,8 +1204,8 @@ fn cmd_score(
                 return Output::err(
                     exit::USAGE,
                     format!(
-                        "{} is a file, and scoring {} detectors writes one \
-                         {} each, so {flag} has to name a directory here.",
+                        "{} is a file. Scoring {} detectors writes one {} \
+                         each, so {flag} has to name a directory.",
                         path.expect("checked").display(),
                         entries.len(),
                         if flag == "--out" {
@@ -1575,16 +1521,18 @@ fn summarise(outcomes: &[(String, Outcome)], out_dir: &Option<PathBuf>, many: bo
                 tally,
                 written,
             } => lines.push(format!(
-                "{name:<16} AUC {:.4} over {} clean and {} stego image(s). \
-                 {} scored, {} resumed, {} could not be answered.{}",
+                "{name:<16} AUC {:.4}  {} clean / {} stego / {} unanswered{}{}",
                 result.metrics.auc,
                 result.metrics.n_clean,
                 result.metrics.n_stego,
-                tally.scored,
-                tally.resumed,
                 result.metrics.n_error,
+                if tally.resumed > 0 {
+                    format!("  {} resumed", tally.resumed)
+                } else {
+                    String::new()
+                },
                 match written {
-                    Some(p) => format!(" Written to {}.", p.display()),
+                    Some(p) => format!("  {}", p.display()),
                     None => String::new(),
                 }
             )),
@@ -1604,9 +1552,8 @@ fn summarise(outcomes: &[(String, Outcome)], out_dir: &Option<PathBuf>, many: bo
     ));
     if skipped > 0 || failed > 0 {
         lines.push(format!(
-            "{} detector(s) produced NO number at all ({skipped} skipped, \
-             {failed} failed) and are named above. A table built from these \
-             documents covers the {measured} that ran and nothing else.",
+            "{} produced NO number ({skipped} skipped, {failed} failed). A \
+             report over these documents covers only the {measured} that ran.",
             skipped + failed
         ));
     }
@@ -1648,18 +1595,17 @@ fn summarise(outcomes: &[(String, Outcome)], out_dir: &Option<PathBuf>, many: bo
                 stale.sort();
             }
             Err(e) => lines.push(format!(
-                "Could not list {} to check for documents left from earlier \
-                 runs: {e}. A report over it may cover more than this run did.",
+                "could not list {} to check for older documents: {e}. A report \
+                 over it may cover more than this run did.",
                 dir.display()
             )),
         }
         if !stale.is_empty() {
             lines.push(format!(
-                "WARNING: {} document(s) here were NOT measured by this run \
-                 and are left over from an earlier one: {}. `stegobench report \
-                 {}` will include them beside today's numbers, dated to when \
-                 they were made. Move them aside if this run is meant to be \
-                 the whole table.",
+                "WARNING: {} document(s) here are from an earlier run, not \
+                 this one: {}. `stegobench report {}` will include them \
+                 beside today's numbers. Move them aside if this run is meant \
+                 to be the whole table.",
                 stale.len(),
                 stale.join(", "),
                 dir.display()
@@ -1804,15 +1750,10 @@ fn cmd_report(paths: &[PathBuf], format: ReportFormat, out: Option<&Path>) -> Ou
 /// few lines. Everything else is one `--help` away and nothing was removed.
 fn cmd_orientation() -> Output {
     let human = "stegobench measures how good a steganography detector is, by \
-         running it over images whose answers are already known.\n\n\
-         It does NOT examine your own images to find out what is in them. That \
-         is the other direction, and `stegobench help scope` says where to go \
-         for it.\n\n\
-         Try this first:\n  \
-         stegobench list detectors    what this installation can run\n\n\
-         Then:\n  \
-         stegobench doctor            what is installed here, and what each \
-         tool still needs\n  \
+         running it over images whose answers are already known.\n\
+         It does NOT examine your own images (`stegobench help scope`).\n\n  \
+         stegobench list detectors    what this installation can run\n  \
+         stegobench doctor            what is installed, and what it needs\n  \
          stegobench help              the reasoning, one topic at a time\n  \
          stegobench --help            every command and flag"
         .to_string();
@@ -1842,18 +1783,12 @@ fn cmd_wrong_direction(word: &str) -> Output {
     Output::err(
         exit::USAGE,
         format!(
-            "there is no `stegobench {word}`, and the thing you are probably \
-             after is not what this tool does.\n\n\
-             Stegobench measures DETECTORS, using images whose answers are \
-             already known. It does not {word} your own images to find out \
-             what is in them. If your question is \"is something hidden in \
-             these pictures\", you want a detector pointed at your own files, \
-             and stegobench is how you find out whether to trust one.\n\n\
-             `stegobench help scope` sets out the difference and where to go \
-             instead.\n\
-             `stegobench list detectors` names every detector registered here.\n\
-             `stegobench score --corpus <labelled corpus> --detector <name>` is \
-             the command this tool is for."
+            "there is no `stegobench {word}`. Stegobench measures DETECTORS \
+             against labelled images; it does not {word} your own images.\n\n\
+             `stegobench help scope`      the difference, and where to go \
+             instead\n\
+             `stegobench list detectors`  what is registered here\n\
+             `stegobench score --corpus <labelled corpus> --detector <name>`"
         ),
     )
 }
@@ -2293,11 +2228,7 @@ mod tests {
         assert!(out.json["corpora"]
             .as_array()
             .is_some_and(|a| !a.is_empty()));
-        assert!(
-            out.human.contains("may be republished"),
-            "got: {}",
-            out.human
-        );
+        assert!(out.human.contains("republishable"), "got: {}", out.human);
     }
 
     /// The tools half had the fault the corpora half was written to avoid: it
@@ -2309,7 +2240,7 @@ mod tests {
         let out = cmd_list(&resolved_at(dir.path()), "detectors");
         assert_eq!(out.code, exit::OK);
         assert!(
-            out.human.contains("nothing has been declared")
+            out.human.contains("no tools registered")
                 && out.human.contains(&dir.path().display().to_string()),
             "got: {}",
             out.human
@@ -2339,13 +2270,12 @@ mod tests {
         assert_eq!(out.code, exit::OK);
         assert!(out.json["tools"].as_array().is_some_and(|a| a.is_empty()));
         assert!(
-            out.human.contains("1 tool(s) are registered")
-                && out.human.contains("none of them is a embedder"),
+            out.human.contains("none of the 1 tool(s)") && out.human.contains("is a embedder"),
             "got: {}",
             out.human
         );
         assert!(
-            !out.human.contains("nothing has been declared"),
+            !out.human.contains("no tools registered"),
             "a registry with a tool in it was reported as empty: {}",
             out.human
         );
@@ -2360,7 +2290,7 @@ mod tests {
         assert_eq!(out.code, exit::OK);
         assert_eq!(out.json["count"], 0);
         assert!(
-            out.human.contains("nothing has been declared"),
+            out.human.contains("no corpora registered"),
             "an empty registry printed: {:?}",
             out.human
         );
@@ -2607,7 +2537,7 @@ mod tests {
         let resolved = resolved_at(shipped_registry());
         let listed = cmd_list(&resolved, "detectors");
         assert!(
-            listed.human.contains("registry: "),
+            listed.human.contains("registry  "),
             "list does not name the registry: {}",
             listed.human
         );
@@ -2619,7 +2549,7 @@ mod tests {
 
         let doctor = cmd_doctor(&resolved, Path::new("fixtures"), true);
         assert!(
-            doctor.human.starts_with("registry: "),
+            doctor.human.starts_with("registry  "),
             "doctor does not open by naming the registry: {}",
             doctor.human.lines().next().unwrap_or_default()
         );
@@ -3052,7 +2982,7 @@ mod tests {
             None,
         );
         assert!(
-            out.human.contains("NOT measured by this run"),
+            out.human.contains("are from an earlier run"),
             "a stale document went unmentioned: {}",
             out.human
         );
@@ -3343,9 +3273,7 @@ mod tests {
             .expect("the shipped registry has embedders");
         let err = resolve_detectors(&reg, std::slice::from_ref(&embedder)).expect_err("refused");
         assert_eq!(err.code, exit::USAGE);
-        assert!(err
-            .human
-            .contains("cannot be asked to tell two images apart"));
+        assert!(err.human.contains("it cannot tell two images apart"));
     }
 
     #[test]
@@ -3380,10 +3308,8 @@ mod tests {
         assert_eq!(described.code, exit::OK);
         assert!(described.json["needs"]["readiness"].is_string());
         assert!(
-            described.human.contains("What this tool needs from you")
-                || described
-                    .human
-                    .contains("Everything this tool needs is here"),
+            described.human.contains("Needs from you")
+                || described.human.contains("Nothing needed"),
             "{}",
             described.human
         );
@@ -3393,11 +3319,7 @@ mod tests {
         let corpus = cmd_describe(&resolved_at(&dir), "reveal");
         assert_eq!(corpus.code, exit::OK);
         assert!(corpus.json["needs"]["steps"].is_array());
-        assert!(
-            corpus.human.contains("What this corpus needs from you"),
-            "{}",
-            corpus.human
-        );
+        assert!(corpus.human.contains("Needs from you"), "{}", corpus.human);
     }
 
     /// The legend under `list` called every image entry a sandbox with no
@@ -3408,7 +3330,7 @@ mod tests {
         let out = cmd_list(&resolved_at(shipped_registry()), "detectors");
         assert_eq!(out.code, exit::OK);
         assert!(
-            out.human.contains("in fact a SERVICE"),
+            out.human.contains("SERVICE, not sandboxed"),
             "the legend still presents every container entry as sandboxed: {}",
             out.human
         );

@@ -64,30 +64,25 @@ pub enum ReportFormat {
     // author finds it under `--help` and a newcomer is not made to read it
     // first. Nothing was deleted: both halves are still one command away.
     about = "Measure how good a steganography detector is, using images whose answers are already known",
-    long_about = "Stegobench measures DETECTORS. You give it a folder of images \
-                  that are already labelled (this one is clean, this one hides \
-                  a payload), it runs a detector over every one of them, and it \
-                  reports how often the detector was right, in a document that \
-                  names the exact bytes the number was measured on.\n\n\
-                  IT DOES NOT EXAMINE YOUR OWN IMAGES. If your question is \
-                  \"is something hidden in these pictures\", that is the \
-                  opposite direction: unknown images, and a detector you \
-                  already trust. Stegobench is how you find out whether to \
-                  trust it. Run `stegobench help scope` for the difference in \
-                  full, and for where to go instead.\n\n\
+    long_about = "Stegobench measures DETECTORS. Give it a folder of images that \
+                  are already labelled (this one is clean, this one hides a \
+                  payload), and it reports how often a detector was right, in a \
+                  document naming the exact bytes the number came from.\n\n\
+                  IT DOES NOT EXAMINE YOUR OWN IMAGES. That is the opposite \
+                  direction: `stegobench help scope` says where to go \
+                  instead.\n\n\
                   START HERE\n  \
                   stegobench list detectors   what this installation can run\n  \
-                  stegobench doctor           what is installed here, and what \
-                  each tool still needs\n  \
+                  stegobench doctor           what is installed, and what it \
+                  needs\n  \
                   stegobench help             the reasoning, one topic at a time",
     after_help = "Start with `stegobench list detectors`, then `stegobench doctor`.\n\
                   This measures detectors; it does not examine your own images \
                   (`stegobench help scope`).\n\
                   Exit codes and the stdout/stderr contract are under `--help`.",
     after_long_help = "OUTPUT STREAMS\n  \
-                  Machine-readable output goes to stdout with --json. Progress \
-                  and diagnostics go to stderr, so `stegobench ... --json | jq` \
-                  works while a person can still watch a run that takes hours.\n\n\
+                  --json writes machine-readable output to stdout. Progress and \
+                  diagnostics go to stderr.\n\n\
                   EXIT CODES\n  \
                   0    success\n  \
                   1    generic failure\n  \
@@ -99,16 +94,12 @@ pub enum ReportFormat {
                   7    licence refusal\n  \
                   8    environment unfit\n  \
                   130  interrupted\n  \
-                  Codes 3 and 7 are the tool refusing something it is capable \
-                  of, which is distinct from an ordinary error, so a script or \
-                  an agent can tell not to retry.\n\n\
+                  Codes 3 and 7 are refusals, not errors: do not retry them.\n\n\
                   WHERE THE REGISTRY COMES FROM\n  \
-                  In order: --registry or STEGOBENCH_REGISTRY, then \
-                  ./plugins/registry, then beside this executable, then your \
-                  user data directory, then the system data directory, and \
-                  finally the copy compiled into this binary. A path you name \
-                  yourself is used as given and is never quietly swapped for \
-                  another one. `stegobench doctor` prints which one answered."
+                  In order: --registry or STEGOBENCH_REGISTRY, ./plugins/registry, \
+                  beside this executable, your user data directory, the system \
+                  data directory, then the copy compiled in. A path you name is \
+                  used as given. `stegobench doctor` prints which one answered."
 )]
 pub struct Cli {
     /// Machine-readable output on stdout. Accepted by every subcommand.
@@ -117,11 +108,9 @@ pub struct Cli {
 
     /// Where the tool registry lives.
     ///
-    /// Left out, stegobench looks in ./plugins/registry, then beside this
-    /// executable, then your user and system data directories, and falls back
-    /// to the copy compiled into the binary. Named here, the path is used as
-    /// given: a path that is not there is an error, never a quiet fall back to
-    /// a different registry.
+    /// Left out, stegobench searches: see WHERE THE REGISTRY COMES FROM under
+    /// `--help`. Named here, the path is used as given, and a path that is not
+    /// there is an error rather than a fall back.
     #[arg(long, global = true, value_name = "DIR", env = "STEGOBENCH_REGISTRY")]
     pub registry: Option<std::path::PathBuf>,
 
@@ -136,9 +125,6 @@ pub struct Cli {
 pub enum Command {
     /// Print a published schema, generated from the types the tool writes
     ///
-    /// The schema is not maintained by hand beside the code; it is derived
-    /// from it, so a document that validates is one this version can read.
-    ///
     /// Example:
     ///   stegobench schema result-v1 > result-v1.schema.json
     Schema {
@@ -151,8 +137,7 @@ pub enum Command {
     /// Check a document against its schema and the rules the schema cannot hold
     ///
     /// Exits 6 when the document is invalid, naming every problem rather than
-    /// only the first, because fixing them one round trip at a time is how a
-    /// format gets a reputation for being fussy.
+    /// only the first.
     ///
     /// Example:
     ///   stegobench validate results/rich-model-suniward-0400.json
@@ -164,8 +149,7 @@ pub enum Command {
 
     /// List what this installation can do
     ///
-    /// Generated from the registry, so what it prints is what the tool will
-    /// actually run. A README goes stale; this cannot.
+    /// Generated from the registry, so it is what the tool will actually run.
     ///
     /// Example:
     ///   stegobench list detectors --json | jq '.[].name'
@@ -177,8 +161,7 @@ pub enum Command {
 
     /// Show everything registered about one tool or corpus
     ///
-    /// Takes a tool name or a corpus id: one vocabulary, whichever kind of
-    /// thing it names.
+    /// Takes a tool name or a corpus id.
     ///
     /// Example:
     ///   stegobench describe steghide
@@ -201,11 +184,8 @@ pub enum Command {
 
     /// Check that this machine can run what it claims to
     ///
-    /// Reports what is installed and what is missing. It does NOT yet run each
-    /// tool against a known positive and a known negative, and says so per
-    /// line rather than letting "present" read as "working": a rich-model
-    /// extraction once ran over 2,000 images, exited zero every time and
-    /// produced nothing, because a support package was missing.
+    /// Reports what is installed, what is missing, and which tools passed
+    /// their self-test. "Present" is never reported as "working".
     ///
     /// Exits 8 when something needed is missing.
     ///
@@ -215,9 +195,8 @@ pub enum Command {
         /// Where the self-test fixtures live.
         #[arg(long, value_name = "DIR", default_value = "fixtures")]
         fixtures: std::path::PathBuf,
-        /// Skip the self-tests and only report what is installed. Faster, and
-        /// honest about being weaker: it cannot tell a working tool from a
-        /// broken one.
+        /// Report what is installed without running the self-tests. Faster,
+        /// and cannot tell a working tool from a broken one.
         #[arg(long)]
         no_selftest: bool,
     },
@@ -226,27 +205,15 @@ pub enum Command {
     ///
     /// Reads every sample under --corpus, asks each detector about each one,
     /// and writes one result-v1 document per detector naming the exact bytes
-    /// it measured. `stegobench report` turns those documents into a table.
+    /// it measured. `stegobench report` turns those into a table.
     ///
-    /// The corpus is established once however many detectors are asked. The
-    /// digest, the image check, the pairing check and the split check are
-    /// properties of the bytes, so they are paid for once and shared.
+    /// Resumable per detector: running the same command again picks up where
+    /// it stopped. A detector that is missing or fails is reported and does
+    /// not lose the others' work.
     ///
-    /// The run is resumable, per detector. Every answer is written to that
-    /// detector's records file as it is produced, and running the same command
-    /// again picks up where it stopped rather than starting over.
-    ///
-    /// A detector that is not installed is reported and skipped rather than
-    /// ending the command, and a detector that fails does not lose the others'
-    /// work. The exit code says whether every detector asked for was actually
-    /// measured: see EXIT CODES below.
-    ///
-    /// EXIT CODES particular to this command. 0 means every detector asked
-    /// for produced a result. 3 means at least one was skipped because it is
-    /// not available here and none failed at run time. 4 means at least one
-    /// failed while running. Codes 3 and 4 are returned even when other
-    /// detectors succeeded and their documents were written, so a zero never
-    /// means "some of them".
+    /// EXIT CODES here: 0 every detector produced a result; 3 at least one was
+    /// skipped as unavailable; 4 at least one failed while running. 3 and 4
+    /// are returned even when others succeeded, so 0 never means "some".
     ///
     /// Example:
     ///   stegobench score --corpus ./pentimento-nano --detector zsteg
@@ -267,10 +234,8 @@ pub enum Command {
         /// Which registered corpus the directory holds. See
         /// `stegobench list corpora`.
         ///
-        /// The run is marked `named` only if that entry declares the digest of
-        /// its records and the directory matches it, so this is a claim the
-        /// harness checks rather than one it takes. Without it, and without a
-        /// declared digest to check against, the run is `custom`.
+        /// The run is marked `named` only if that entry declares a records
+        /// digest and this directory matches it. Otherwise it is `custom`.
         #[arg(long, value_name = "ID")]
         corpus_id: Option<String>,
         /// Where the per-item answers are kept, and where a resumed run reads
@@ -278,8 +243,7 @@ pub enum Command {
         ///
         /// Defaults to <corpus>.<detector>.records.jsonl beside the corpus.
         /// The detector's name is in it deliberately: two detectors sharing
-        /// one records file would resume from each other's answers and each
-        /// report the other's numbers as its own.
+        /// one records file resume from each other's answers.
         ///
         /// With more than one detector this is a DIRECTORY, and each
         /// detector's records go in <dir>/<detector>.records.jsonl.
@@ -289,10 +253,7 @@ pub enum Command {
         ///
         /// With more than one detector this is a DIRECTORY, created if it is
         /// not there, and each document is written to <dir>/<detector>.json.
-        /// Several documents cannot share one file or one stdout, so with no
-        /// --out they go to <corpus>.results/ beside the corpus and the
-        /// command says where. Run `stegobench report <dir>` for one table
-        /// over all of them.
+        /// With no --out they go to <corpus>.results/ beside the corpus.
         #[arg(long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
         /// Seconds any single image is given before the detector is killed and
@@ -301,9 +262,8 @@ pub enum Command {
         timeout: u64,
         /// Score at most this many items, for a smoke test.
         ///
-        /// A run that uses this is marked `custom` in the result and cannot be
-        /// quoted as a tier number, because a prefix of a corpus is not the
-        /// corpus.
+        /// Marks the result `custom`: a prefix of a corpus is not the corpus,
+        /// so the figure cannot be quoted as a tier number.
         #[arg(long, value_name = "N")]
         limit: Option<u64>,
     },
@@ -311,11 +271,10 @@ pub enum Command {
     /// Re-check a result against the corpus it says it measured
     ///
     /// A result names the bytes it was measured on by digest. This recomputes
-    /// that digest from a corpus on disk and says whether the two agree, so a
-    /// number somebody sent you can be checked rather than believed.
+    /// that digest from a corpus on disk and says whether the two agree.
     ///
-    /// Exits 5 when the digests disagree, which means the document and the
-    /// corpus are not about each other, whatever either one is called.
+    /// Exits 5 when they disagree: the document and the corpus are not about
+    /// each other, whatever either one is called.
     ///
     /// Example:
     ///   stegobench verify result.json --corpus ./pentimento-nano
@@ -330,18 +289,15 @@ pub enum Command {
 
     /// Turn result documents into a table a person can put in a report
     ///
-    /// Takes result files, directories of them, or both. Every row carries
-    /// the conditions the number was measured under (the corpus and its
-    /// digest, the configuration, the pairing and the split) in the row
-    /// itself, so a figure cannot be lifted out without them.
+    /// Takes result files, directories of them, or both. Every row carries the
+    /// conditions the number was measured under, so a figure cannot be lifted
+    /// out without them.
     ///
-    /// Results over different corpora are never put in one table, and a
-    /// `custom` run never shares a table with a `named` one. Rows are ordered
-    /// by arm and then detector, never by score: this is not a ranking.
+    /// Results over different corpora never share a table, nor do `custom` and
+    /// `named` runs. Rows are ordered by arm then detector, never by score.
     ///
-    /// A file that is not a valid result-v1 document is named with its reason
-    /// at the top of the report and the command exits non-zero, so an
-    /// incomplete table cannot be mistaken for a whole one.
+    /// An invalid document is named with its reason at the top and the command
+    /// exits non-zero, so a short table cannot pass as a whole one.
     ///
     /// Example:
     ///   stegobench report results/v1 --format markdown --out results.md
@@ -351,10 +307,8 @@ pub enum Command {
         paths: Vec<std::path::PathBuf>,
         /// text, markdown or csv.
         ///
-        /// The default does not change when stdout is redirected. A command
-        /// whose output depends on whether a terminal is attached produces
-        /// one thing on a laptop and another in CI, and two runs on the same
-        /// input have to produce the same bytes.
+        /// The default does not change when stdout is redirected: two runs on
+        /// the same input produce the same bytes.
         #[arg(long, value_name = "FORMAT", default_value = "text")]
         format: ReportFormat,
         /// Where to write it. Defaults to stdout, and a file is written by

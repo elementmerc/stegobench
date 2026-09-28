@@ -166,8 +166,7 @@ pub fn of_tool(entry: &Entry, availability: &Availability) -> Needs {
         return Needs {
             readiness: Readiness::CannotRunHere,
             steps: vec![Step::just(format!(
-                "{reason}. Nothing to install will change this; run it on a \
-                 machine it supports."
+                "{reason}. Nothing to install will change it."
             ))],
         };
     }
@@ -188,10 +187,7 @@ pub fn of_tool(entry: &Entry, availability: &Availability) -> Needs {
     for name in &availability.missing_secrets {
         steps.push(Step::run(
             format!("export {name}=<your value>"),
-            format!(
-                "{name} is not set. The registry records the NAME only and \
-                 never a value, so this one is yours to supply"
-            ),
+            format!("{name} is not set. The registry never records a value"),
         ));
     }
 
@@ -213,25 +209,23 @@ fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
     if runs_in_container(entry) {
         let Some(image) = &entry.image else {
             return vec![Step::just(
-                "this entry declares neither an image nor a binary, so there \
-                 is nothing to run. That is a fault in the registry entry, \
-                 not something to install.",
+                "this entry declares neither an image nor a binary. That is a \
+                 fault in the registry entry, not something to install.",
             )];
         };
         if matches!(presence, Presence::Unknown { .. }) {
             steps.push(Step::just(
-                "No container runtime answered, so whether the image is here \
-                 could not be checked. Install Docker (or a drop-in \
-                 replacement) and make sure the daemon is running.",
+                "No container runtime answered. Install Docker (or a drop-in \
+                 replacement) and start the daemon.",
             ));
         }
         let size = match image.size_mb {
-            Some(mb) => format!(", about {mb} MB"),
+            Some(mb) => format!("about {mb} MB, "),
             None => String::new(),
         };
         steps.push(Step::run(
             format!("docker pull {}", image.reference),
-            format!("fetches the exact bytes this entry pins by digest{size}"),
+            format!("{size}pinned by digest"),
         ));
         return steps;
     }
@@ -243,9 +237,9 @@ fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
             if let Some(adapter) = &invoke.adapter {
                 if !std::path::Path::new(adapter).exists() {
                     steps.push(Step::just(format!(
-                        "{adapter} could not be found. It is a relative path \
-                         resolved against the directory you run from, so run \
-                         stegobench from the root of the clone."
+                        "{adapter} could not be found. The path is relative \
+                         to where you run from, so run stegobench from the \
+                         root of the clone."
                     )));
                 }
             }
@@ -255,8 +249,8 @@ fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
                 .unwrap_or_else(|| stegobench_plugin::DEFAULT_HOST_ENTRYPOINT.into());
             if stegobench_plugin::which(&program).is_none() {
                 steps.push(Step::just(format!(
-                    "{program} is not on PATH, and it is what runs the \
-                     adapter. Install it and try again."
+                    "{program} is not on PATH, and it runs the adapter. \
+                     Install it."
                 )));
             }
             if let Some(name) = &invoke.endpoint_env {
@@ -266,12 +260,10 @@ fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
                     steps.push(Step::run(
                         format!("export {name}=<the address of your own instance>"),
                         format!(
-                            "{} runs as a service, so scoring an image means \
-                             posting it to an instance you started. There is \
-                             no default address on purpose: one would be \
-                             scored against whatever answered on it. \
-                             `stegobench describe {}` prints the entry, whose \
-                             comments give the shape",
+                            "{} is a service, scored by posting to an instance \
+                             you started. No default: one would be scored \
+                             against whatever answered. `stegobench describe \
+                             {}` has the shape",
                             entry.name, entry.name
                         ),
                     ));
@@ -294,14 +286,13 @@ fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
                 None => String::new(),
             };
             steps.push(Step::just(format!(
-                "{program} is not on PATH. Install it, then make sure `which \
-                 {program}` finds it.{where_from}"
+                "{program} is not on PATH. Install it until `which {program}` \
+                 finds it.{where_from}"
             )));
         }
         None => steps.push(Step::just(
-            "this entry declares neither an image nor a runnable command, so \
-             there is nothing to run. That is a fault in the registry entry, \
-             not something to install.",
+            "this entry declares neither an image nor a runnable command. \
+             That is a fault in the registry entry, not something to install.",
         )),
     }
     steps
@@ -318,9 +309,8 @@ pub fn of_corpus(corpus: &CorpusEntry) -> Needs {
 
     if corpus.obtain.requires_acceptance {
         steps.push(Step::just(format!(
-            "Accept {}'s terms yourself before downloading it. This one is \
-             conditional on an agreement a person makes, so no script here \
-             will do it for you.",
+            "Accept {}'s terms yourself first. No script here can do it for \
+             you.",
             corpus.id
         )));
     }
@@ -328,28 +318,24 @@ pub fn of_corpus(corpus: &CorpusEntry) -> Needs {
         steps.push(Step::just(format!("How to obtain it: {instructions}")));
     }
     match (&corpus.obtain.doi, &corpus.obtain.url) {
-        (Some(doi), _) => steps.push(Step::just(format!(
-            "Download it, citing {doi}. A DOI is the identifier meant to \
-             outlive whoever is hosting it today."
-        ))),
+        (Some(doi), _) => steps.push(Step::just(format!("Download it, citing {doi}"))),
         (None, Some(url)) => steps.push(Step::just(format!("Download it from {url}"))),
         (None, None) => steps.push(Step::just(
-            "This entry records no download route, so obtaining it is \
-             something you already have to have arranged.",
+            "This entry records no download route; obtaining it is yours to \
+             arrange.",
         )),
     }
 
     match corpus.licence.status {
         LicenceStatus::Verified => {}
         LicenceStatus::Unverified => steps.push(Step::just(format!(
-            "Read {}'s own terms before you publish anything derived from it. \
-             Nobody has established them here, and an unknown is not a yes.",
+            "{}'s terms are UNVERIFIED here. Read them before publishing \
+             anything derived from it; an unknown is not a yes.",
             corpus.id
         ))),
         LicenceStatus::NoneGranted => steps.push(Step::just(format!(
-            "{} grants no terms. You may be able to measure against it \
-             privately; publishing images derived from it is a separate \
-             question and the answer here is no.",
+            "{} grants NO terms. Measuring against it privately may be \
+             possible; publishing anything derived from it is not.",
             corpus.id
         ))),
     }
@@ -365,15 +351,13 @@ pub fn of_corpus(corpus: &CorpusEntry) -> Needs {
                  --detector <name>",
                 corpus.id
             ),
-            "checks your copy against the digest this entry declares before \
-             it scores anything, so a result can be quoted beside anybody \
-             else's run over the same corpus",
+            "checks your copy against the declared digest first, so the \
+             result can be quoted beside anybody else's over the same corpus",
         ));
     } else {
         steps.push(Step::just(format!(
-            "{} declares no records digest, so a run over your copy is marked \
-             `custom`: comparable with itself rather than with somebody \
-             else's number.",
+            "{} declares no records digest, so a run over your copy is \
+             `custom`: comparable with itself alone.",
             corpus.id
         )));
     }
