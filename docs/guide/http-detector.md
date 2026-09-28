@@ -269,8 +269,11 @@ them in order; the short version for your own run is:
   the figure as a tier number.
 - `declarations.trained_on` must not name the corpus you scored on. A detector
   measured on what it trained on is not being measured.
-- `provenance.plugins[].route` will say `container`, and the digest beside it
-  is what lets somebody else run the identical bytes.
+- `provenance.plugins[].isolation` will say `remote-service`, and
+  `pinned_by` will say `unpinned`. Your adapter ran here with your network, and
+  nothing in the run checked that the instance it talked to was built from the
+  image the entry names. The image reference is still recorded; it just isn't
+  something this document can vouch for.
 - Report AUC and detection at a fixed false-alarm rate. Never report bare
   accuracy: on a corpus that is half clean, answering "clean" every time scores
   50%. See [Scores, not verdicts](/guide/scores).

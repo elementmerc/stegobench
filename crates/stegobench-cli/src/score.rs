@@ -48,9 +48,9 @@ use stegobench_core::corpus::CorpusEntry;
 use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
-    Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Host, Metrics,
-    Pairing, PluginRef, Provenance, Rate, RateUnit, Result1, Route, SplitDiscipline, Subject,
-    SubjectKind, RESULT_SCHEMA_ID,
+    Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Host,
+    Isolation, Metrics, Pairing, PinnedBy, PluginRef, Provenance, Rate, RateUnit, Result1,
+    SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Sample, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
@@ -598,11 +598,13 @@ where
         }
     }
 
+    let (version, pinned_by) = pinning(entry);
+
     let result = Result1 {
         schema: RESULT_SCHEMA_ID.to_string(),
         subject: Subject {
             name: entry.name.clone(),
-            version: subject_version(entry),
+            version: version.clone(),
             kind: SubjectKind::Detector,
         },
         corpus: CorpusRef {
@@ -637,32 +639,16 @@ where
             seed: None,
             plugins: vec![PluginRef {
                 name: entry.name.clone(),
-                image: subject_version(entry),
+                image: version,
                 determinism: Determinism::Nondeterministic,
-                // KNOWN TO BE WRONG FOR ONE SHAPE OF ENTRY, AND LEFT WRONG
-                // DELIBERATELY RATHER THAN SWAPPED FOR A DIFFERENT WRONG.
-                //
-                // An entry can declare an image AND `invoke.host`, meaning the
-                // image names the subject while a host adapter is what
-                // actually runs: StegaShield is a service, and scoring an
-                // image means posting it to an instance. Neither value here
-                // tells the truth about that. `container` says it ran in a
-                // sandbox with no network, which is false. `local` would say
-                // the digest beside it is the hash of the executable that ran,
-                // which is also false: it is the image digest that names the
-                // subject, and the adapter's own hash is a different number.
-                //
-                // Changing `result-v1` to carry a third value is a schema
-                // decision with the operator, so this keeps the value it has
-                // always written and `network_reachable` below now tells the
-                // truth on its own. A reader of a StegaShield result sees a
-                // container route beside a reachable network, which is exactly
-                // the combination that says the sandbox claim does not hold.
-                route: if entry.image.is_some() {
-                    Route::Container
-                } else {
-                    Route::Local
-                },
+                // Two fields because an entry can declare an image AND
+                // `invoke.host`: the image digest names the subject while what
+                // executes is an adapter here that posts to a running
+                // instance. The pin and the sandbox disagree for that shape,
+                // and a single value could only ever be right about one of
+                // them.
+                pinned_by,
+                isolation: isolation(entry),
             }],
             harness_version: env!("CARGO_PKG_VERSION").to_string(),
             started_utc: prepared.started_utc.clone(),
@@ -1392,17 +1378,55 @@ fn host() -> Host {
 }
 
 /// How the subject identifies itself: an image digest, or the binary's hash.
-fn subject_version(entry: &Entry) -> String {
+fn pinning(entry: &Entry) -> (String, PinnedBy) {
     if let Some(image) = &entry.image {
-        return image.reference.clone();
+        // AN IMAGE IS ONLY A PIN WHERE THIS HARNESS ACTUALLY RAN IT. A
+        // container is started by digest, so the runtime enforces it. An entry
+        // that names an image and sets `invoke.host` ran an adapter here
+        // instead, against an instance somebody else started, and nothing in
+        // this run checked that the instance was built from those bytes.
+        // Calling that `image-digest` would tell a reader they are holding a
+        // comparable-by-construction number when they are holding a claim.
+        let pinned = if runs_in_container(entry) {
+            PinnedBy::ImageDigest
+        } else {
+            PinnedBy::Unpinned
+        };
+        return (image.reference.clone(), pinned);
     }
-    entry
+    match entry
         .binary
         .as_ref()
         .and_then(|b| b.command.first())
         .and_then(|program| stegobench_plugin::which(program))
         .and_then(|path| stegobench_plugin::hash_file(&path).ok())
-        .unwrap_or_else(|| "unknown".into())
+    {
+        Some(hash) => (hash, PinnedBy::ExecutableHash),
+        // The program ran and its bytes could not be hashed afterwards. Said
+        // as "unpinned" rather than written as a hash-shaped "unknown" that a
+        // reader could mistake for one.
+        None => ("unknown".into(), PinnedBy::Unpinned),
+    }
+}
+
+/// What the tool could reach, which is a different question from what pins it.
+///
+/// A container is started with `--network=none` and sees nothing. A service
+/// entry is reached over HTTP, so the network is not merely available, it is
+/// the only channel the tool is asked anything through. Anything else is a
+/// program on this machine holding this machine's network.
+fn isolation(entry: &Entry) -> Isolation {
+    if runs_in_container(entry) {
+        return Isolation::SandboxNoNetwork;
+    }
+    if entry
+        .invoke
+        .as_ref()
+        .is_some_and(|i| i.host && i.endpoint_env.is_some())
+    {
+        return Isolation::RemoteService;
+    }
+    Isolation::Host
 }
 
 /// The corpus directory's own name, which is the only name it has.
@@ -2397,6 +2421,89 @@ mod tests {
              image, so a result claiming a sandbox and no network is false \
              about both halves"
         );
+    }
+
+    /// The two fields that replaced `route`, over the three shapes the
+    /// registry actually holds plus the one that used to break the single
+    /// field. Each is asserted on its own, because each is read on its own.
+    #[test]
+    fn the_pin_and_the_sandbox_are_answered_separately_for_every_entry_shape() {
+        let digest = "5".repeat(64);
+        let image_block = format!("[image]\nreference = \"ghcr.io/x/y@sha256:{digest}\"\n");
+        let tail = "[selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n";
+        let adapter = "[invoke]\nhost = true\nadapter = \"a.py\"\n\
+             entrypoint = \"python3\"\nargv = [\"{adapter}\", \"{file}\"]\n\
+             parser = \"number\"\n";
+
+        let parse = |body: String| -> Entry { toml::from_str(&body).expect("parses") };
+        let head = |n: &str| format!("name = \"{n}\"\nkind = \"detector\"\nlicence = \"MIT\"\n");
+
+        let container = parse(format!("{}{image_block}{tail}", head("c")));
+        assert_eq!(pinning(&container).1, PinnedBy::ImageDigest);
+        assert_eq!(isolation(&container), Isolation::SandboxNoNetwork);
+
+        // A program that is not installed cannot be hashed, and the fallback
+        // must be the admission rather than a hash-shaped "unknown".
+        let local = parse(format!(
+            "{}[binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n{tail}",
+            head("l")
+        ));
+        assert_eq!(pinning(&local).1, PinnedBy::Unpinned);
+        assert_eq!(isolation(&local), Isolation::Host);
+
+        // The shape that broke the single field: the image names the subject,
+        // an adapter here did the running, and the tool was reached over HTTP.
+        let service = parse(format!(
+            "{}{image_block}{adapter}endpoint_env = \"X_ENDPOINT\"\n{tail}",
+            head("s")
+        ));
+        assert_eq!(
+            pinning(&service).1,
+            PinnedBy::Unpinned,
+            "nothing in the run checked that the instance came from that image"
+        );
+        assert_eq!(pinning(&service).0, format!("ghcr.io/x/y@sha256:{digest}"));
+        assert_eq!(isolation(&service), Isolation::RemoteService);
+
+        // An adapter with no endpoint reaches no service, so it is an ordinary
+        // host run, and the image it names still did not execute.
+        let adapter_only = parse(format!("{}{image_block}{adapter}{tail}", head("a")));
+        assert_eq!(pinning(&adapter_only).1, PinnedBy::Unpinned);
+        assert_eq!(isolation(&adapter_only), Isolation::Host);
+    }
+
+    /// A document must never state a sandbox beside a reachable network, which
+    /// is the contradiction the old single field forced onto every service
+    /// result. Asserted against `validate` so it cannot come back quietly.
+    #[test]
+    fn the_two_fields_and_the_network_flag_never_contradict_each_other() {
+        for entry in [
+            "name = \"c\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"ghcr.io/x/y@sha256:abc\"\n",
+            "name = \"s\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"ghcr.io/x/y@sha256:abc\"\n\
+             [invoke]\nhost = true\nadapter = \"a.py\"\nentrypoint = \"python3\"\n\
+             argv = [\"{adapter}\", \"{file}\"]\nparser = \"number\"\n\
+             endpoint_env = \"X_ENDPOINT\"\n",
+            "name = \"l\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"sh\"]\n",
+        ] {
+            let e: Entry = toml::from_str(&format!(
+                "{entry}[selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n"
+            ))
+            .expect("parses");
+            let sandboxed = isolation(&e) == Isolation::SandboxNoNetwork;
+            // `network_reachable` is written as this expression, so the two
+            // fields are asserted to be opposites rather than merely to look
+            // plausible side by side.
+            let network_reachable = !runs_in_container(&e);
+            assert_ne!(
+                sandboxed, network_reachable,
+                "{}: a sandbox with no network beside a reachable network is \
+                 the contradiction this change exists to remove",
+                e.name
+            );
+        }
     }
 
     /// Proved end to end rather than through the helper alone, because the

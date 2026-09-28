@@ -192,11 +192,11 @@ Corpus digest: `sha256:d93e9720af0c3ab7a21dd9e81f2d4b4cbc2f6025fa3d8ef00110d76ae
 
 [... one paragraph saying what `custom` rules out ...]
 
-| detector | route | corpus | config | arm | domain | AUC | TPR@1%FA | TPR@10%FA | pairing | split | clean/stego/unscored | conditions |
+| detector | isolation | corpus | config | arm | domain | AUC | TPR@1%FA | TPR@10%FA | pairing | split | clean/stego/unscored | conditions |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| aletheia-rs | container | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5087 | 0.0090 | 0.0950 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
-| aletheia-spa | container | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5018 | 0.0110 | 0.1010 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
-| stegexpose | container | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5097 | 0.0090 | 0.0990 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+| aletheia-rs | sandbox-no-network | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5087 | 0.0090 | 0.0950 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+| aletheia-spa | sandbox-no-network | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5018 | 0.0110 | 0.1010 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+| stegexpose | sandbox-no-network | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5097 | 0.0090 | 0.0990 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
 ```
 
 Rows are ordered by arm and then by detector, never by score. It isn't a

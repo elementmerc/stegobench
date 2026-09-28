@@ -39,8 +39,9 @@
       {
         "determinism": "exact",
         "image": "stegobench/stegexpose@sha256:70c545a890a0e0b1695998525b6d4fa270ece2619108e9a80286f237593980b5",
+        "isolation": "sandbox-no-network",
         "name": "stegexpose",
-        "route": "container"
+        "pinned_by": "image-digest"
       }
     ],
     "started_utc": "2026-09-18T20:13:57Z"

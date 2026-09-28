@@ -68,12 +68,32 @@ scored on what it trained on is not being measured.
 
 ## 5. Would you get the same number?
 
-`provenance.plugins[].route` decides how far this travels:
+Two fields answer two different questions, and they don't always agree.
 
-| Route | What it means for reproducing it |
+`provenance.plugins[].pinned_by` says what the digest beside it is, and so how
+far the number travels:
+
+| Value | What it means for reproducing it |
 |---|---|
-| `container` | The digest beside it names bytes you can pull. Run the same command and you're running identical code |
-| `local` | The digest names a file on their machine. If you both built from source you'll have different hashes for the same version, and neither of you is wrong |
+| `image-digest` | The digest names container bytes you can pull. Run the same command and you're running identical code |
+| `executable-hash` | The digest names a file on their machine. If you both built from source you'll have different hashes for the same version, and neither of you is wrong |
+| `unpinned` | Nothing in the document ties the number to particular bytes. You'd be running whatever answers to that name today, which may not be what they ran |
+
+`provenance.plugins[].isolation` says what that code could reach while it ran:
+
+| Value | What it could reach |
+|---|---|
+| `sandbox-no-network` | A container started with no network. It saw the images it was handed and nothing else |
+| `host` | A program on their machine, with their network and their privileges. Nothing constrained it |
+| `remote-service` | The images went over the network to an instance they started. Nothing here constrained the tool, and the document can't vouch that the instance was the version named |
+| `unstated` | Nobody recorded it. Treat it as unknown rather than as a sandbox |
+
+The two don't move together. A detector shipped as a service has an image
+digest in `image`, and the thing that actually ran was a script on the
+operator's machine with the full network posting to an instance they started.
+Nothing checked that the instance came from that image, so that result reads
+`unpinned` and `remote-service`. One field couldn't say both without being
+wrong about one of them, which is why there are two.
 
 `provenance.host` records the operating system and architecture. Timings
 certainly differ across those, and occasionally the numbers do too, where a

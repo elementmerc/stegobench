@@ -243,10 +243,16 @@ and a detector scored on what it trained on is not being measured.
 
 5. WOULD YOU GET THE SAME NUMBER?
 
-`provenance.plugins[].route` decides how far it travels. A container digest \
-names bytes you can pull, so running the same command runs identical code. A \
-local binary's hash names a file on their machine, and two people who both \
-built from source get different hashes for the same version.
+`provenance.plugins[].pinned_by` decides how far it travels. `image-digest` \
+names bytes you can pull, so running the same command runs identical code. \
+`executable-hash` names a file on their machine, and two people who both \
+built from source get different hashes for the same version. `unpinned` says \
+nothing in the document ties the number to particular bytes.
+
+`provenance.plugins[].isolation` is a different question: what the tool could \
+reach. `sandbox-no-network` is a container that saw nothing but the images, \
+`host` is a program with their machine's network, `remote-service` means the \
+images went to an instance over the wire, and `unstated` means nobody said.
 
 `provenance.host` records the operating system and architecture, \
 `network_reachable` whether the tool could phone home, and `determinism` \

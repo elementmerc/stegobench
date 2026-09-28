@@ -204,26 +204,66 @@ pub struct PluginRef {
     /// of the executable that actually ran.
     pub image: String,
     pub determinism: Determinism,
-    /// Which of the two routes produced the digest above, and it decides what
-    /// that digest is worth to somebody else.
-    ///
-    /// A container digest names bytes anybody can pull, so two people's runs
-    /// are comparable by construction. A local binary's hash names bytes on one
-    /// machine: two people who both built the tool from source get different
-    /// hashes for the same version, and neither is wrong. Both are pinned, but
-    /// only one travels, and a reader comparing two results is entitled to know
-    /// which they are holding without having to notice that one digest has a
-    /// repository in front of it.
-    pub route: Route,
+    /// What `image` above is, and therefore what it is worth to somebody who
+    /// wants to run this again. It says nothing about where the tool ran or
+    /// what it could reach; `isolation` says that, and the two disagree often
+    /// enough that one field answering both was misleading by construction.
+    pub pinned_by: PinnedBy,
+    /// What the thing that produced these numbers could reach while it ran.
+    /// It says nothing about how the tool is pinned; `pinned_by` says that.
+    pub isolation: Isolation,
 }
 
+/// How the bytes that ran are named, and how somebody else would get them.
+// History, kept out of the doc comment because these become the published
+// schema's descriptions and no reader ever saw the field they explain: this
+// and `Isolation` replaced a single `route`, which tried to carry pinning and
+// isolation at once. They agree for a container and for a locally installed
+// program, and they disagree for an entry that names an image and sets
+// `invoke.host`, where the image names the subject and an adapter on the
+// operator's machine is what executes. One field could only be right about one
+// of the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Route {
-    /// A container, run with no network, pinned by image digest.
-    Container,
-    /// A program already installed on the machine that ran it.
-    Local,
+#[serde(rename_all = "kebab-case")]
+pub enum PinnedBy {
+    /// `image` is a container image digest. Anybody can pull those exact bytes,
+    /// so two people's runs are comparable by construction.
+    ImageDigest,
+    /// `image` is the SHA-256 of an executable on the machine that ran it. Two
+    /// people who both built the tool from source get different hashes for the
+    /// same version and neither is wrong, so the pin is real and does not
+    /// travel.
+    ExecutableHash,
+    /// Nothing in this document ties these numbers to particular bytes. Two
+    /// runs arrive here: a program whose file could not be hashed, and a tool
+    /// reached as a service, where `image` names what the operator was told to
+    /// start and nothing checked that it is what answered. Either way a rerun
+    /// is a rerun of whatever responds to that name at the time. It is written
+    /// out rather than left to an absent field, because an absent answer and
+    /// "nothing pinned this" look identical to a reader and only one of them is
+    /// a statement.
+    Unpinned,
+}
+
+/// What the tool could reach while it produced these numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Isolation {
+    /// A container started with `--network=none`. It saw the images it was
+    /// handed and nothing else.
+    SandboxNoNetwork,
+    /// A process on the machine that ran the benchmark, holding that machine's
+    /// network and that user's privileges. Nothing constrained it.
+    Host,
+    /// The measurement went over the network. Something on this machine sent
+    /// each image to an instance the operator started and read the answers
+    /// back. Nothing here constrained the tool, and this document cannot say
+    /// what the instance could reach or vouch that it was the version named.
+    RemoteService,
+    /// The document does not say. Hand-written and submitted documents can land
+    /// here, and it is an explicit "nobody recorded this" rather than a default
+    /// quietly standing in for `sandbox-no-network`.
+    Unstated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -434,6 +474,40 @@ impl Result1 {
                 ));
             }
         }
+        // `isolation` and `network_reachable` are two statements about the same
+        // run, and two of their combinations cannot both be true. Caught here
+        // rather than left for a reader to notice, because the whole reason
+        // `route` was split into two fields was that a document was able to
+        // say a contradictory thing without anything objecting.
+        if !self.provenance.plugins.is_empty()
+            && self.provenance.network_reachable
+            && self
+                .provenance
+                .plugins
+                .iter()
+                .all(|p| p.isolation == Isolation::SandboxNoNetwork)
+        {
+            bad.push(
+                "every plugin here says it ran in a sandbox with no network, \
+                 and network_reachable says the network was reachable. One of \
+                 the two is wrong"
+                    .into(),
+            );
+        }
+        if !self.provenance.network_reachable
+            && self
+                .provenance
+                .plugins
+                .iter()
+                .any(|p| p.isolation == Isolation::RemoteService)
+        {
+            bad.push(
+                "a plugin here was reached over the network as a service, and \
+                 network_reachable says there was no network. One of the two is \
+                 wrong"
+                    .into(),
+            );
+        }
         if bad.is_empty() {
             Ok(())
         } else {
@@ -486,7 +560,8 @@ mod tests {
                     name: "aletheia-rich".into(),
                     image: "ghcr.io/x/y@sha256:abc".into(),
                     determinism: Determinism::Exact,
-                    route: Route::Container,
+                    pinned_by: PinnedBy::ImageDigest,
+                    isolation: Isolation::SandboxNoNetwork,
                 }],
                 harness_version: "0.1.0".into(),
                 started_utc: "2026-09-17T09:02:11Z".into(),
@@ -668,5 +743,116 @@ mod tests {
         let mut r = sample();
         r.metrics.n_stego = 0;
         assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn neither_half_of_the_old_route_field_may_be_omitted() {
+        // The whole reason there are two fields is that a reader must be able
+        // to ask each question separately. A missing one defaulting to
+        // anything would put the reader back where `route` left them.
+        for field in ["pinned_by", "isolation"] {
+            let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+            v["provenance"]["plugins"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<Result1>(v).is_err(),
+                "plugins[].{field} was allowed to be missing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_service_measured_with_no_network_is_refused() {
+        let mut r = sample();
+        r.provenance.plugins[0].isolation = Isolation::RemoteService;
+        let problems = r.validate().expect_err("contradictory");
+        assert!(
+            problems.iter().any(|p| p.contains("as a service")),
+            "{problems:?}"
+        );
+        r.provenance.network_reachable = true;
+        assert_eq!(r.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_sandbox_beside_a_reachable_network_is_refused() {
+        let mut r = sample();
+        r.provenance.network_reachable = true;
+        let problems = r.validate().expect_err("contradictory");
+        assert!(
+            problems.iter().any(|p| p.contains("sandbox")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_run_may_reach_the_network_without_objection() {
+        let mut r = sample();
+        r.provenance.plugins[0].isolation = Isolation::Host;
+        r.provenance.plugins[0].pinned_by = PinnedBy::ExecutableHash;
+        r.provenance.plugins[0].image = "sha256:abc".into();
+        r.provenance.network_reachable = true;
+        assert_eq!(r.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_document_with_no_plugins_is_not_accused_of_contradicting_itself() {
+        // Nothing recorded is not a claim about a sandbox, and treating it as
+        // one would refuse documents whose only fault is being thin.
+        let mut r = sample();
+        r.provenance.plugins.clear();
+        r.provenance.network_reachable = true;
+        assert_eq!(r.validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_unpinned_plugin_still_has_to_name_a_digest_or_be_refused() {
+        // `pinned_by: unpinned` is an admission, not a licence to skip the
+        // digest check: a document saying both is saying nothing at all.
+        let mut r = sample();
+        r.provenance.plugins[0].pinned_by = PinnedBy::Unpinned;
+        r.provenance.plugins[0].image = "unknown".into();
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn every_isolation_value_survives_a_round_trip_under_the_name_it_publishes() {
+        for (value, written) in [
+            (Isolation::SandboxNoNetwork, "sandbox-no-network"),
+            (Isolation::Host, "host"),
+            (Isolation::RemoteService, "remote-service"),
+            (Isolation::Unstated, "unstated"),
+        ] {
+            assert_eq!(serde_json::to_value(value).unwrap(), written);
+            assert_eq!(
+                serde_json::from_value::<Isolation>(serde_json::json!(written)).unwrap(),
+                value
+            );
+        }
+        for (value, written) in [
+            (PinnedBy::ImageDigest, "image-digest"),
+            (PinnedBy::ExecutableHash, "executable-hash"),
+            (PinnedBy::Unpinned, "unpinned"),
+        ] {
+            assert_eq!(serde_json::to_value(value).unwrap(), written);
+            assert_eq!(
+                serde_json::from_value::<PinnedBy>(serde_json::json!(written)).unwrap(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn the_old_route_value_is_not_quietly_accepted_as_either_new_field() {
+        // Unknown fields are ignored by design, so a document left on the old
+        // shape must fail on the two it is missing rather than half-parse.
+        let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        let plugin = v["provenance"]["plugins"][0].as_object_mut().unwrap();
+        plugin.remove("pinned_by");
+        plugin.remove("isolation");
+        plugin.insert("route".into(), serde_json::json!("container"));
+        assert!(serde_json::from_value::<Result1>(v).is_err());
     }
 }

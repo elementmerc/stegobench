@@ -53,8 +53,8 @@ use std::path::{Path, PathBuf};
 
 use stegobench_core::exit;
 use stegobench_core::result::{
-    Configuration, CorpusSource, Determinism, Domain, Pairing, RateUnit, Result1, Route,
-    SplitDiscipline,
+    Configuration, CorpusSource, Determinism, Domain, Isolation, Pairing, PinnedBy, PluginRef,
+    RateUnit, Result1, SplitDiscipline,
 };
 
 use crate::cli::ReportFormat;
@@ -170,7 +170,12 @@ pub struct Row {
     pub source: String,
     pub detector: String,
     pub subject_version: String,
-    pub route: &'static str,
+    /// What names the bytes that ran: `image-digest`, `executable-hash`,
+    /// `unpinned`, `mixed` where the plugins of one run disagree, or
+    /// `unrecorded` where the document named none.
+    pub pinned_by: &'static str,
+    /// What those bytes could reach, in the same five shapes.
+    pub isolation: &'static str,
     pub corpus_name: String,
     pub corpus_digest: String,
     pub corpus_source: CorpusSource,
@@ -441,23 +446,35 @@ fn load(path: &Path) -> Result<Result1, Skipped> {
     Ok(parsed)
 }
 
+/// One word for a whole run, where a run can name several plugins.
+///
+/// Neither "mixed" nor "unrecorded" is a value the schema carries: they are
+/// what a row says when the plugins disagree, or when the document named no
+/// plugin at all. Both are said rather than collapsed into the commonest
+/// value, because every answer here is a claim about what produced the number.
+fn agreed(plugins: &[PluginRef], of: impl Fn(&PluginRef) -> &'static str) -> &'static str {
+    let mut seen = plugins.iter().map(of);
+    match seen.next() {
+        None => "unrecorded",
+        Some(first) if seen.all(|other| other == first) => first,
+        Some(_) => "mixed",
+    }
+}
+
 /// Turns a document into a row, working out the conditions that go beside the
 /// number.
 fn to_row(source: &Path, r: Result1) -> Row {
-    let route = match (
-        r.provenance.plugins.iter().any(|p| p.route == Route::Local),
-        r.provenance
-            .plugins
-            .iter()
-            .any(|p| p.route == Route::Container),
-    ) {
-        (true, true) => "mixed",
-        (true, false) => "local",
-        (false, true) => "container",
-        // No plugins recorded at all. Said rather than defaulted to either
-        // route, because both are claims about what produced the number.
-        (false, false) => "unrecorded",
-    };
+    let pinned_by = agreed(&r.provenance.plugins, |p| match p.pinned_by {
+        PinnedBy::ImageDigest => "image-digest",
+        PinnedBy::ExecutableHash => "executable-hash",
+        PinnedBy::Unpinned => "unpinned",
+    });
+    let isolation = agreed(&r.provenance.plugins, |p| match p.isolation {
+        Isolation::SandboxNoNetwork => "sandbox-no-network",
+        Isolation::Host => "host",
+        Isolation::RemoteService => "remote-service",
+        Isolation::Unstated => "unstated",
+    });
 
     let mut flags = Vec::new();
     match r.declarations.pairing {
@@ -509,7 +526,8 @@ fn to_row(source: &Path, r: Result1) -> Row {
         source: source.display().to_string(),
         detector: r.subject.name,
         subject_version: r.subject.version,
-        route,
+        pinned_by,
+        isolation,
         corpus_name: r.corpus.name,
         corpus_digest: r.corpus.digest,
         corpus_source: r.corpus.source,
@@ -757,7 +775,7 @@ fn flags_cell(flags: &[String]) -> String {
 /// The columns every format agrees on, in order.
 const HEADINGS: [&str; 12] = [
     "detector",
-    "route",
+    "isolation",
     "corpus",
     "config",
     "arm",
@@ -773,7 +791,7 @@ const HEADINGS: [&str; 12] = [
 fn cells(row: &Row) -> [String; 12] {
     [
         row.detector.clone(),
-        row.route.to_string(),
+        row.isolation.to_string(),
         format!("{} @ {}", row.corpus_name, abbreviate(&row.corpus_digest)),
         configuration_str(row.configuration).to_string(),
         row.arm(),
@@ -1025,7 +1043,8 @@ fn render_csv(report: &Report) -> String {
         "configuration",
         "detector",
         "subject_version",
-        "route",
+        "pinned_by",
+        "isolation",
         "embedder",
         "rate_value",
         "rate_unit",
@@ -1080,7 +1099,8 @@ fn render_csv(report: &Report) -> String {
                 configuration_str(row.configuration).to_string(),
                 row.detector.clone(),
                 row.subject_version.clone(),
-                row.route.to_string(),
+                row.pinned_by.to_string(),
+                row.isolation.to_string(),
                 row.embedder.clone(),
                 rate_value,
                 rate_unit,
@@ -1193,7 +1213,8 @@ pub fn to_json(report: &Report) -> serde_json::Value {
                 "source": r.source,
                 "detector": r.detector,
                 "subject_version": r.subject_version,
-                "route": r.route,
+                "pinned_by": r.pinned_by,
+                "isolation": r.isolation,
                 "corpus": {
                     "name": r.corpus_name,
                     "digest": r.corpus_digest,
@@ -1382,7 +1403,8 @@ mod tests {
                         "name": self.detector,
                         "image": format!("sha256:{}", "c".repeat(64)),
                         "determinism": "exact",
-                        "route": "local",
+                        "pinned_by": "executable-hash",
+                        "isolation": "host",
                     }],
                     "harness_version": "0.1.0",
                     "started_utc": "2026-09-27T00:00:00Z",
@@ -1866,20 +1888,22 @@ mod tests {
     }
 
     #[test]
-    fn a_mixed_route_is_said_rather_than_picked() {
+    fn plugins_that_disagree_are_said_to_be_mixed_rather_than_picked_between() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = Doc::default().value();
         v["provenance"]["plugins"] = serde_json::json!([
-            {"name": "a", "image": format!("sha256:{}", "c".repeat(64)), "determinism": "exact", "route": "local"},
-            {"name": "b", "image": format!("ghcr.io/x/y@sha256:{}", "c".repeat(64)), "determinism": "nondeterministic", "route": "container"},
+            {"name": "a", "image": format!("sha256:{}", "c".repeat(64)), "determinism": "exact", "pinned_by": "executable-hash", "isolation": "host"},
+            {"name": "b", "image": format!("ghcr.io/x/y@sha256:{}", "c".repeat(64)), "determinism": "nondeterministic", "pinned_by": "image-digest", "isolation": "sandbox-no-network"},
         ]);
+        v["provenance"]["network_reachable"] = serde_json::json!(true);
         std::fs::write(
             dir.path().join("a.json"),
             serde_json::to_string(&v).unwrap(),
         )
         .unwrap();
         let report = build(&[dir.path().to_path_buf()]).unwrap();
-        assert_eq!(report.groups[0].rows[0].route, "mixed");
+        assert_eq!(report.groups[0].rows[0].pinned_by, "mixed");
+        assert_eq!(report.groups[0].rows[0].isolation, "mixed");
         assert!(flat(&render(&report, ReportFormat::Text)).contains("NONDETERMINISTIC"));
     }
 
@@ -2144,14 +2168,16 @@ mod tests {
         assert_eq!(configuration_str(Configuration::Named), "named");
     }
 
-    /// A run with no plugins recorded must not be filed as either route.
+    /// A run with no plugins recorded must not be filed under any of the
+    /// values the schema carries, on either field.
     #[test]
-    fn an_unrecorded_route_is_named_as_unrecorded() {
+    fn an_unrecorded_plugin_list_is_named_as_unrecorded() {
         let mut v = Doc::default().value();
         v["provenance"]["plugins"] = serde_json::json!([]);
         let parsed: Result1 = serde_json::from_value(v).unwrap();
         let row = to_row(Path::new("x.json"), parsed);
-        assert_eq!(row.route, "unrecorded");
+        assert_eq!(row.pinned_by, "unrecorded");
+        assert_eq!(row.isolation, "unrecorded");
     }
 
     /// A linked result is a row the walk cannot deliver. Dropping it quietly

@@ -64,6 +64,12 @@ jobs:
         # The shared bandwidth budget is timing sensitive and uses flock, so it
         # is the one piece here whose behaviour genuinely differs per platform.
         run: python -m unittest discover -s tools/release -p "test_*.py" -v
+      - name: Migration tooling tests
+        # A migration runs once, against documents nobody can regenerate, so a
+        # wrong guess writes a plausible falsehood and nothing downstream can
+        # tell. The scripts are kept rather than thrown away, and they are held
+        # to the same suite as everything else here.
+        run: python -m unittest discover -s tools/migrations -p "test_*.py" -v
       - name: Coverage tooling tests
         # The tool that holds this repository to a coverage figure is held to
         # one too. It arrived without tests, and the first thing they found was

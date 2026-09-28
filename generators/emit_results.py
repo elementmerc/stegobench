@@ -188,7 +188,13 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                     "plugins": [{"name": subject,
                                  "image": f"{image}@{image_digests.get(image, 'sha256:unknown')}",
                                  "determinism": "exact",
-                                 "route": "container"}],
+                                 # The image digest names bytes anybody can
+                                 # pull, and the container is started with no
+                                 # network. Two facts, two fields: they agree
+                                 # here and they do not for a service entry,
+                                 # which is why one field could not carry both.
+                                 "pinned_by": "image-digest",
+                                 "isolation": "sandbox-no-network"}],
                     "harness_version": harness_version,
                     "started_utc": dt.datetime.now(dt.timezone.utc)
                                      .strftime("%Y-%m-%dT%H:%M:%SZ"),

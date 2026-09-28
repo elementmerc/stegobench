@@ -29,13 +29,13 @@ copying meant it or not.
 ## What a row says
 
 ```
-detector     route      corpus                      config  arm                  AUC     pairing          split
-aletheia-rs  container  rich-suniward @ sha256:d93e9720  custom  suniward at 0.4 bpp  0.5087  single-variable  not-applicable
+detector     isolation           corpus                           config  arm                  AUC     pairing          split
+aletheia-rs  sandbox-no-network  rich-suniward @ sha256:d93e9720  custom  suniward at 0.4 bpp  0.5087  single-variable  not-applicable
 ```
 
 | Cell | The question it answers |
 |---|---|
-| `detector` and `route` | What was asked, and whether the digest that pins it travels. `container` names bytes anybody can pull; `local` names a file on one machine |
+| `detector` and `isolation` | What was asked, and what it could reach while it answered. `sandbox-no-network` is a container that saw nothing but the images; `host` is a program on the operator's machine with their network; `remote-service` means the images went over the wire to an instance they started. How the tool is pinned is a separate question, and `--format csv` and `--format json` carry it as `pinned_by` |
 | `corpus` | Which images, by name and by the first eight characters of the digest. The full digest sits above the table, and `--format csv` carries it in every row |
 | `config` | `named` if the corpus digest was declared in advance and this run matched it, `custom` otherwise |
 | `arm` | What was hidden and how much of it, with the unit. `0.4 bpp` and `5% of capacity` are different quantities |

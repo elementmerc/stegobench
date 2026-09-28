@@ -34,8 +34,9 @@
       {
         "determinism": "exact",
         "image": "stegobench/aletheia@sha256:3f19136f8f3e1479fc60e9986d8d2431818ca6dc4471ae1e49c5076acfccf87d",
+        "isolation": "sandbox-no-network",
         "name": "aletheia-spa",
-        "route": "container"
+        "pinned_by": "image-digest"
       }
     ],
     "started_utc": "2026-09-18T20:13:57Z"
