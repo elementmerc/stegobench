@@ -25,8 +25,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
-use stegobench_cli::cli::{Cli, Command};
+use stegobench_cli::cli::{Cli, Command, ReportFormat};
 use stegobench_cli::help_topics;
+use stegobench_cli::report;
 use stegobench_cli::score;
 use stegobench_core::registry::{Kind, Registry};
 use stegobench_core::{exit, ManifestV1, Result1, RunV1};
@@ -38,6 +39,14 @@ struct Output {
     json: serde_json::Value,
     human: String,
     code: i32,
+    /// Whether the human text IS the payload and belongs on stdout even
+    /// though the command did not exit zero.
+    ///
+    /// One command needs this. `report` prints a table AND exits non-zero
+    /// when a file could not be read, because the table is worth having and
+    /// the code says it is short. Without this flag the table would be
+    /// diverted to stderr in exactly the case a reader most needs to see it.
+    payload_on_stdout: bool,
 }
 
 impl Output {
@@ -46,6 +55,7 @@ impl Output {
             json,
             human: human.into(),
             code: exit::OK,
+            payload_on_stdout: false,
         }
     }
 
@@ -57,6 +67,7 @@ impl Output {
             json: serde_json::json!({ "ok": false, "error": human }),
             human,
             code,
+            payload_on_stdout: false,
         }
     }
 }
@@ -968,6 +979,59 @@ fn cmd_score(
     )
 }
 
+/// Turns result documents into a table, and refuses to turn them into a
+/// misleading one.
+///
+/// WHY A SKIPPED FILE STILL PRINTS A TABLE, AND STILL EXITS NON-ZERO
+///
+/// Two failures were available here and both are real. Refusing the whole
+/// report over one bad file makes the command useless against a directory
+/// somebody else assembled; dropping the file quietly produces a table that
+/// looks complete and is not, which is the worse of the two by a distance.
+/// So it does both halves of the honest thing: the table prints, the skipped
+/// files are named at the TOP of it with their reasons, and the exit code
+/// says the table is short, so a script cannot treat it as whole.
+fn cmd_report(paths: &[PathBuf], format: ReportFormat, out: Option<&Path>) -> Output {
+    let report = match report::build(paths) {
+        Ok(r) => r,
+        Err(e) => return Output::err(e.exit_code(), e.to_string()),
+    };
+    let body = report::render(&report, format);
+    let json = report::to_json(&report);
+
+    let human = match out {
+        None => body,
+        Some(path) => {
+            if let Err(e) = report::write_atomically(path, &body) {
+                return Output::err(e.exit_code(), e.to_string());
+            }
+            format!(
+                "{} result(s) in {} table(s) written to {}. {}",
+                report.read,
+                report.groups.len(),
+                path.display(),
+                if report.skipped.is_empty() {
+                    "Every file found was readable.".to_string()
+                } else {
+                    format!(
+                        "{} file(s) could not be read and are named at the top \
+                         of it, so the tables are incomplete.",
+                        report.skipped.len()
+                    )
+                }
+            )
+        }
+    };
+
+    let mut output = Output::ok(json, human);
+    output.code = report.exit_code();
+    // The table goes to stdout when it IS the output. When `--out` took it,
+    // the human text is a confirmation line and belongs on stderr with every
+    // other progress message.
+    output.payload_on_stdout = out.is_none();
+    output
+}
+
 fn run(cli: &Cli) -> Output {
     match &cli.command {
         Command::Schema { name } => cmd_schema(name),
@@ -998,6 +1062,7 @@ fn run(cli: &Cli) -> Output {
             *timeout,
             *limit,
         ),
+        Command::Report { paths, format, out } => cmd_report(paths, *format, out.as_deref()),
         Command::Completions { shell } => cmd_completions(*shell),
         Command::Help { topic } => cmd_help(topic.as_deref()),
     }
@@ -1011,6 +1076,9 @@ fn main() {
         let mut stdout = std::io::stdout().lock();
         let _ = serde_json::to_writer_pretty(&mut stdout, &out.json);
         let _ = writeln!(stdout);
+    } else if out.payload_on_stdout {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", out.human);
     } else if out.code == exit::OK {
         // Human mode still puts the payload on stdout when the payload IS the
         // point, so redirecting to a file works without remembering a flag.
@@ -1554,6 +1622,94 @@ mod tests {
         let out = cmd_verify(&doc, dir.path());
         assert_eq!(out.code, exit::SCHEMA_INVALID);
         assert!(out.human.contains("stegobench validate"), "{}", out.human);
+    }
+
+    /// The table is the payload, so it has to reach stdout even when the
+    /// command exits non-zero. It exits non-zero precisely when a file was
+    /// dropped, which is the case a reader most needs the table in front of
+    /// them for.
+    #[test]
+    fn a_report_with_a_dropped_file_still_puts_the_table_on_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../results/v1/rich-suniward-suniward-0400-aletheia-rs.json"),
+            dir.path().join("good.json"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bad.json"), "{nope").unwrap();
+
+        let out = cmd_report(&[dir.path().to_path_buf()], ReportFormat::Text, None);
+        assert_eq!(out.code, exit::SCHEMA_INVALID);
+        assert!(out.payload_on_stdout, "the table was diverted to stderr");
+        assert!(out.human.contains("THIS REPORT IS INCOMPLETE"));
+        assert!(out.human.contains("bad.json"));
+        assert!(out.human.contains("rich-suniward"));
+        assert_eq!(out.json["complete"], serde_json::json!(false));
+    }
+
+    /// With --out the payload is the file, so the human text is a
+    /// confirmation and belongs on stderr with the rest of the progress.
+    #[test]
+    fn writing_a_report_to_a_file_confirms_on_stderr_and_says_if_it_is_short() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../results/v1/rich-suniward-suniward-0400-aletheia-rs.json"),
+            dir.path().join("good.json"),
+        )
+        .unwrap();
+        let target = dir.path().join("out").join("report.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+
+        let out = cmd_report(
+            &[dir.path().join("good.json")],
+            ReportFormat::Markdown,
+            Some(&target),
+        );
+        assert_eq!(out.code, exit::OK);
+        assert!(!out.payload_on_stdout);
+        assert!(out.human.contains("Every file found was readable"));
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(written.starts_with("# Steganalysis results"));
+        assert!(written.contains("rich-suniward"));
+
+        // And the short case says so in the confirmation, so a person
+        // watching stderr does not have to open the file to find out.
+        std::fs::write(dir.path().join("bad.json"), "{").unwrap();
+        let out = cmd_report(
+            &[dir.path().to_path_buf()],
+            ReportFormat::Markdown,
+            Some(&target),
+        );
+        assert_eq!(out.code, exit::SCHEMA_INVALID);
+        assert!(out.human.contains("tables are incomplete"), "{}", out.human);
+    }
+
+    #[test]
+    fn a_report_over_nothing_is_a_usage_error_rather_than_an_empty_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = cmd_report(&[dir.path().to_path_buf()], ReportFormat::Text, None);
+        assert_eq!(out.code, exit::USAGE);
+        assert!(out.human.contains("no table to print"), "{}", out.human);
+    }
+
+    #[test]
+    fn a_report_to_an_unwritable_destination_fails_rather_than_reporting_success() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../results/v1/rich-suniward-suniward-0400-aletheia-rs.json"),
+            dir.path().join("good.json"),
+        )
+        .unwrap();
+        let out = cmd_report(
+            &[dir.path().to_path_buf()],
+            ReportFormat::Csv,
+            Some(&dir.path().join("no-such-dir").join("r.csv")),
+        );
+        assert_eq!(out.code, exit::FAILURE);
+        assert!(out.human.contains("could not write the report"));
     }
 
     /// Drives the binary's own code to every exit code the contract in

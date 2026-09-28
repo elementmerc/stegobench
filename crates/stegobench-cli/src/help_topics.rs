@@ -8,11 +8,14 @@
 //! the reasoning already carried in the code and in `generators/README.md`
 //! rather than pointing at it.
 
-pub const TOPICS: &[&str] = &["pairing", "splits", "licences", "plugins", "results"];
+pub const TOPICS: &[&str] = &[
+    "pairing", "splits", "licences", "plugins", "results", "reports",
+];
 
 pub fn text(topic: &str) -> Option<&'static str> {
     match topic {
         "pairing" => Some(PAIRING),
+        "reports" => Some(REPORTS),
         "splits" => Some(SPLITS),
         "licences" => Some(LICENCES),
         "plugins" => Some(PLUGINS),
@@ -20,6 +23,77 @@ pub fn text(topic: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+const REPORTS: &str = "\
+reports: putting a number on a page without leaving its conditions behind
+
+  stegobench report results/v1
+  stegobench report results/v1 --format markdown --out results.md
+
+An AUC on its own is not a measurement. It is a measurement once you also \
+know which corpus it came from, whether that corpus was the registered tier \
+or a directory somebody assembled, whether the clean and stego images \
+differed in anything besides the payload, and which side of the train and \
+test split the pairs landed on. Change any one of those and the same number \
+means something different.
+
+That is exactly what goes missing when a person opens a result document, \
+copies the figure into a table, and moves on. The number survives the trip to \
+the page and the four conditions do not.
+
+So every row this writes carries them in the row. Not in a legend, not under \
+the table, not in a heading: in the cells, so a line somebody copies out of \
+the middle of the table takes the caveats with it whether they meant to or \
+not.
+
+WHAT IT REFUSES TO DO
+
+  No table across corpora.  An AUC on one corpus and an AUC on another are
+                            measurements of two populations, not two scores
+                            on one scale. Each corpus gets its own table,
+                            named, with its digest above it. Two documents
+                            naming one corpus with different digests are two
+                            corpora here, because the digest names the bytes
+                            and the name is a label somebody chose.
+  No mixing custom in.      A `custom` run is comparable with itself and
+                            nothing else, so it sits in its own section with
+                            a sentence saying so, never interleaved with a
+                            `named` row somebody could read it beside.
+  No ranking.               Rows are ordered by arm and then by detector,
+                            never by score, so the table cannot be read as a
+                            league it was never entitled to be.
+  No quiet gaps.            A file that is not a valid result-v1 document is
+                            named at the TOP of the report with the reason,
+                            and the command exits non-zero. A short table
+                            that looks complete is the worst thing this
+                            could produce.
+
+THE THREE FORMATS
+
+  text       aligned columns for a terminal. The default.
+  markdown   a table to paste into an evaluation document.
+  csv        every recorded field, one column each, including the full
+             digests and the source path of each document. A skipped file
+             appears as a row of its own with record_type=skipped_file, so a
+             script reading the CSV cannot miss that the table is short.
+
+`--out FILE` writes by rename-on-close, so a reader who opens that path sees \
+either the previous file or the whole new one, never half a table. Without \
+it the report goes to stdout.
+
+WHAT THE EXIT CODE MEANS HERE
+
+  0   every file found became a row.
+  1   a file could not be read. The table printed and is short by that much.
+  2   nothing under the paths given is a result document, so there was no
+      honest table to print. An empty table under an exit code of zero reads
+      as \"checked, nothing to worry about\", which is a different claim from
+      \"nothing was found\".
+  3   more documents than this will put in one report, or a directory tree
+      deeper than it will walk. A refusal, with the cap named.
+  6   a file found is not a valid result-v1 document. Same as 1, except the
+      file was read and judged rather than unreadable.
+";
 
 const PAIRING: &str = "\
 pairing: why a clean image and its stego twin must differ in nothing else

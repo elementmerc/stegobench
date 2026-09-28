@@ -16,7 +16,22 @@
 // which build.rs already imports; `PathBuf` is referred to by its full path
 // below instead so the two copies never fight over the same import.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// How `report` renders a table.
+///
+/// Defined here rather than beside the renderer because `build.rs` includes
+/// this file and nothing else, so a type the command tree mentions has to be
+/// reachable from it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ReportFormat {
+    /// Aligned columns for a terminal.
+    Text,
+    /// A Markdown table, to paste into an evaluation document.
+    Markdown,
+    /// Every recorded field, one column each, for a spreadsheet or a script.
+    Csv,
+}
 
 /// EXIT CODES, part of the CLI's contract (see `stegobench_core::exit`):
 ///   0 success · 1 generic failure · 2 usage error · 3 pre-flight refusal ·
@@ -225,6 +240,41 @@ pub enum Command {
         corpus: std::path::PathBuf,
     },
 
+    /// Turn result documents into a table a person can put in a report
+    ///
+    /// Takes result files, directories of them, or both. Every row carries
+    /// the conditions the number was measured under (the corpus and its
+    /// digest, the configuration, the pairing and the split) in the row
+    /// itself, so a figure cannot be lifted out without them.
+    ///
+    /// Results over different corpora are never put in one table, and a
+    /// `custom` run never shares a table with a `named` one. Rows are ordered
+    /// by arm and then detector, never by score: this is not a ranking.
+    ///
+    /// A file that is not a valid result-v1 document is named with its reason
+    /// at the top of the report and the command exits non-zero, so an
+    /// incomplete table cannot be mistaken for a whole one.
+    ///
+    /// Example:
+    ///   stegobench report results/v1 --format markdown --out results.md
+    Report {
+        /// Result documents, or directories holding them.
+        #[arg(value_name = "PATH", num_args = 1..)]
+        paths: Vec<std::path::PathBuf>,
+        /// text, markdown or csv.
+        ///
+        /// The default does not change when stdout is redirected. A command
+        /// whose output depends on whether a terminal is attached produces
+        /// one thing on a laptop and another in CI, and two runs on the same
+        /// input have to produce the same bytes.
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        format: ReportFormat,
+        /// Where to write it. Defaults to stdout, and a file is written by
+        /// rename-on-close so a reader never opens half a table.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+
     /// Emit a shell completion script
     ///
     /// Example:
@@ -240,7 +290,8 @@ pub enum Command {
     /// Example:
     ///   stegobench help pairing
     Help {
-        /// One of: pairing, splits, licences, plugins, results. Omit to list.
+        /// One of: pairing, splits, licences, plugins, results, reports.
+        /// Omit to list.
         #[arg(value_name = "TOPIC")]
         topic: Option<String>,
     },
