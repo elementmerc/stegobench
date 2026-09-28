@@ -143,6 +143,9 @@ def check(channel: dict, version: str, fetcher=None) -> dict:
         "ok": False,
         "problem": None,
         "status": None,
+        # A channel that is live and still optional is a channel somebody
+        # published to and forgot to make load-bearing. See `main`.
+        "should_be_required": False,
     }
     try:
         got = fetcher(url)
@@ -185,6 +188,7 @@ def check(channel: dict, version: str, fetcher=None) -> dict:
         return row
 
     row["ok"] = True
+    row["should_be_required"] = not row["required"]
     return row
 
 
@@ -248,7 +252,14 @@ def main(argv: list[str] | None = None) -> int:
     for channel in channels:
         row = check(channel, args.version)
         rows.append(row)
-        mark = "ok  " if row["ok"] else ("MISS" if row["required"] else "not yet")
+        if row["should_be_required"]:
+            mark = "FLIP"
+        elif row["ok"]:
+            mark = "ok"
+        elif row["required"]:
+            mark = "MISS"
+        else:
+            mark = "not yet"
         print(f"{mark:<8} {row['id']:<28} {row['url']}", flush=True)
         if row["problem"]:
             print(f"         {row['problem']}", flush=True)
@@ -269,9 +280,11 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = [r for r in rows if r["required"] and not r["ok"]]
     waiting = [r for r in rows if not r["required"] and not r["ok"]]
+    flip = [r for r in rows if r["should_be_required"]]
     print(
         f"{len(rows)} channel(s): {sum(1 for r in rows if r['ok'])} serving "
-        f"{args.version}, {len(failed)} wrong, {len(waiting)} not live yet."
+        f"{args.version}, {len(failed)} wrong, {len(waiting)} not live yet, "
+        f"{len(flip)} live but still optional."
     )
     if failed:
         print(
@@ -279,6 +292,21 @@ def main(argv: list[str] | None = None) -> int:
             "something untrue about this release.",
             file=sys.stderr,
         )
+    if flip:
+        # `required = false` exists so this file can describe a channel before
+        # it is live. Once the page answers with the release, that reason is
+        # spent, and leaving it optional means a later takedown of a channel
+        # people are already using would be reported and pass. Flipping it is
+        # a step in RELEASING.md, which is to say it depended on somebody
+        # remembering, which is the failure this whole tool exists to remove.
+        print(
+            "These channels are serving the release and are still marked "
+            "`required = false` in channels.toml, so a later takedown would "
+            "be reported and pass. Set `required = true` for: "
+            + ", ".join(r["id"] for r in flip),
+            file=sys.stderr,
+        )
+    if failed or flip:
         return 1
     return 0
 

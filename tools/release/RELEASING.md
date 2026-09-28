@@ -283,9 +283,17 @@ names `release.yml` gives its assets.
 
       It writes `distribution.json` whatever the verdict, since a record of a
       failed check is more useful than no record, and the exit code carries
-      the verdict. Channels marked `required = false` are reported and do not
-      fail the run, so flip one to required in the commit that first publishes
-      to it.
+      the verdict.
+
+      A channel marked `required = false` that is **not** live is reported and
+      does not fail the run, which is what lets this file describe the whole
+      intended set of destinations before they all exist. A channel marked
+      `required = false` that **is** serving the release fails the run and
+      names itself, because the reason for marking it optional is spent the
+      moment the page answers: leaving it optional means a later takedown of a
+      channel people are already using gets reported and passes. Flipping it
+      is a one line change to `channels.toml` and belongs in the commit that
+      first publishes to it.
 
 - [ ] `docs.rs` built all four crates. A failed docs build is silent on the
       release page and loud on the crate page.

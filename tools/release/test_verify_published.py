@@ -246,6 +246,56 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls, ["https://e"], "the stub was never called")
 
+    def test_a_live_channel_that_is_still_optional_fails_the_run(self):
+        # `required = false` describes a channel that does not exist yet. Once
+        # the page serves the release that reason is spent, and leaving it
+        # optional means a later takedown would be reported and pass. The flip
+        # is a step in RELEASING.md, which is to say it depended on somebody
+        # remembering it.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp) / "distribution.json"
+            code = self.run_main(
+                [
+                    "--version",
+                    "1.0.0",
+                    "--channels",
+                    str(self.channels_file(tmp, False)),
+                    "--out",
+                    str(out),
+                ],
+                answering(body="serving v1.0.0 today"),
+            )
+            self.assertEqual(code, 1)
+            written = json.loads(out.read_text())
+            row = written["channels"][0]
+            self.assertTrue(row["ok"], "the page did state the release")
+            self.assertTrue(row["should_be_required"], row)
+
+    def test_a_live_required_channel_is_not_asked_to_flip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp) / "distribution.json"
+            code = self.run_main(
+                [
+                    "--version",
+                    "1.0.0",
+                    "--channels",
+                    str(self.channels_file(tmp, True)),
+                    "--out",
+                    str(out),
+                ],
+                answering(body="serving v1.0.0 today"),
+            )
+            self.assertEqual(code, 0)
+            self.assertFalse(json.loads(out.read_text())["channels"][0]["should_be_required"])
+
+    def test_an_optional_channel_that_is_not_live_is_not_asked_to_flip(self):
+        row = vp.check(
+            {"id": "x", "url": "https://e", "must_contain": ["a"], "required": False},
+            "1.0.0",
+            answering(status=404),
+        )
+        self.assertFalse(row["should_be_required"])
+
     def test_asking_for_a_channel_that_does_not_exist_is_a_usage_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             code = self.run_main(

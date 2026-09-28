@@ -16,12 +16,14 @@
 #
 # The repository already carries one cautionary example: `docs.yml` is manual
 # only, because a red tick everybody learns to ignore costs more than it
-# reports. This job is built the other way round. It fails only when a channel
-# marked `required` in `tools/release/channels.toml` serves something other
-# than the release, which is a public page saying something untrue. Every
-# channel is `required = false` until somebody has actually published to it, so
-# today this job reports and does not fail, and it becomes load-bearing one
-# channel at a time.
+# reports. This job is built the other way round. It fails on exactly two
+# things, and both are somebody's mistake rather than the weather: a channel
+# marked `required` in `tools/release/channels.toml` serving something other
+# than the release, which is a public page saying something untrue; and a
+# channel still marked `required = false` whose page is in fact serving the
+# release, which means it was published to and never made load-bearing. A
+# destination that does not exist yet is reported and passes, so this job
+# becomes load-bearing one channel at a time rather than all at once.
 name: Distribution watch
 
 on:

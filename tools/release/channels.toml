@@ -22,11 +22,16 @@
 #
 # `{version}` is substituted with the release version, without a leading v.
 #
-# `required = false` marks a destination that does not exist yet. Those are
-# reported and do not fail the run, so this file can describe the intended set
-# of channels before they are all live. Flipping one to required is what makes
-# a channel load-bearing, and it should happen in the commit that first
-# publishes to it.
+# `required = false` marks a destination that does not exist yet. While its
+# page is not live it is reported and does not fail the run, so this file can
+# describe the intended set of channels before they are all live.
+#
+# The moment such a page starts serving the release, that reason is spent and
+# the verifier fails and names the channel. Leaving a live destination optional
+# means a later takedown of something people are already using gets reported
+# and passes, which is the same dependence on somebody remembering that this
+# whole tool exists to remove. Flipping it is what makes a channel
+# load-bearing, and it belongs in the commit that first publishes to it.
 
 [[channel]]
 id = "github-release"
