@@ -49,11 +49,26 @@ host = true
 adapter = "plugins/adapters/stegashield_one.py"
 entrypoint = "python3"
 argv = ["{adapter}", "{file}"]
-# Recovered from the evaluation's own session records, 2026-09-18. It is an
-# INTERNAL docker network: `internal=true`, so the container has no route to
-# the internet and serves anyway. Recorded here rather than left in a shell,
-# which is how it got lost in the first place.
-env = ["STEGASHIELD_ENDPOINT=http://172.24.0.2:3000/api/analyze"]
+#
+# WHAT TO SUPPLY, AND WHY IT IS NOT SUPPLIED HERE
+# -----------------------------------------------
+# The shape of the address, recovered from the evaluation's own session
+# records on 2026-09-18 and written down because it was lost once already:
+#
+#     STEGASHIELD_ENDPOINT=http://<host>:<port>/api/analyze
+#
+# The route is `/api/analyze` (the vendor's spelling, so it stays American)
+# and the container serves it on port 3000. The host is yours and only yours:
+# the instance runs on whatever machine or docker network you start it on,
+# and it is normally an internal one with no route to the internet.
+#
+# It is a comment and not an `env` line on purpose. A value here would be a
+# DEFAULT, and a default address is scored against whatever answers on it, so
+# a result would name StegaShield while measuring whoever happened to be
+# listening. It would also publish one team's internal address to everybody
+# who clones this repository. The harness passes your environment through to
+# the adapter, so exporting the variable before the run is all it takes; the
+# adapter refuses with the line above when it is unset.
 parser = "number"
 
 [selftest]

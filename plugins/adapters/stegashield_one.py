@@ -20,13 +20,16 @@ THE ENDPOINT IS SUPPLIED, NEVER DEFAULTED
 -----------------------------------------
 There is deliberately no default address. A benchmark that ships one scores
 against whatever happens to answer on it, and "whatever answers on localhost"
-is not a subject anybody can name in a result.
+is not a subject anybody can name in a result. The registry entry does not
+carry one either, and `stegobench` refuses an entry that does.
 
 The image is NOT vendored anywhere in this repository. It is a third party's
 artefact, referenced by digest and pulled by whoever runs it.
 
+The route is the vendor's, so it keeps the vendor's spelling: /api/analyze.
+
 Usage:
-    STEGASHIELD_ENDPOINT=http://host:3000/api/analyse stegashield_one.py <image>
+    STEGASHIELD_ENDPOINT=http://host:3000/api/analyze stegashield_one.py <image>
 """
 from __future__ import annotations
 
@@ -39,12 +42,33 @@ import urllib.request
 
 BOUNDARY = "----stegobench-boundary-7f3a"
 
+#: The most of a response this will read. The service answers with a small JSON
+#: object; a service that answers with a gigabyte is broken or hostile, and
+#: reading it would turn one bad image into a stalled corpus run.
+MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+def safe_filename(name: str) -> str:
+    """A filename that cannot break out of the header it is written into.
+
+    The name reaches us from the corpus on disk, and it is interpolated into a
+    `Content-Disposition` header between quotes. A name carrying a quote or a
+    line ending would end the header early and let the rest of the name be read
+    as headers of its own. The service only uses this for its own logging, so
+    replacing the dangerous characters costs nothing worth keeping.
+    """
+    cleaned = "".join("_" if c in '"\\\r\n' or ord(c) < 0x20 else c for c in name)
+    return cleaned[:255] or "image"
+
 
 def post_image(endpoint: str, path: pathlib.Path, timeout: int = 120) -> dict:
     """One multipart upload, built by hand to avoid a dependency."""
     body = b"".join([
         f"--{BOUNDARY}\r\n".encode(),
-        f'Content-Disposition: form-data; name="image"; filename="{path.name}"\r\n'.encode(),
+        (
+            'Content-Disposition: form-data; name="image"; '
+            f'filename="{safe_filename(path.name)}"\r\n'
+        ).encode(),
         b"Content-Type: application/octet-stream\r\n\r\n",
         path.read_bytes(),
         f"\r\n--{BOUNDARY}--\r\n".encode(),
@@ -55,7 +79,15 @@ def post_image(endpoint: str, path: pathlib.Path, timeout: int = 120) -> dict:
         headers={"Content-Type": f"multipart/form-data; boundary={BOUNDARY}"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        raw = r.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        # Refused rather than truncated: a truncated JSON document either fails
+        # to parse or, worse, parses into something that is not what was sent.
+        raise ValueError(
+            f"the service answered with more than {MAX_RESPONSE_BYTES} bytes, "
+            f"which is not a score"
+        )
+    return json.loads(raw)
 
 
 def main(argv: list[str]) -> int:
@@ -69,7 +101,10 @@ def main(argv: list[str]) -> int:
             "STEGASHIELD_ENDPOINT is not set. This tool is a service, so the "
             "address of a running instance has to be supplied; there is no "
             "default, because a benchmark that ships one scores against "
-            "whatever answers on it.",
+            "whatever answers on it. Start the container, then export "
+            "STEGASHIELD_ENDPOINT=http://<host>:<port>/api/analyze pointing at "
+            "it, where <host> is your own instance and the port is 3000 unless "
+            "you changed it.",
             file=sys.stderr,
         )
         return 3

@@ -105,6 +105,13 @@ reporting it as missing and sending you to look for a package that does not
 exist for you. Leaving it out means nobody has said, which is not the same as
 saying it runs everywhere.
 
+A detector that answers over HTTP rather than on a command line is registered
+the same way, with `host = true` and a small adapter script that does the
+posting. `docs/guide/http-detector.md` walks that case from installing the tool
+to a result you can quote. The address of your instance is never written into
+the entry: an entry naming a loopback or private-network address is refused,
+because a shipped address is scored against whatever answers on it.
+
 Both fixtures under `[selftest]` are required. A tool that answers "stego" to
 everything, or "clean" to everything, would otherwise pass a one-sided check;
 `stegobench doctor` runs both directions before believing a tool works. See

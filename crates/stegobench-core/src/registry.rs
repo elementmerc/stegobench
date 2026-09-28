@@ -27,6 +27,7 @@
 //! than a tag: a tag can move under you and a hash cannot.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -470,7 +471,276 @@ pub enum RegistryError {
     Invalid { name: String, problems: Vec<String> },
 }
 
+/// How much of one invocation string is inspected for an address.
+///
+/// A registry entry is a small declarative file: the longest argv element and
+/// the longest env entry in the shipped registry are both under 200 bytes. The
+/// cap exists so that a pathological file cannot turn validation into a long
+/// job, and a field over it is REFUSED rather than skipped, because skipping
+/// the check is exactly how an address gets through one.
+const INVOCATION_FIELD_MAX_BYTES: usize = 4096;
+
+/// Characters that cannot appear inside a host, used to cut a string into
+/// candidate tokens. Square brackets are absent on purpose: they delimit an
+/// IPv6 literal in a URL and are part of the thing being read.
+const TOKEN_SEPARATORS: &[char] = &[
+    ' ', '\t', '\n', '\r', '"', '\'', '`', ',', ';', '=', '<', '>', '|', '\\', '(', ')', '{', '}',
+];
+
+/// A host-shaped token pulled out of a field.
+struct HostToken {
+    host: String,
+    /// Whether it sat in the host slot of a URL. Only there is a bare number
+    /// decoded as an address: `http://2130706433/` is 127.0.0.1 to every HTTP
+    /// client, while a bare `2130706433` in an argv is a number.
+    from_url: bool,
+}
+
+/// Every host-shaped token in one string.
+///
+/// This is deliberately generous about what counts as a candidate, because a
+/// token that is not an address costs nothing: it fails to parse and is
+/// dropped. Missing one costs a published internal address.
+fn hosts_in(text: &str) -> Vec<HostToken> {
+    let mut found = Vec::new();
+    for token in text.split(TOKEN_SEPARATORS) {
+        if token.is_empty() {
+            continue;
+        }
+        let (rest, from_url) = match token.split_once("://") {
+            Some((_scheme, after)) => (after, true),
+            None => (token, false),
+        };
+        // Userinfo, which is everything before the last `@` of an authority.
+        let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+        // Path, query and fragment.
+        let authority = rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('.');
+        let host = if let Some(stripped) = authority.strip_prefix('[') {
+            // `[::1]:3000`: the brackets exist precisely so the port colon can
+            // be told from the address colons.
+            match stripped.split_once(']') {
+                Some((inside, _port)) => inside,
+                None => stripped,
+            }
+        } else if authority.matches(':').count() == 1 {
+            authority.split(':').next().unwrap_or_default()
+        } else {
+            // Either no port, or an unbracketed IPv6 literal such as `::1`,
+            // which is what a hand-written argv tends to carry.
+            authority
+        };
+        // An IPv6 zone identifier: `fe80::1%eth0`, and `%25eth0` once a URL has
+        // escaped the percent sign. It says which interface, not which host.
+        let host = host.split('%').next().unwrap_or_default();
+        if !host.is_empty() {
+            found.push(HostToken {
+                host: host.to_ascii_lowercase(),
+                from_url,
+            });
+        }
+    }
+    found
+}
+
+/// Why this address cannot appear in a registry entry, or `None` if it can.
+///
+/// A name is never resolved. `detector.internal` may well point at a private
+/// address on the network the entry was written on, and looking it up would
+/// make the answer depend on which machine ran the check and what DNS said
+/// that minute, so two people would get different verdicts on one file. This
+/// reads what is written down and nothing else.
+fn unshippable_address(token: &HostToken) -> Option<&'static str> {
+    if token.host == "localhost" || token.host.ends_with(".localhost") {
+        return Some("a name that resolves only on the machine that runs it");
+    }
+    let ip = match token.host.parse::<IpAddr>() {
+        Ok(ip) => ip,
+        // A host slot in a URL is a host, however it is spelled, and every
+        // HTTP client decodes these. `0x7f.1` and `2130706433` are both
+        // 127.0.0.1 and neither one looks like an address to a reader.
+        Err(_) if token.from_url => IpAddr::V4(inet_aton(&token.host)?),
+        Err(_) => return None,
+    };
+    classify(ip)
+}
+
+fn classify(ip: IpAddr) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                Some("a loopback address, which is only ever this machine")
+            } else if v4.is_unspecified() {
+                Some("the unspecified address, which names no host at all")
+            } else if v4.is_private() {
+                Some("a private-network address, which means something different on every network")
+            } else if v4.is_link_local() {
+                Some("a link-local address, the range the cloud metadata service also sits in")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            if v6.is_loopback() {
+                Some("a loopback address, which is only ever this machine")
+            } else if v6.is_unspecified() {
+                Some("the unspecified address, which names no host at all")
+            // `::ffff:127.0.0.1` and the older `::127.0.0.1` are both the
+            // loopback wearing a different spelling. Asked after the two
+            // above, because `::1` also carries an IPv4 tail and it is not
+            // 0.0.0.1.
+            } else if let Some(v4) = v6.to_ipv4() {
+                classify(IpAddr::V4(v4))
+            } else if first & 0xfe00 == 0xfc00 {
+                Some("a unique-local address, which means something different on every network")
+            } else if first & 0xffc0 == 0xfe80 {
+                Some("a link-local address, the range the cloud metadata service also sits in")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// The historical `inet_aton` spellings of an IPv4 address: one to four parts,
+/// each decimal, octal or hexadecimal, with the last part filling whatever
+/// bytes are left over.
+///
+/// Used only for a host taken from a URL. It is what browsers, curl and
+/// Python's urllib all accept, so a check that reads only dotted quads has a
+/// hole in it that anybody can walk through by accident.
+fn inet_aton(host: &str) -> Option<Ipv4Addr> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut values = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let (digits, radix) =
+            if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+                (hex, 16)
+            } else if part.len() > 1 && part.starts_with('0') {
+                (&part[1..], 8)
+            } else {
+                (*part, 10)
+            };
+        if digits.is_empty() {
+            return None;
+        }
+        values.push(u32::from_str_radix(digits, radix).ok()?);
+    }
+    // Every part but the last is one byte; the last fills the rest.
+    let last = values.pop()?;
+    if values.iter().any(|v| *v > 255) {
+        return None;
+    }
+    let remaining_bytes = 4 - values.len();
+    if remaining_bytes < 4 && last >= 1u32 << (8 * remaining_bytes) {
+        return None;
+    }
+    let mut addr: u32 = 0;
+    for (i, v) in values.iter().enumerate() {
+        addr |= v << (8 * (3 - i));
+    }
+    Some(Ipv4Addr::from(addr | last))
+}
+
 impl Entry {
+    /// Every string that decides what actually gets executed, labelled the way
+    /// the entry's own file spells it.
+    ///
+    /// `upstream` is included although nothing executes it: it is a URL, so
+    /// reading it as one is safe, and a private address there would ship just
+    /// as far. `notes` is excluded, because it is prose and a note explaining
+    /// that this tool has no default endpoint would otherwise refuse the entry
+    /// that explains it.
+    fn invocation_fields(&self) -> Vec<(String, &str)> {
+        let mut fields: Vec<(String, &str)> = Vec::new();
+        if let Some(upstream) = &self.upstream {
+            fields.push(("upstream".into(), upstream.as_str()));
+        }
+        if let Some(img) = &self.image {
+            fields.push(("image.reference".into(), img.reference.as_str()));
+        }
+        if let Some(bin) = &self.binary {
+            for (i, a) in bin.command.iter().enumerate() {
+                fields.push((format!("binary.command[{i}]"), a.as_str()));
+            }
+            for (i, a) in bin.version_args.iter().enumerate() {
+                fields.push((format!("binary.version_args[{i}]"), a.as_str()));
+            }
+        }
+        if let Some(inv) = &self.invoke {
+            for (i, a) in inv.argv.iter().enumerate() {
+                fields.push((format!("invoke.argv[{i}]"), a.as_str()));
+            }
+            for (i, kv) in inv.env.iter().enumerate() {
+                fields.push((format!("invoke.env[{i}]"), kv.as_str()));
+            }
+            if let Some(a) = &inv.adapter {
+                fields.push(("invoke.adapter".into(), a.as_str()));
+            }
+            if let Some(e) = &inv.entrypoint {
+                fields.push(("invoke.entrypoint".into(), e.as_str()));
+            }
+            if let Some(o) = &inv.output_file {
+                fields.push(("invoke.output_file".into(), o.as_str()));
+            }
+        }
+        if let Some(rt) = &self.roundtrip {
+            for (i, a) in rt.embed_argv.iter().enumerate() {
+                fields.push((format!("roundtrip.embed_argv[{i}]"), a.as_str()));
+            }
+            for (i, a) in rt.extract_argv.iter().enumerate() {
+                fields.push((format!("roundtrip.extract_argv[{i}]"), a.as_str()));
+            }
+            if let Some(e) = &rt.entrypoint {
+                fields.push(("roundtrip.entrypoint".into(), e.as_str()));
+            }
+        }
+        fields
+    }
+
+    /// Refuses an entry that ships an address nobody outside one network can
+    /// reach.
+    ///
+    /// `plugins/registry/detectors/stegashield.toml` carried
+    /// `http://172.24.0.2:3000/api/analyze` as a default while the comment
+    /// three lines above it explained why there must not be one. Two costs,
+    /// and the smaller one is the leak: an entry that defaults to an address
+    /// scores against whatever answers there, so a run can quietly measure a
+    /// different service from the one the result names.
+    fn check_no_shipped_address(&self, bad: &mut Vec<String>) {
+        for (field, text) in self.invocation_fields() {
+            if text.len() > INVOCATION_FIELD_MAX_BYTES {
+                bad.push(format!(
+                    "{}: {field} is {} bytes, over the {INVOCATION_FIELD_MAX_BYTES} byte \
+                     limit this check reads, so it cannot be checked for a private \
+                     address. Shorten it, or move what it carries into a script",
+                    self.name,
+                    text.len()
+                ));
+                continue;
+            }
+            for token in hosts_in(text) {
+                if let Some(why) = unshippable_address(&token) {
+                    bad.push(format!(
+                        "{}: {field} names {}: {why}. A benchmark cannot ship \
+                         an address: it scores against whatever answers there, and a \
+                         reader of the result has no way to know what that was. Leave \
+                         it out and have whoever runs it supply the address from the \
+                         environment",
+                        self.name, token.host
+                    ));
+                }
+            }
+        }
+    }
+
     /// Rules a TOML parser cannot express.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut bad = Vec::new();
@@ -622,6 +892,8 @@ impl Entry {
                 }
             }
         }
+
+        self.check_no_shipped_address(&mut bad);
 
         // A secret that looks like it holds a value rather than naming one.
         for s in &self.secrets {
@@ -994,6 +1266,233 @@ version_args = ["-v"]"#,
     }
 }
 
+/// An address a registry entry ships is an address a stranger's run reaches
+/// for, so every spelling of one is worth a test here.
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    /// A valid host-adapter entry whose one env line is the caller's.
+    fn with_env(kv: &str) -> Entry {
+        toml::from_str(&format!(
+            r#"
+name = "x"
+kind = "detector"
+licence = "MIT"
+
+[binary]
+command = ["x"]
+version_args = ["--version"]
+
+[invoke]
+host = true
+adapter = "plugins/adapters/x.py"
+argv = ["{{adapter}}", "{{file}}"]
+env = ["{kv}"]
+parser = "number"
+
+[selftest]
+must_detect = "a.png"
+must_clear = "b.png"
+"#
+        ))
+        .expect("parses")
+    }
+
+    fn refused(kv: &str) -> String {
+        let problems = match with_env(kv).validate() {
+            Ok(()) => String::new(),
+            Err(problems) => problems.join("\n"),
+        };
+        assert!(
+            problems.contains("cannot ship an address"),
+            "{kv} was accepted, or refused for another reason: {problems}"
+        );
+        problems
+    }
+
+    fn accepted(kv: &str) {
+        if let Err(problems) = with_env(kv).validate() {
+            panic!("{kv} was refused: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn every_unroutable_range_is_refused() {
+        for address in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "10.0.0.5",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.24.0.2",
+            "172.31.255.254",
+            "192.168.1.1",
+            "169.254.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+        ] {
+            refused(&format!("ENDPOINT=http://{address}:3000/api/analyze"));
+        }
+    }
+
+    /// `172.16.0.0/12` is the range a substring check gets wrong. `172.16.` as
+    /// text misses `172.24.0.2`, which is the address that prompted this, and
+    /// `172.` as text would refuse the public `172.217.x` that Google serves
+    /// from. Both edges of the real range are tested, in both directions.
+    #[test]
+    fn the_twelve_bit_private_range_is_bounded_at_both_ends() {
+        refused("ENDPOINT=http://172.16.0.0:8080/");
+        refused("ENDPOINT=http://172.31.255.255:8080/");
+        accepted("ENDPOINT=http://172.15.255.255:8080/");
+        accepted("ENDPOINT=http://172.32.0.1:8080/");
+        accepted("ENDPOINT=http://172.217.16.142:8080/");
+    }
+
+    #[test]
+    fn a_public_address_or_a_hostname_passes() {
+        accepted("ENDPOINT=http://93.184.216.34:3000/api/analyze");
+        accepted("ENDPOINT=https://detector.example.org/api/analyze?v=2");
+        accepted("PYTHONPATH=/opt/aletheia");
+        accepted("OMP_NUM_THREADS=1");
+    }
+
+    /// Three IPv6 spellings of the same machine, and none of them contains a
+    /// dot to hunt for.
+    #[test]
+    fn ipv6_loopback_is_refused_however_it_is_written() {
+        refused("ENDPOINT=http://[::1]:3000/api/analyze");
+        refused("ENDPOINT=http://[::ffff:127.0.0.1]:3000/");
+        // The older IPv4-compatible spelling, which carries no `ffff` marker.
+        refused("ENDPOINT=http://[::10.1.2.3]:3000/");
+        refused("ENDPOINT=[::1]");
+        refused("ENDPOINT=http://[fe80::1%25eth0]:3000/");
+        refused("ENDPOINT=http://[fd00::2]:3000/");
+        accepted("ENDPOINT=http://[2606:2800:220:1:248:1893:25c8:1946]:3000/");
+    }
+
+    /// The gap a dotted-quad check leaves. Every HTTP client reads all four of
+    /// these as the loopback, and none of them looks like an address.
+    #[test]
+    fn a_numerically_encoded_host_in_a_url_is_decoded_rather_than_waved_through() {
+        refused("ENDPOINT=http://2130706433/api/analyze");
+        refused("ENDPOINT=http://0177.0.0.1/");
+        refused("ENDPOINT=http://0x7f.0x0.0x0.0x1/");
+        refused("ENDPOINT=http://127.1/");
+        // 3232235777 is 192.168.0.1.
+        refused("ENDPOINT=http://3232235777:8080/");
+    }
+
+    /// The same decoding outside a URL would refuse an ordinary number, and a
+    /// check that fires on `--threads 2130706433` is one somebody turns off.
+    #[test]
+    fn a_bare_number_in_an_argument_is_a_number() {
+        accepted("THREADS=2130706433");
+        accepted("SEED=127.1");
+    }
+
+    #[test]
+    fn a_host_hiding_behind_userinfo_or_a_long_path_is_still_found() {
+        refused("ENDPOINT=http://user:pass@192.168.0.7:3000/api/analyze#top");
+        refused("ENDPOINT=http://localhost:3000/a/b/c?d=e");
+        refused("ENDPOINT=HTTP://LOCALHOST/");
+        refused("ENDPOINT=http://api.localhost/");
+    }
+
+    /// Every field that decides what runs, not only `invoke.env`.
+    #[test]
+    fn argv_and_the_binary_command_are_checked_too() {
+        let mut e = with_env("PYTHONPATH=/opt/x");
+        e.invoke.as_mut().unwrap().argv =
+            vec!["{adapter}".into(), "--api=http://10.1.2.3/x".into()];
+        let problems = e.validate().expect_err("an address in argv is refused");
+        assert!(
+            problems.iter().any(|p| p.contains("invoke.argv[1]")),
+            "the wrong field was named: {problems:?}"
+        );
+
+        let mut e = with_env("PYTHONPATH=/opt/x");
+        e.binary.as_mut().unwrap().command = vec!["curl".into(), "http://127.0.0.1:9/".into()];
+        let problems = e
+            .validate()
+            .expect_err("an address in the command is refused");
+        assert!(
+            problems.iter().any(|p| p.contains("binary.command[1]")),
+            "the wrong field was named: {problems:?}"
+        );
+    }
+
+    /// A refusal that does not say which entry, which line and which address
+    /// sends the reader to grep for it, which is the moment the check stops
+    /// being worth having.
+    #[test]
+    fn the_refusal_names_the_entry_the_field_and_the_address() {
+        let problems = refused("STEGASHIELD_ENDPOINT=http://172.24.0.2:3000/api/analyze");
+        assert!(problems.contains("x: "), "no entry name: {problems}");
+        assert!(problems.contains("invoke.env[0]"), "no field: {problems}");
+        assert!(problems.contains("172.24.0.2"), "no address: {problems}");
+        assert!(
+            problems.contains("private-network"),
+            "no reason: {problems}"
+        );
+    }
+
+    /// Skipping an over-long field would mean a file could opt out of the
+    /// check by padding, so the entry is refused instead.
+    #[test]
+    fn a_field_too_long_to_read_is_refused_rather_than_skipped() {
+        let mut e = with_env("PYTHONPATH=/opt/x");
+        let padded = format!(
+            "ENDPOINT=http://127.0.0.1/{}",
+            "a".repeat(INVOCATION_FIELD_MAX_BYTES)
+        );
+        e.invoke.as_mut().unwrap().env = vec![padded];
+        let problems = e.validate().expect_err("an unreadable field is refused");
+        assert!(
+            problems.iter().any(|p| p.contains("cannot be checked")),
+            "got: {problems:?}"
+        );
+    }
+
+    /// `upstream` is where somebody sends a reader to find the tool. An
+    /// internal one is both unreachable and a disclosure.
+    #[test]
+    fn a_private_upstream_url_is_refused_although_nothing_runs_it() {
+        let mut e = with_env("PYTHONPATH=/opt/x");
+        e.upstream = Some("http://10.20.30.40:8080/registry/my-detector".into());
+        let problems = e.validate().expect_err("a private upstream is refused");
+        assert!(
+            problems.iter().any(|p| p.contains("upstream")),
+            "the wrong field was named: {problems:?}"
+        );
+    }
+
+    /// The prose fields are excluded on purpose, and it has to stay that way:
+    /// the comment explaining why there is no default endpoint would otherwise
+    /// refuse the entry that carries it.
+    #[test]
+    fn a_note_explaining_the_rule_does_not_trip_the_rule() {
+        let mut e = with_env("PYTHONPATH=/opt/x");
+        e.notes = Some("There is no default, not even http://localhost:3000/.".into());
+        assert_eq!(e.validate(), Ok(()));
+    }
+
+    /// The whole point is the shipped files, so the shipped files are the test.
+    #[test]
+    fn nothing_in_the_registry_this_repository_ships_carries_one() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry");
+        let reg = Registry::load(&dir).unwrap_or_else(|e| {
+            panic!("the shipped registry no longer loads: {e}");
+        });
+        assert!(
+            reg.entries.len() >= 10,
+            "only {} entries loaded from {}, so this test is not looking at the real registry",
+            reg.entries.len(),
+            dir.display()
+        );
+    }
+}
+
 #[cfg(test)]
 mod load_tests {
     use super::*;
@@ -1324,6 +1823,30 @@ must_clear = "b.png"
         let entry: Entry = toml::from_str(&body).expect("the example parses as TOML");
         if let Err(problems) = entry.validate() {
             panic!("the README example is refused by the registry: {problems:?}");
+        }
+    }
+
+    /// The same rule for the guide's worked example, for the same reason: the
+    /// page walks a team who have never used this tool through writing their
+    /// first entry, and they will copy the block rather than read it.
+    #[test]
+    fn the_http_guide_example_entry_is_one_the_registry_accepts() {
+        let page = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/guide/http-detector.md"),
+        )
+        .expect("the guide page is two levels up from this crate");
+
+        let start = page
+            .find("name = \"my-detector\"")
+            .expect("the page still carries a detector example");
+        let block = &page[start..];
+        let end = block.find("```").expect("the example is a fenced block");
+        let body = block[..end].replace("sha256:...", &format!("sha256:{}", "a".repeat(64)));
+
+        let entry: Entry = toml::from_str(&body).expect("the example parses as TOML");
+        if let Err(problems) = entry.validate() {
+            panic!("the guide example is refused by the registry: {problems:?}");
         }
     }
 }
