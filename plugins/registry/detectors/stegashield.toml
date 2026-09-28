@@ -49,6 +49,11 @@ host = true
 adapter = "plugins/adapters/stegashield_one.py"
 entrypoint = "python3"
 argv = ["{adapter}", "{file}"]
+# The NAME of the variable, never its value. Naming it is what lets `doctor`
+# and `score` say "you have not told us where your instance is" before a run
+# starts, instead of leaving it to be discovered image by image as the
+# adapter's own refusal once a corpus is already under way.
+endpoint_env = "STEGASHIELD_ENDPOINT"
 #
 # WHAT TO SUPPLY, AND WHY IT IS NOT SUPPLIED HERE
 # -----------------------------------------------

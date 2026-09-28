@@ -258,7 +258,7 @@ fn run_host_adapter(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading
     let program = invoke
         .entrypoint
         .clone()
-        .unwrap_or_else(|| "python3".into());
+        .unwrap_or_else(|| crate::DEFAULT_HOST_ENTRYPOINT.into());
     let argv: Vec<String> = invoke
         .argv
         .iter()

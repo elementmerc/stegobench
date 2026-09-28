@@ -412,8 +412,33 @@ pub struct Invoke {
     /// The image reference stays in the entry because it is still what
     /// identifies the subject in a result. It is never vendored: it is a third
     /// party's artefact, referenced by digest and pulled by whoever runs it.
+    ///
+    /// It is NOT a statement about this machine. The instance being scored
+    /// normally runs on another host, so whether the image happens to be
+    /// pulled here says nothing about whether a run can proceed, and the
+    /// availability check deliberately does not ask.
     #[serde(default)]
     pub host: bool,
+    /// The NAME of the environment variable carrying the service's address.
+    ///
+    /// A name, never a value, for the same reason `secrets` is names only: an
+    /// address written into a registry entry is a default, and a default is
+    /// scored against whatever answers on it, so a result can name one
+    /// detector while measuring another. This field is how an entry can still
+    /// say which variable a user is expected to export without carrying what
+    /// goes in it, and `is_env_var_name` is what stops the address being
+    /// written here instead: a URL is not the name of a variable, so the
+    /// shortcut is refused rather than merely discouraged.
+    ///
+    /// Declaring it is what lets the harness tell two situations apart before
+    /// a run starts: nobody has said where the service is, and the service is
+    /// not answering. Without it the first is only discovered image by image,
+    /// as the adapter's own refusal, once a corpus is already under way.
+    ///
+    /// Optional, because not every host adapter talks to a network service.
+    /// Meaningless without `host`, and refused there rather than ignored.
+    #[serde(default)]
+    pub endpoint_env: Option<String>,
     /// Which built-in parser reads the output. Named rather than described,
     /// because these formats are quirky enough that a rule in TOML would be a
     /// small programming language nobody wants to debug.
@@ -649,6 +674,29 @@ fn inet_aton(host: &str) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(addr | last))
 }
 
+/// The longest environment variable name a registry entry may declare.
+///
+/// The same 64 the `secrets` check uses, and for the same reason: no real
+/// variable name is that long, so something over it almost certainly has a
+/// value pasted into it.
+const ENV_VAR_NAME_MAX: usize = 64;
+
+/// Does this read as the NAME of an environment variable rather than a value?
+///
+/// Deliberately stricter than "contains no equals sign". The mistake this
+/// catches is somebody writing the address itself where the variable's name
+/// belongs, and `http://10.1.2.3:3000/api/analyze` carries no equals sign at
+/// all. The shape below is what POSIX allows and what every shell exports.
+fn is_env_var_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > ENV_VAR_NAME_MAX {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap_or_default();
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl Entry {
     /// Every string that decides what actually gets executed, labelled the way
     /// the entry's own file spells it.
@@ -867,6 +915,41 @@ impl Entry {
                      nowhere for the tool to write it"
                         .into(),
                 );
+            }
+
+            // A host entry runs the adapter and nothing else: there is no
+            // command inside the image to fall back to, so an entry without
+            // one names no program at all. Refused at load rather than
+            // discovered as a self-test failure, because `list` and `describe`
+            // would otherwise show a tool that can never be run.
+            if inv.host && inv.adapter.is_none() {
+                bad.push(
+                    "invoke.host is set but no adapter is declared, and a host \
+                     invoke runs the adapter rather than anything in the image. \
+                     Add adapter = \"plugins/adapters/....py\""
+                        .into(),
+                );
+            }
+
+            if let Some(name) = &inv.endpoint_env {
+                if !inv.host {
+                    bad.push(format!(
+                        "invoke.endpoint_env names {name:?} but invoke.host is \
+                         not set. Only a host adapter is handed this machine's \
+                         environment, so the variable would be read by nothing; \
+                         set host = true or drop the field"
+                    ));
+                }
+                if !is_env_var_name(name) {
+                    bad.push(format!(
+                        "invoke.endpoint_env is {name:?}, which is not the name \
+                         of an environment variable. This field names the \
+                         variable that carries the service's address; the \
+                         address itself must never be written here, because an \
+                         address in a file is a default and a default is scored \
+                         against whatever answers on it"
+                    ));
+                }
             }
         }
 
@@ -1253,6 +1336,104 @@ version_args = ["-v"]"#,
             "secrets = [\"{long}\"]\n[binary]\ncommand = [\"y\"]\nversion_args = [\"-v\"]\n"
         ));
         assert!(e.validate().unwrap_err()[0].contains("looks like a value"));
+    }
+
+    /// A host invoke runs the adapter and nothing else, so an entry without
+    /// one declares no program at all.
+    #[test]
+    fn a_host_invoke_without_an_adapter_is_refused() {
+        let e = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [invoke]\nhost = true\nargv = [\"{file}\"]\nparser = \"number\"",
+        );
+        let problems = e.validate().expect_err("a host entry with no adapter");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("no adapter is declared")),
+            "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_invoke_with_an_adapter_and_an_endpoint_variable_is_valid() {
+        let e = parse(&format!(
+            "[image]\nreference = \"ghcr.io/x/y@sha256:{A_REAL_DIGEST}\"\nsize_mb = 1250\n\
+             bundled = false\n\
+             [invoke]\nhost = true\nadapter = \"plugins/adapters/x.py\"\n\
+             argv = [\"{{adapter}}\", \"{{file}}\"]\nparser = \"number\"\n\
+             endpoint_env = \"X_ENDPOINT\""
+        ));
+        assert_eq!(e.validate(), Ok(()));
+        assert_eq!(
+            e.invoke.unwrap().endpoint_env.as_deref(),
+            Some("X_ENDPOINT")
+        );
+    }
+
+    /// Only a host adapter is handed this machine's environment, so the field
+    /// would be read by nothing. A field that silently does nothing is worse
+    /// than one that is refused, because the entry looks configured.
+    #[test]
+    fn an_endpoint_variable_without_a_host_invoke_is_refused_rather_than_ignored() {
+        let e = parse(&format!(
+            "[image]\nreference = \"ghcr.io/x/y@sha256:{A_REAL_DIGEST}\"\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"\n\
+             endpoint_env = \"X_ENDPOINT\""
+        ));
+        let problems = e.validate().expect_err("endpoint_env without host");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("invoke.host is not set")),
+            "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    /// The mistake the field exists to make impossible: the address written
+    /// where the variable's name belongs. None of these carries an equals
+    /// sign, so a "looks like a value" test of the `secrets` shape waves them
+    /// all through.
+    #[test]
+    fn an_address_written_into_the_endpoint_variable_name_is_refused() {
+        for written in [
+            "http://10.1.2.3:3000/api/analyze",
+            "10.1.2.3:3000",
+            "detector.example.org",
+            "",
+            "X ENDPOINT",
+            "9_LIVES",
+        ] {
+            let e = parse(&format!(
+                "[image]\nreference = \"ghcr.io/x/y@sha256:{A_REAL_DIGEST}\"\n\
+                 [invoke]\nhost = true\nadapter = \"plugins/adapters/x.py\"\n\
+                 argv = [\"{{adapter}}\"]\nparser = \"number\"\n\
+                 endpoint_env = \"{written}\""
+            ));
+            let problems = match e.validate() {
+                Ok(()) => panic!("{written:?} was accepted as a variable name"),
+                Err(problems) => problems,
+            };
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("not the name of an environment variable")),
+                "{written:?} was refused for the wrong reason: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_long_endpoint_variable_name_is_refused_too() {
+        assert!(is_env_var_name(&"X".repeat(ENV_VAR_NAME_MAX)));
+        assert!(!is_env_var_name(&"X".repeat(ENV_VAR_NAME_MAX + 1)));
+    }
+
+    #[test]
+    fn ordinary_variable_names_are_accepted() {
+        for name in ["X_ENDPOINT", "_PRIVATE", "A1", "STEGASHIELD_ENDPOINT"] {
+            assert!(is_env_var_name(name), "{name} should be a valid name");
+        }
     }
 
     #[test]

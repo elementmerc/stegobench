@@ -82,6 +82,9 @@ adapter = "plugins/adapters/my_detector_one.py"
 entrypoint = "python3"
 argv = ["{adapter}", "{file}"]
 parser = "number"                      # the adapter prints one number
+endpoint_env = "MY_DETECTOR_ENDPOINT"  # the NAME of the variable that carries
+                                       # your instance's address, never the
+                                       # address itself
 
 [selftest]
 must_detect = "fixtures/lsb-0.4bpp.png"
@@ -113,18 +116,26 @@ field is missing reads as the most confident possible "clean", which is the
 opposite of not knowing, and it is indistinguishable from a working detector
 that found nothing.
 
-### The image still has to be on this machine
+### What the image reference is for, and what it is not
 
-The image digest is what identifies the subject in the result, so the harness
-checks it is really here before it starts a run. If your service runs on
-another host, pull the same image locally anyway:
+The digest is what a result names as the subject. It is how somebody reading
+your number can fetch the identical bytes and run them again, which is the
+whole point of pinning it, and that is why the entry still requires it.
 
-```sh
-docker pull example.com/you/my-detector@sha256:...
-```
+It is a fact about the artefact rather than about this machine, and the harness
+treats it that way. **Your service does not have to run on the machine running
+the harness, and the image does not have to be pulled here.** Running it on
+another host is the normal arrangement and nothing asks you to duplicate it
+locally.
 
-Without it, `doctor` reports the tool MISSING and does not attempt the
-self-test, and `score` refuses before scoring anything and exits 3.
+What `doctor` and `score` check instead is the thing they would actually
+launch: the adapter file, the interpreter named by `entrypoint`, and whether
+you have told them where your instance is. Those three are what a run here
+depends on.
+
+The adapter path is resolved against the directory you run from, so a run
+started somewhere else reports `adapter ... could not be opened` and names the
+path it tried. An absolute path in the entry avoids the question.
 
 ## 4. Supply the endpoint
 
@@ -162,6 +173,23 @@ rather than in a file that reaches everybody who clones the repository. The
 same goes for a licence token: name the variable in `secrets`, and the harness
 reports it as missing without ever reading its value.
 
+`endpoint_env` in the entry names that variable so the harness can tell you
+about it before a run starts instead of after. The address never goes in the
+entry; the variable's name does, and the harness reads the variable only to see
+whether there is something in it. An entry that writes an address there is
+refused, because `http://10.1.2.3:3000/api/score` is not the name of an
+environment variable.
+
+Two situations look similar and are not, so they get different answers:
+
+| What `doctor` says | What it means | What to do |
+|---|---|---|
+| `unknown   MY_DETECTOR_ENDPOINT is not set to an address` | Nobody has said where your instance is, so there is nothing to ask | Start the service, export the variable |
+| `present ... SELF TEST FAILED (could not reach ...)` | The adapter ran and the address did not answer | Check the service is up and reachable from here |
+
+The first stops `score` in pre-flight with exit 3 rather than letting a long
+run discover it image by image.
+
 ## 5. Prove it works, in both directions
 
 ```sh
@@ -191,8 +219,10 @@ their own scale. It is a smoke-test decision point against a deliberately loud
 fixture, and **it is not a calibrated operating point**. Real thresholds come
 from a false-alarm budget on a real corpus.
 
-If the endpoint is unset or wrong, the self-test fails with the adapter's own
-message rather than a generic one, which is usually enough to tell you which.
+If the endpoint is set but wrong, the self-test fails with the adapter's own
+message, naming the address it could not reach. If it is unset, the self-test
+is not attempted at all and the line says so instead, because a tool nobody has
+pointed anywhere is not a tool that failed.
 
 ## 6. Score a corpus
 

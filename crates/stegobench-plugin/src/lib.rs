@@ -101,6 +101,14 @@ pub enum PluginError {
     BadOutput { name: String, reason: String },
 }
 
+/// What runs a host adapter when its entry names no entrypoint.
+///
+/// One constant rather than two literals, because the availability check and
+/// the runner have to agree about which program they are talking about: a
+/// `doctor` line saying the tool is here, against an interpreter a run then
+/// fails to launch, is the exact drift this file's neighbours exist to stop.
+pub const DEFAULT_HOST_ENTRYPOINT: &str = "python3";
+
 /// The SHA256 of a file, which is how a binary plugin is pinned.
 ///
 /// Stronger than a tag: a tag can be moved under you by whoever published it,

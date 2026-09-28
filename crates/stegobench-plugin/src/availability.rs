@@ -15,14 +15,36 @@
 //! answered "does it work". `doctor` prints both states separately and never
 //! lets the first stand in for the second, because a machine reported healthy
 //! by a check that cannot fail is worse than one nobody checked.
+//!
+//! WHAT "HERE" MEANS, WHICH IS NOT ALWAYS THE SAME THING
+//! ----------------------------------------------------
+//! Presence asks about the program a run would actually launch, and for the
+//! three routes that is three different programs: a container image, a binary
+//! on PATH, or, for a tool that is a SERVICE, the adapter script that posts to
+//! it. An entry setting `invoke.host` names an image, but nothing ever runs
+//! that image here, so asking the container runtime about it answers a
+//! question no run poses. It used to, and the cost was exact: `score` refused
+//! to start against a service running on another host until the user pulled an
+//! image nothing would use, and `doctor` skipped the self-test, which is the
+//! only check that would have proved the service answers at all.
+//!
+//! For a service, then, "here" is a narrower claim than usual. The adapter is
+//! here and can be run, and an address has been supplied. Whether anything is
+//! listening at that address is the self-test's question, and nothing in this
+//! file goes and asks it.
 
+use std::path::Path;
 use std::process::Command;
 
-use stegobench_core::registry::Entry;
+use stegobench_core::registry::{Entry, Invoke};
 
 use crate::{binary_version, hash_file, which};
 
-/// Whether the tool's code is on this machine.
+/// Whether the code a run would launch is on this machine.
+///
+/// Deliberately "the code a run would launch" rather than "the tool". For a
+/// service the two differ: what runs here is the adapter, and the tool itself
+/// is somewhere else entirely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presence {
     /// Here, and pinned to this exact version.
@@ -161,14 +183,19 @@ pub fn check(entry: &Entry) -> Availability {
 
 /// Does this entry rule out the machine we are on?
 ///
-/// Only a locally installed program can be ruled out this way. A container is a
+/// Only an entry whose program runs on THIS machine can be ruled out this way,
+/// which is a locally installed binary or a host adapter. A container is a
 /// Linux image wherever it runs, and on macOS and Windows the container runtime
 /// supplies the Linux to run it in, so a platform list on an image entry would
-/// describe the image's contents rather than where it can be used. An entry
-/// that says nothing is not ruled out: unstated is a question nobody answered,
-/// not a claim that it runs everywhere.
+/// describe the image's contents rather than where it can be used. A host
+/// adapter is the opposite case: the image may well be Linux and irrelevant,
+/// because the script runs here, so a platform list on one is a statement about
+/// this machine and is honoured. An entry that says nothing is not ruled out:
+/// unstated is a question nobody answered, not a claim that it runs everywhere.
 fn unsupported_here(entry: &Entry) -> Option<Presence> {
-    if entry.platforms.is_empty() || entry.binary.is_none() {
+    let runs_on_this_machine =
+        entry.binary.is_some() || entry.invoke.as_ref().is_some_and(|i| i.host);
+    if entry.platforms.is_empty() || !runs_on_this_machine {
         return None;
     }
     let here = std::env::consts::OS;
@@ -184,7 +211,128 @@ fn unsupported_here(entry: &Entry) -> Option<Presence> {
     })
 }
 
+/// Can the adapter for a SERVICE entry run on this machine?
+///
+/// `invoke.host = true` says the thing to run is here rather than inside the
+/// image, and [`crate::selftest::read_one`] means it literally: it launches
+/// `invoke.entrypoint` with the adapter script and never touches the image at
+/// all. So presence asks about exactly that program. Asking whether the image
+/// is pulled would answer a question no run ever poses, and it is the question
+/// this check used to answer: the image arm matched first, so a service
+/// running on another host, which is the normal arrangement, was reported
+/// missing and `score` refused to start until the user pulled an image nothing
+/// would run.
+///
+/// **The image reference stays required, and still means what it meant.** It
+/// is what a result names as the subject, pinned by digest so somebody else
+/// can fetch the identical bytes. It is a fact about the artefact, not about
+/// this machine, and the two were being conflated.
+///
+/// NOTHING HERE TOUCHES THE NETWORK, ON PURPOSE
+/// --------------------------------------------
+/// A probe of the service would answer the question this module refuses to
+/// answer, which is whether the tool WORKS, and it would answer it badly: the
+/// strongest thing a bare connection can report is that something accepted it
+/// on that port. The self-test already asks the real question, by posting a
+/// fixture and reading the number back, and because presence no longer waits
+/// on a pulled image `doctor` now actually reaches it. A probe would also send
+/// a request to somebody else's service every time a user typed `doctor`.
+///
+/// So the two situations the reader has to tell apart are told apart by the
+/// two columns that already exist: an unset endpoint is a presence answer, and
+/// a service that is down is a self-test failure carrying the adapter's own
+/// message about the address it could not reach.
+fn host_adapter_present(invoke: &Invoke) -> Presence {
+    // Refused by `Entry::validate`, so this is only reachable for an entry
+    // built in memory. It is still an entry fault rather than a missing
+    // install, which is why it is Unknown and not Absent.
+    let Some(rel) = &invoke.adapter else {
+        return Presence::Unknown {
+            reason: "invoke.host is set but the entry declares no adapter, so \
+                     it names no program to run"
+                .into(),
+        };
+    };
+
+    // Resolved exactly as `run_host_adapter` resolves it, against the working
+    // directory, so presence cannot say yes to a path a run would then fail to
+    // open. The hint is the whole of the difference between a two second fix
+    // and a bug report.
+    let adapter = match Path::new(rel).canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return Presence::Absent {
+                reason: format!(
+                    "adapter {rel} could not be opened: {e}. A relative path is \
+                     resolved against the directory you run from, so run from \
+                     the root of the clone or give the entry an absolute path"
+                ),
+            }
+        }
+    };
+
+    let program = invoke
+        .entrypoint
+        .clone()
+        .unwrap_or_else(|| crate::DEFAULT_HOST_ENTRYPOINT.into());
+    if which(&program).is_none() {
+        return Presence::Absent {
+            reason: format!("{program} is not on PATH, and it is what runs the adapter"),
+        };
+    }
+
+    // Asked last, because the first two are faults in the installation and
+    // this one is a thing the reader has not done yet.
+    if let Some(name) = &invoke.endpoint_env {
+        // Trimmed, because the adapter trims. A variable holding a space is
+        // unset as far as `stegashield_one.py` is concerned, and a presence
+        // check that disagreed with the thing it is predicting would send a
+        // corpus run off to fail on its first image.
+        let supplied =
+            std::env::var_os(name).is_some_and(|v| !v.to_string_lossy().trim().is_empty());
+        if !supplied {
+            // Unknown rather than Absent, and the distinction is the honest
+            // one: the adapter is here and runnable, and without an address
+            // there is no instance to ask, so whether this tool can run here
+            // is a question nobody has supplied the information to answer.
+            // Reporting it as Absent would send the reader looking for
+            // something to install.
+            //
+            // One line, because `doctor` prints one line per tool over a whole
+            // registry and a paragraph here pushes the other twelve off the
+            // screen. The reasoning lives in docs/guide/http-detector.md.
+            return Presence::Unknown {
+                reason: format!(
+                    "{name} is not set to an address, so there is no instance \
+                     to ask. Start your own and export it; there is no default"
+                ),
+            };
+        }
+    }
+
+    // The adapter's bytes, not the image's digest, and labelled so the two
+    // cannot be read for each other. This is what decides how the question is
+    // asked on this machine; the digest identifying the subject is in the
+    // entry and `describe` prints it.
+    match hash_file(&adapter) {
+        Ok(pin) => Presence::Present {
+            pin: format!("adapter {pin}"),
+        },
+        Err(e) => Presence::Unknown {
+            reason: format!("{} could not be read: {e}", adapter.display()),
+        },
+    }
+}
+
 fn present_here(entry: &Entry) -> Presence {
+    // A host adapter wins over both routes, and it has to win in exactly the
+    // order `read_one` dispatches: presence is only worth anything if it asks
+    // about the program a run would actually launch.
+    if let Some(invoke) = &entry.invoke {
+        if invoke.host {
+            return host_adapter_present(invoke);
+        }
+    }
     match (&entry.image, &entry.binary) {
         (Some(img), _) => image_present(&img.reference),
         (_, Some(bin)) => match bin.command.first() {
@@ -399,6 +547,298 @@ mod tests {
             !describe_json.contains(SENTINEL),
             "the token leaked into what `stegobench describe stegashield` would print"
         );
+    }
+
+    /// Everything a service entry needs on this machine, with the adapter and
+    /// the interpreter both real so only the thing under test can fail.
+    ///
+    /// `sh` stands in for `python3`: what is being checked is that presence
+    /// asks about the entrypoint the runner would launch, and an interpreter
+    /// that is on every Unix machine keeps the test from depending on which
+    /// Pythons happen to be installed.
+    struct Service {
+        _dir: tempfile::TempDir,
+        adapter: std::path::PathBuf,
+    }
+
+    impl Service {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let adapter = dir.path().join("service_one.sh");
+            std::fs::write(&adapter, b"#!/bin/sh\necho 0.9\n").expect("the adapter is written");
+            Service { _dir: dir, adapter }
+        }
+
+        /// A host entry pointing at that adapter.
+        ///
+        /// `top` and `invoke_extra` are separate because TOML assigns a bare
+        /// key to the table above it, so a `platforms` line written after
+        /// `[invoke]` becomes an invoke field that nothing reads, and the test
+        /// asserting on it passes for the wrong reason. `registry.rs`'s own
+        /// helper carries the same warning for the same reason.
+        fn entry(&self, top: &str, invoke_extra: &str) -> Entry {
+            let e = entry(&format!(
+                "name = \"svc\"\nkind = \"detector\"\nlicence = \"X\"\n{top}\
+                 [image]\nreference = \"r@sha256:abc\"\nsize_mb = 1250\nbundled = false\n\
+                 [invoke]\nhost = true\nentrypoint = \"sh\"\n\
+                 adapter = \"{}\"\nargv = [\"{{adapter}}\", \"{{file}}\"]\n\
+                 parser = \"number\"\n{invoke_extra}{SELFTEST}",
+                self.adapter.display()
+            ));
+            assert!(e.invoke.as_ref().expect("an invoke block").host);
+            e
+        }
+
+        /// The same entry with an endpoint variable declared.
+        fn with_endpoint(&self, var: &str) -> Entry {
+            let e = self.entry("", &format!("endpoint_env = \"{var}\"\n"));
+            assert_eq!(
+                e.invoke.as_ref().unwrap().endpoint_env.as_deref(),
+                Some(var),
+                "the fixture did not actually declare the variable"
+            );
+            e
+        }
+    }
+
+    /// The bug this file was opened for. A service entry was answered by
+    /// asking whether a container image was pulled, when the adapter never
+    /// runs that image and the instance being scored is normally on another
+    /// host entirely. `score` then refused with a pre-flight error and
+    /// `doctor` skipped the one check that would have proved the service
+    /// answers.
+    #[test]
+    fn a_service_entry_is_answered_by_its_adapter_and_not_by_its_image() {
+        let svc = Service::new();
+        let e = svc.entry("", "");
+        // The image in that entry is a reference nothing has ever pulled, so
+        // the old answer was a refusal and the new one must not be.
+        assert!(
+            !image_present(&e.image.as_ref().unwrap().reference).is_present(),
+            "the fixture's image turned out to be pulled, so this proves nothing"
+        );
+        let got = check(&e);
+        assert!(got.presence.is_present(), "got {:?}", got.presence);
+    }
+
+    #[test]
+    fn a_ready_service_is_pinned_by_the_adapters_bytes_and_says_so() {
+        let svc = Service::new();
+        let a = check(&svc.entry("", "")).presence;
+        let Presence::Present { pin } = &a else {
+            panic!("expected Present, got {a:?}");
+        };
+        assert!(
+            pin.starts_with("adapter sha256:"),
+            "the pin must say what it pinned, or it reads as the image digest: {pin}"
+        );
+        assert_eq!(
+            pin,
+            &format!("adapter {}", hash_file(&svc.adapter).expect("hashes")),
+            "the pin should be the bytes that actually run here"
+        );
+        // Truncated to 23 characters by `summary`, so the label has to survive
+        // the truncation or the line is worse than no line.
+        assert!(check(&svc.entry("", ""))
+            .summary()
+            .contains("adapter sha256"));
+    }
+
+    /// The other half of the situation the reader has to be told apart from a
+    /// service that is down. Nobody has said where the instance is, so there
+    /// is nothing to ask, and that is Unknown rather than a missing install:
+    /// there is no package to go and fetch.
+    #[test]
+    fn a_service_whose_endpoint_variable_is_unset_says_which_variable_and_why() {
+        const VAR: &str = "STEGOBENCH_TEST_UNSET_ENDPOINT_A";
+        std::env::remove_var(VAR);
+        let svc = Service::new();
+        let e = svc.with_endpoint(VAR);
+        match check(&e).presence {
+            Presence::Unknown { reason } => {
+                assert!(reason.contains(VAR), "the variable is not named: {reason}");
+                assert!(
+                    reason.contains("no default"),
+                    "it should say why there is no default: {reason}"
+                );
+            }
+            other => panic!("expected Unknown naming the variable, got {other:?}"),
+        }
+    }
+
+    /// An exported but empty variable is the same situation as an unset one:
+    /// `export FOO=` leaves the first behind, and a copied line with a stray
+    /// space leaves the second. The adapter trims before deciding, so this has
+    /// to agree with it or presence stops predicting what a run will do.
+    #[test]
+    fn an_empty_or_blank_endpoint_variable_counts_as_unset() {
+        for (i, blank) in ["", "   ", "\t\n"].iter().enumerate() {
+            let var = format!("STEGOBENCH_TEST_BLANK_ENDPOINT_{i}");
+            std::env::set_var(&var, blank);
+            let svc = Service::new();
+            let got = check(&svc.with_endpoint(&var)).presence;
+            std::env::remove_var(&var);
+            assert!(
+                matches!(got, Presence::Unknown { .. }),
+                "{blank:?} was taken for an address: {got:?}"
+            );
+        }
+    }
+
+    /// Present, because the adapter can run and it has been told where to ask.
+    /// Whether anything answers there is the self-test's question, and this
+    /// module must not pretend to have asked it: no request is made, so a
+    /// machine with no route to that address reaches the same answer, in the
+    /// same time, as one sitting next to the service.
+    #[test]
+    fn a_service_with_an_endpoint_set_is_present_without_anything_being_contacted() {
+        const VAR: &str = "STEGOBENCH_TEST_SET_ENDPOINT";
+        // An address on a documentation range that is not routed anywhere, so
+        // if this ever did reach out the test would stall rather than pass.
+        std::env::set_var(VAR, "http://198.51.100.7:3000/api/analyze");
+        let svc = Service::new();
+        let started = std::time::Instant::now();
+        let got = check(&svc.with_endpoint(VAR));
+        std::env::remove_var(VAR);
+        assert!(got.presence.is_present(), "got {:?}", got.presence);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a presence check that takes a second is one that went and asked"
+        );
+        assert_eq!(
+            got.verified, None,
+            "present must never be allowed to stand in for working"
+        );
+        assert!(got.summary().contains("not verified"));
+    }
+
+    /// The value of the endpoint is read only to see whether there is one. It
+    /// is not a secret, but it is one team's internal address and it has no
+    /// business in output somebody pastes into a bug report.
+    #[test]
+    fn the_endpoints_value_never_reaches_the_output() {
+        const VAR: &str = "STEGOBENCH_TEST_ENDPOINT_VALUE";
+        const SENTINEL: &str = "http://internal-host-do-not-print.invalid:3000/api/analyze";
+        std::env::set_var(VAR, SENTINEL);
+        let svc = Service::new();
+        let got = check(&svc.with_endpoint(VAR));
+        std::env::remove_var(VAR);
+        assert!(
+            !format!("{got:?}").contains("internal-host-do-not-print"),
+            "the address leaked into the output: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_service_whose_adapter_is_missing_says_where_it_looked() {
+        let svc = Service::new();
+        let mut e = svc.entry("", "");
+        e.invoke.as_mut().unwrap().adapter = Some("plugins/adapters/not-here-xyzzy.py".into());
+        match check(&e).presence {
+            Presence::Absent { reason } => {
+                assert!(reason.contains("not-here-xyzzy.py"), "{reason}");
+                assert!(
+                    reason.contains("directory you run from"),
+                    "the usual cause is the working directory: {reason}"
+                );
+            }
+            other => panic!("expected Absent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_service_whose_interpreter_is_not_installed_names_the_interpreter() {
+        let svc = Service::new();
+        let mut e = svc.entry("", "");
+        e.invoke.as_mut().unwrap().entrypoint = Some("definitely-not-a-runtime-xyzzy".into());
+        match check(&e).presence {
+            Presence::Absent { reason } => {
+                assert!(
+                    reason.contains("definitely-not-a-runtime-xyzzy"),
+                    "{reason}"
+                );
+                assert!(reason.contains("not on PATH"), "{reason}");
+            }
+            other => panic!("expected Absent, got {other:?}"),
+        }
+    }
+
+    /// `Entry::validate` refuses this, so it can only arrive from an entry
+    /// built in memory. It is an entry fault rather than a missing install,
+    /// and reporting it as Absent would send somebody looking for a package.
+    #[test]
+    fn a_host_entry_with_no_adapter_at_all_is_unknown() {
+        let svc = Service::new();
+        let mut e = svc.entry("", "");
+        e.invoke.as_mut().unwrap().adapter = None;
+        match check(&e).presence {
+            Presence::Unknown { reason } => assert!(reason.contains("no adapter"), "{reason}"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// A host adapter runs on THIS machine, so unlike a container a platform
+    /// list on one is a statement about this machine and has to be honoured.
+    #[test]
+    fn a_platform_list_does_rule_out_a_host_adapter_even_though_it_names_an_image() {
+        let elsewhere = match std::env::consts::OS {
+            "linux" => "windows",
+            _ => "linux",
+        };
+        let svc = Service::new();
+        let e = svc.entry(&format!("platforms = [\"{elsewhere}\"]\n"), "");
+        match check(&e).presence {
+            Presence::Unsupported { reason } => assert!(reason.contains(elsewhere), "{reason}"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_host_adapter_listing_this_platform_is_checked_normally() {
+        let svc = Service::new();
+        let e = svc.entry(&format!("platforms = [\"{}\"]\n", std::env::consts::OS), "");
+        assert!(check(&e).presence.is_present(), "{:?}", check(&e).presence);
+    }
+
+    /// The regression guard. An ordinary container entry is still answered by
+    /// asking the container runtime, and an ordinary binary entry by looking
+    /// on PATH; neither goes anywhere near the host-adapter path.
+    #[test]
+    fn a_container_entry_without_host_is_unaffected() {
+        let e = entry(
+            "name = \"x\"\nkind = \"detector\"\nlicence = \"X\"\n\
+             [image]\nreference = \"definitely-not-pulled-xyzzy@sha256:abc\"\n\
+             size_mb = 1\nbundled = true\n\
+             [invoke]\nadapter = \"plugins/adapters/x.py\"\nargv = [\"{file}\"]\n\
+             parser = \"number\"\n",
+        );
+        // Either Absent (a runtime said no) or Unknown (there is no runtime).
+        // Never Present, and never the adapter path, which would have found
+        // that adapter missing and said so in its own words.
+        match check(&e).presence {
+            Presence::Absent { reason } => assert!(reason.contains("docker pull"), "{reason}"),
+            Presence::Unknown { reason } => {
+                assert!(reason.contains("no container runtime"), "{reason}")
+            }
+            other => panic!("a container entry took another route: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_binary_entry_without_host_is_unaffected() {
+        let e = entry(&format!(
+            "name = \"sh\"\nkind = \"detector\"\nlicence = \"X\"\n\
+             [binary]\ncommand = [\"sh\"]\nversion_args = [\"--version\"]\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"\n{SELFTEST}"
+        ));
+        let a = check(&e).presence;
+        assert!(a.is_present(), "got {a:?}");
+        if let Presence::Present { pin } = &a {
+            assert!(
+                !pin.starts_with("adapter "),
+                "a binary entry was pinned as an adapter: {pin}"
+            );
+        }
     }
 
     #[test]
