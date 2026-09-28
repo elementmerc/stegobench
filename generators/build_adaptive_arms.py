@@ -72,6 +72,7 @@ import time
 import numpy as np
 
 from tiers import TierError, covers_in_tier_order, tier_name
+from tools import should_rebuild
 from PIL import Image
 
 try:
@@ -282,27 +283,11 @@ def main(argv: list[str] | None = None) -> int:
                         arm = f"{scheme}/{int(rate * 1000):04d}"
                         stego = out / arm / f"{stem}.png"
                         key = str(stego.relative_to(out))
-                        # `done` is the manifest. The file being on disk is
-                        # NOT the same thing, and treating it as equivalent is
-                        # what cost this corpus 118 covers: an interrupted run
-                        # left 2,478 images written with no manifest row, and
-                        # every later run skipped them BECAUSE they existed, so
-                        # the rows were never written and `pack_arms`, which
-                        # reads the manifest, never packed them. Twenty-one
-                        # arms shipped at 9,882 instead of 10,000 with every
-                        # digest matching and every count internally
-                        # consistent.
-                        #
-                        # So an image with no row is rebuilt rather than
-                        # skipped. The embedders are seeded, so a rebuild
-                        # reproduces the same bytes; the cost of being wrong
-                        # about that is one redundant write, and the cost of
-                        # the old behaviour was a silently incomplete corpus.
-                        if key in done:
+                        # The manifest is the record, not the file on disk.
+                        # See `should_rebuild`, which carries the reasoning and
+                        # the 118 covers it cost to learn it.
+                        if not should_rebuild(key, stego, done, counts):
                             continue
-                        if stego.is_file():
-                            counts["unrecorded"] = counts.get("unrecorded", 0) + 1
-                            stego.unlink()
                         try:
                             seed = (args.seed + index * 7919
                                     + int(rate * 100000)) % (2 ** 31)
@@ -391,17 +376,10 @@ def main(argv: list[str] | None = None) -> int:
                         arm = f"{scheme}/{int(rate * 1000):04d}"
                         stego = out / arm / f"{stem}.jpg"
                         key = str(stego.relative_to(out))
-                        # The same rule as the spatial loop above, for the same
-                        # reason: an image with no manifest row is one an
-                        # interrupted run wrote, and skipping it because it
-                        # exists is what leaves an arm short with every count
-                        # inside it consistent. This loop kept the old
-                        # behaviour when that one was fixed.
-                        if key in done:
+                        # The same rule as the spatial loop above, and now
+                        # literally the same code: see `should_rebuild`.
+                        if not should_rebuild(key, stego, done, counts):
                             continue
-                        if stego.is_file():
-                            counts["unrecorded"] = counts.get("unrecorded", 0) + 1
-                            stego.unlink()
                         seed = (args.seed + index * 7919
                                 + int(rate * 100000)) % (2 ** 31)
                         try:

@@ -20,6 +20,49 @@
 //! comparator.
 
 use std::cmp::Ordering;
+use std::fmt;
+
+/// Why a confusion count could not be taken honestly.
+///
+/// Hand written rather than derived, because this crate has no dependencies on
+/// purpose: a metric whose number needs an audit of somebody else's crate before
+/// it can be trusted is not the metric this benchmark wants to publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TallyError {
+    /// The two slices were built from different record sets.
+    LengthMismatch {
+        /// How many labels the caller handed over.
+        labels: usize,
+        /// How many predictions the caller handed over.
+        predicted_positive: usize,
+    },
+    /// Nothing was classified at all.
+    Empty,
+}
+
+impl fmt::Display for TallyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TallyError::LengthMismatch {
+                labels,
+                predicted_positive,
+            } => write!(
+                f,
+                "{labels} labels against {predicted_positive} predictions: the \
+                 two were built from different record sets, so any count over \
+                 them would describe images nobody named"
+            ),
+            TallyError::Empty => write!(
+                f,
+                "nothing to count: an empty confusion matrix reads as a \
+                 detector that got everything wrong rather than one that was \
+                 never run"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TallyError {}
 
 /// Binary classification counts. Positive is "stego".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -31,9 +74,15 @@ pub struct Confusion {
 }
 
 impl Confusion {
-    /// Tally counts from per-sample labels and predicted-positive flags. The
-    /// two slices are walked pairwise; a length mismatch simply stops at the
-    /// shorter one (the caller builds both from the same record set).
+    /// Tally counts from per-sample labels and predicted-positive flags,
+    /// **truncating to the shorter slice**.
+    ///
+    /// Prefer [`Confusion::try_tally`], which refuses that case instead. This
+    /// one walks the two slices pairwise and stops at whichever runs out first,
+    /// so a caller that built the labels and the predictions from different
+    /// record sets gets a count over a subset nobody named, with nothing in the
+    /// return value to say so. It is kept, undeprecated, only because it is
+    /// published and callers depend on the signature.
     pub fn tally(labels: &[bool], predicted_positive: &[bool]) -> Self {
         let mut c = Confusion::default();
         for (&label, &pred) in labels.iter().zip(predicted_positive) {
@@ -45,6 +94,42 @@ impl Confusion {
             }
         }
         c
+    }
+
+    /// Tally counts from per-sample labels and predicted-positive flags,
+    /// refusing anything that cannot honestly produce a count.
+    ///
+    /// This is [`Confusion::tally`] with the truncation taken out. A length
+    /// mismatch means the labels and the predictions came from different record
+    /// sets, and walking the shorter of the two publishes a figure measured on
+    /// images nobody named. An empty pair of slices is refused too: every rate
+    /// on [`Confusion`] answers 0.0 on a zero denominator, so an empty count
+    /// reads as a detector that caught nothing rather than one that was never
+    /// run.
+    ///
+    /// A single class is **not** refused, unlike [`roc_auc`] and [`roc_curve`].
+    /// A ranking needs both a positive and a negative to rank against each
+    /// other; a confusion count does not, and a one-sided run is a real
+    /// measurement here. The `must_clear` half of a detector's self test is
+    /// exactly that: clean images only, where the whole question is how many
+    /// false positives came back.
+    ///
+    /// NaN has no analogue to refuse: both inputs are `bool`, so there is no
+    /// unordered or absent value a detector could hand over. A detector that
+    /// failed to score an image must be left out of both slices rather than
+    /// given a placeholder flag, and the length check is what catches a caller
+    /// that dropped it from one slice and not the other.
+    pub fn try_tally(labels: &[bool], predicted_positive: &[bool]) -> Result<Self, TallyError> {
+        if labels.len() != predicted_positive.len() {
+            return Err(TallyError::LengthMismatch {
+                labels: labels.len(),
+                predicted_positive: predicted_positive.len(),
+            });
+        }
+        if labels.is_empty() {
+            return Err(TallyError::Empty);
+        }
+        Ok(Self::tally(labels, predicted_positive))
     }
 
     fn ratio(num: u64, den: u64) -> f64 {
@@ -289,6 +374,113 @@ mod tests {
         assert_eq!(c.precision(), 0.0);
         assert_eq!(c.accuracy(), 0.0);
         assert_eq!(c.f1(), 0.0);
+    }
+
+    /// The honest counterpart agrees with the truncating one whenever the
+    /// truncating one had nothing to truncate.
+    #[test]
+    fn try_tally_matches_tally_on_well_formed_input() {
+        let labels = [true, true, true, false, false];
+        let preds = [true, true, false, true, false];
+        assert_eq!(
+            Confusion::try_tally(&labels, &preds),
+            Ok(Confusion::tally(&labels, &preds))
+        );
+    }
+
+    /// Labels and predictions of different lengths came from different record
+    /// sets. `tally` walks the shorter one; this refuses, which is the whole
+    /// reason for having both.
+    #[test]
+    fn try_tally_refuses_a_length_mismatch_in_either_direction() {
+        let labels = [true, true, false, false];
+        assert_eq!(
+            Confusion::try_tally(&labels, &[true, false, true]),
+            Err(TallyError::LengthMismatch {
+                labels: 4,
+                predicted_positive: 3
+            })
+        );
+        assert_eq!(
+            Confusion::try_tally(&labels[..3], &[true, false, true, false]),
+            Err(TallyError::LengthMismatch {
+                labels: 3,
+                predicted_positive: 4
+            })
+        );
+    }
+
+    /// Zero samples is not a score of zero. Every rate on `Confusion` answers
+    /// 0.0 on a zero denominator, so an empty count is indistinguishable from a
+    /// detector that missed everything.
+    #[test]
+    fn try_tally_refuses_an_empty_run() {
+        assert_eq!(Confusion::try_tally(&[], &[]), Err(TallyError::Empty));
+    }
+
+    /// One class is a real measurement here, unlike a ranking. `must_clear` in
+    /// a detector's self test hands over clean images only, and the false
+    /// positives that come back are the answer it wanted.
+    #[test]
+    fn try_tally_accepts_a_single_class() {
+        let clean_only = Confusion::try_tally(&[false, false, false], &[true, false, false]);
+        assert_eq!(
+            clean_only,
+            Ok(Confusion {
+                tp: 0,
+                fp: 1,
+                tn: 2,
+                fn_: 0
+            })
+        );
+        let stego_only = Confusion::try_tally(&[true, true], &[true, false]);
+        assert_eq!(
+            stego_only,
+            Ok(Confusion {
+                tp: 1,
+                fp: 0,
+                tn: 0,
+                fn_: 1
+            })
+        );
+    }
+
+    /// The point of adding a second function rather than changing the first:
+    /// `tally` still truncates, and a caller depending on that still gets it.
+    #[test]
+    fn tally_still_truncates_exactly_as_before() {
+        let labels = [true, true, false, false];
+        let preds = [true, false, true];
+        let c = Confusion::tally(&labels, &preds);
+        assert_eq!((c.tp, c.fn_, c.fp, c.tn), (1, 1, 1, 0));
+        assert_eq!(Confusion::tally(&[], &[]), Confusion::default());
+        assert_eq!(
+            Confusion::tally(&labels, &[]),
+            Confusion::default(),
+            "an empty prediction slice truncates to nothing rather than panicking"
+        );
+    }
+
+    /// The error has to survive being turned into a message a user reads, so
+    /// each variant says which condition fired and names the figures.
+    #[test]
+    fn a_tally_error_says_which_condition_fired() {
+        let mismatch = TallyError::LengthMismatch {
+            labels: 9_882,
+            predicted_positive: 10_000,
+        };
+        let text = mismatch.to_string();
+        assert!(text.contains("9882"), "{text}");
+        assert!(text.contains("10000"), "{text}");
+        assert!(text.contains("different record sets"), "{text}");
+
+        let empty = TallyError::Empty.to_string();
+        assert!(empty.contains("nothing to count"), "{empty}");
+
+        // Usable as a `std::error::Error`, so a caller can box it like any
+        // other failure rather than matching on it by hand.
+        let boxed: Box<dyn std::error::Error> = Box::new(mismatch);
+        assert_eq!(boxed.to_string(), text);
     }
 
     #[test]

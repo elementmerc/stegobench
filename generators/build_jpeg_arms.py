@@ -69,7 +69,7 @@ from PIL import Image
 
 from embedders import EmbedError
 from payloads import payload_bytes as deterministic_payload
-from tools import OutguessEmbedder, SteghideEmbedder
+from tools import OutguessEmbedder, SteghideEmbedder, should_rebuild
 
 # Appended after the end-of-image marker. Chosen to be obviously non-image and
 # fixed in size, so the arm varies in exactly one thing.
@@ -299,19 +299,10 @@ def main(argv: list[str] | None = None) -> int:
                 arm = f"{tool_id}/{int(rate * 1000):04d}"
                 stego = out / arm / f"{stem}.jpg"
                 key = str(stego.relative_to(out))
-                # `done` is the manifest; the file being on disk is not the
-                # same thing. An interrupted run leaves images written with no
-                # row, and skipping them BECAUSE they exist means the row is
-                # never written and `pack_arms`, which reads the manifest,
-                # never packs them: the arm ships short with every digest
-                # matching and every count internally consistent. That cost
-                # the spatial builder 118 covers across twenty-one arms. The
-                # embedders are seeded, so a rebuild writes the same bytes.
-                if key in done:
+                # The manifest is the record, not the file on disk. See
+                # `should_rebuild` for the 118 covers that rule cost.
+                if not should_rebuild(key, stego, done, counts):
                     continue
-                if stego.is_file():
-                    counts["unrecorded"] = counts.get("unrecorded", 0) + 1
-                    stego.unlink()
                 room = room_for.get(tool_id)
                 if room is None:
                     counts["failed"] += 1
@@ -370,13 +361,10 @@ def main(argv: list[str] | None = None) -> int:
             # The structural arm: same pixels, extra bytes after the end marker.
             structural = out / "structural/0000" / f"{stem}.jpg"
             structural_key = str(structural.relative_to(out))
-            # Existence is not a manifest row here either; see the arm loop
-            # above. This one is written and then recorded, so a kill between
-            # the two orphans the pair permanently.
-            if structural_key not in done:
-                if structural.is_file():
-                    counts["unrecorded"] = counts.get("unrecorded", 0) + 1
-                    structural.unlink()
+            # Existence is not a manifest row here either; see `should_rebuild`.
+            # This one is written and then recorded, so a kill between the two
+            # orphans the pair permanently unless the next run rebuilds it.
+            if should_rebuild(structural_key, structural, done, counts):
                 try:
                     added = append_after_eoi(clean, structural)
                     mf.write(json.dumps({

@@ -31,7 +31,7 @@ from PIL import Image
 
 import tools
 from embedders import EmbedError, Embedder
-from tools import _parse_capacity, build
+from tools import _parse_capacity, build, should_rebuild
 
 
 def photo(seed: int = 1, size: int = 512) -> Image.Image:
@@ -64,6 +64,67 @@ class CapacityParserTests(unittest.TestCase):
     def test_an_unknown_unit_is_refused(self):
         with self.assertRaises(EmbedError):
             _parse_capacity("4.0 GB")
+
+
+class ShouldRebuildTests(unittest.TestCase):
+    """The resume rule, which has been fixed once and regressed twice.
+
+    Four states, and the one that cost the corpus 118 covers is the third.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = pathlib.Path(self.tmp.name)
+        self.counts: dict[str, int] = {}
+
+    def path(self, name: str, content: bytes | None = None) -> pathlib.Path:
+        p = self.out / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if content is not None:
+            p.write_bytes(content)
+        return p
+
+    def test_a_recorded_pair_is_skipped_and_left_alone(self):
+        p = self.path("hugo/0400/00000.png", b"built")
+        self.assertFalse(should_rebuild("hugo/0400/00000.png", p,
+                                        {"hugo/0400/00000.png"}, self.counts))
+        self.assertEqual(p.read_bytes(), b"built")
+        self.assertEqual(self.counts, {})
+
+    def test_an_image_with_no_manifest_row_is_deleted_and_rebuilt(self):
+        """The 118 covers. An interrupted run's orphan is not a built pair."""
+        p = self.path("hugo/0400/00000.png", b"orphan")
+        self.assertTrue(should_rebuild("hugo/0400/00000.png", p, set(),
+                                       self.counts))
+        self.assertFalse(p.exists(), "the stale image was left for the "
+                                     "rebuild to collide with")
+        self.assertEqual(self.counts["unrecorded"], 1)
+
+    def test_a_row_whose_file_is_missing_is_still_a_built_pair(self):
+        """The manifest is the record, and the packer reads rows."""
+        p = self.out / "hugo/0400/00000.png"
+        self.assertFalse(should_rebuild("hugo/0400/00000.png", p,
+                                        {"hugo/0400/00000.png"}, self.counts))
+        self.assertEqual(self.counts, {})
+
+    def test_a_fresh_pair_is_built_without_being_counted_as_orphaned(self):
+        p = self.out / "hugo/0400/00001.png"
+        self.assertTrue(should_rebuild("hugo/0400/00001.png", p, set(),
+                                       self.counts))
+        self.assertEqual(self.counts, {})
+
+    def test_orphans_accumulate_so_a_run_can_report_them(self):
+        for i in range(3):
+            key = f"hugo/0400/{i:05d}.png"
+            should_rebuild(key, self.path(key, b"orphan"), set(), self.counts)
+        self.assertEqual(self.counts["unrecorded"], 3)
+
+    def test_an_existing_counter_is_added_to_rather_than_replaced(self):
+        counts = {"pairs": 7, "unrecorded": 2}
+        key = "hugo/0400/00000.png"
+        should_rebuild(key, self.path(key, b"orphan"), set(), counts)
+        self.assertEqual(counts, {"pairs": 7, "unrecorded": 3})
 
 
 class ContractTests(unittest.TestCase):

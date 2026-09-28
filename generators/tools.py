@@ -68,6 +68,53 @@ from embedders import (
 )
 
 
+def should_rebuild(key: str, path: pathlib.Path, done: set[str],
+                   counts: dict[str, int]) -> bool:
+    """Whether a resumed arm build still owes this pair, deleting a stale file.
+
+    THE MANIFEST IS THE RECORD. THE FILE ON DISK IS NOT.
+
+    Every arm builder resumes by reading its manifest into `done` and skipping
+    the pairs already recorded there. The rule that matters is what it does with
+    an image that is on disk and has no manifest row:
+
+        key in done          the pair is recorded. Skip it.
+        file, no row         an interrupted run wrote it and died before the
+                             row. REBUILD it.
+        row, no file         `key in done` already skipped it; the row is the
+                             record and the packer reads rows.
+        neither              a fresh pair. Build it.
+
+    Treating the file's existence as equivalent to a manifest row is what cost
+    this corpus 118 covers. An interrupted run left 2,478 images written with no
+    manifest row, and every later run skipped them BECAUSE they existed, so the
+    rows were never written and `pack_arms`, which reads the manifest, never
+    packed them. Twenty-one arms shipped at 9,882 instead of 10,000, with every
+    digest matching and every count internally consistent, so nothing
+    downstream could see it.
+
+    So an image with no row is deleted and rebuilt rather than skipped. The
+    embedders are seeded, so a rebuild reproduces the same bytes; the cost of
+    being wrong about that is one redundant write, and the cost of the old
+    behaviour was a silently incomplete corpus.
+
+    `counts` is the run's own counter dictionary, and the rule records what it
+    decided there rather than only in a log: `counts["unrecorded"]` is how many
+    orphaned images this run found and rebuilt. A rejection that lives in a log
+    is a rejection the corpus cannot describe afterwards, and that number is the
+    one that would have caught the 118 while the run was still going.
+    """
+    if key in done:
+        return False
+    if path.is_file():
+        counts["unrecorded"] = counts.get("unrecorded", 0) + 1
+        # missing_ok because a sharded run could in principle have the file
+        # vanish between the check and the unlink, and crashing there would
+        # abandon an arm over a file we wanted gone anyway.
+        path.unlink(missing_ok=True)
+    return True
+
+
 class SteghideEmbedder(DockerTool, Embedder):
     """JPEG and BMP, Blowfish encrypted, graph-theoretic rather than plain LSB.
 

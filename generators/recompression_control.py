@@ -86,6 +86,8 @@ import time
 
 from PIL import Image
 
+from tools import should_rebuild
+
 #: One byte, because outguess will not take zero. Everything about this arm
 #: depends on that being stated rather than rounded to "no payload".
 NULL_PAYLOAD = b"\x00"
@@ -241,7 +243,11 @@ def main(argv: list[str] | None = None) -> int:
                 build, why = ARMS[arm]
                 rel = f"{arm}/{name}"
                 stego = out / rel
-                if rel in done or stego.is_file():
+                # This loop still read the file's existence as a manifest row,
+                # which is the rule that cost the corpus 118 covers elsewhere.
+                # See `should_rebuild`: an orphaned image is rebuilt, and only
+                # a recorded row counts as skipped.
+                if not should_rebuild(rel, stego, done, counts):
                     counts["skipped"] += 1
                     continue
                 try:
