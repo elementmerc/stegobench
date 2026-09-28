@@ -92,13 +92,38 @@ def stegcore_score(binary: str, path: pathlib.Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _rankable(scores: list[float], labels: list[bool], what: str) -> bool:
+    """Whether these two lists can be ranked against each other at all.
+
+    Different lengths mean the caller built the scores and the labels from
+    different record sets, so it raises: `zip` would walk the shorter of the two
+    and answer with a figure measured on a subset nobody named. A score that is
+    not a number is the detector's answer rather than the caller's mistake, so
+    it returns False and the metric above answers None: NaN compares false
+    against everything, so it lands wherever the sort leaves it and every rank
+    built on top of it is arbitrary.
+    """
+    if len(scores) != len(labels):
+        raise ValueError(
+            f"{what}: {len(scores)} score(s) against {len(labels)} label(s). "
+            f"They describe the same images, so a mismatch means they were "
+            f"built from different record sets and the number would be "
+            f"measured on whichever is shorter."
+        )
+    return not any(s != s for s in scores)
+
+
 def roc_auc(scores: list[float], labels: list[bool]) -> float | None:
     """Tie-aware AUC by the rank-sum identity.
 
     Ties get the average of the ranks they span, which is what makes a detector
     returning one constant score land at exactly 0.5 rather than at whatever the
     sort order happened to produce.
+
+    None when one class is absent or any score is not a number.
     """
+    if not _rankable(scores, labels, "roc_auc"):
+        return None
     positives = sum(labels)
     negatives = len(labels) - positives
     if not positives or not negatives:
@@ -119,15 +144,49 @@ def roc_auc(scores: list[float], labels: list[bool]) -> float | None:
 
 
 def tpr_at_fpr(scores: list[float], labels: list[bool], max_fpr: float) -> float | None:
-    """The best true-positive rate reachable without exceeding `max_fpr`."""
+    """The best true-positive rate reachable without exceeding `max_fpr`.
+
+    None when one class is absent or any score is not a number. Raises when
+    `max_fpr` is not a false-alarm budget: a negative or a figure above 1 is a
+    caller's mistake, and answering 0.0 to it would read as a detector that
+    caught nothing.
+
+    ONE SWEEP, NOT ONE PASS PER THRESHOLD
+    -------------------------------------
+    The obvious shape of this is a loop over every distinct score that counts
+    the hits above it, and that is what this was. It is quadratic, and the
+    scores are floats a detector produced, so "distinct" means nearly all of
+    them: a Core arm of 344,357 images made it around a hundred billion
+    comparisons, which is not slow, it is a run that never ends. Walking the
+    scores once in descending order and accumulating counts gives the same
+    answer, ties included, for the cost of the sort.
+    """
+    if not 0.0 <= max_fpr <= 1.0:
+        raise ValueError(
+            f"tpr_at_fpr: a false-alarm budget of {max_fpr} is not a rate. "
+            f"Give a fraction between 0 and 1, such as 0.01 for one per cent."
+        )
+    if not _rankable(scores, labels, "tpr_at_fpr"):
+        return None
     positives = sum(labels)
     negatives = len(labels) - positives
     if not positives or not negatives:
         return None
     best = 0.0
-    for threshold in sorted(set(scores)):
-        tp = sum(1 for s, l in zip(scores, labels) if l and s >= threshold)
-        fp = sum(1 for s, l in zip(scores, labels) if not l and s >= threshold)
+    tp = fp = 0
+    # Descending, so each step admits everything at or above the threshold. The
+    # point is recorded only once a whole tie group is in, because a threshold
+    # cannot separate two images that scored the same.
+    ordered = sorted(zip(scores, labels), key=lambda p: p[0], reverse=True)
+    i = 0
+    while i < len(ordered):
+        threshold = ordered[i][0]
+        while i < len(ordered) and ordered[i][0] == threshold:
+            if ordered[i][1]:
+                tp += 1
+            else:
+                fp += 1
+            i += 1
         if fp / negatives <= max_fpr:
             best = max(best, tp / positives)
     return best
@@ -153,7 +212,11 @@ def main(argv: list[str] | None = None) -> int:
               "would score against whatever answered on it.", file=sys.stderr)
         return 2
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # Line buffering is so a long run's progress reaches a tail as it happens.
+    # A caller that redirected stdout may have put something else there, and
+    # losing the buffering is a cosmetic loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     corpus = pathlib.Path(args.corpus)
     manifest = corpus / "manifest.jsonl"
     if not manifest.is_file():
@@ -200,11 +263,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(wanted)} unique files, {len(todo)} for this scorer")
     last_beat = time.monotonic()
     failures = 0
+    # A file the manifest names and the corpus does not hold is a partial
+    # extraction or a truncated download, and the arm it belongs to is then
+    # scored on fewer images than it claims. Skipping it quietly is how that
+    # happens with the run still reporting success.
+    absent, absent_examples = 0, []
 
     with out_path.open("a") as f:
         for n, rel in enumerate(todo, 1):
             path = corpus / rel
             if not path.is_file():
+                absent += 1
+                if len(absent_examples) < 5:
+                    absent_examples.append(rel)
                 continue
             record: dict = {"file": rel}
             try:
@@ -229,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
             if time.monotonic() - last_beat >= 60:
                 print(f"  ... {n}/{len(todo)} scored, {failures} failed")
                 last_beat = time.monotonic()
+
+    if absent:
+        print(f"\n{absent} file(s) the manifest names are not in the corpus, "
+              f"so every arm below is scored on fewer images than it claims. "
+              f"First: {', '.join(absent_examples)}", file=sys.stderr)
 
     report(rows, scored, bool(binary))
     return 0
@@ -274,7 +350,7 @@ def report(rows: list[dict], scored: dict[str, dict], with_stegcore: bool) -> No
             not in (None, "clean")
         )
         print(f"{arm:<22} {counted:>4}  "
-              f"{auc if auc is None else round(auc, 3):>6} "
+              f"{'-' if auc is None else round(auc, 3):>6} "
               f"{'-' if t1 is None else round(t1, 3):>7} "
               f"{'-' if t10 is None else round(t10, 3):>8} "
               f"{flagged / counted:>7.0%}  {identical}/{counted}")
@@ -304,7 +380,7 @@ def report(rows: list[dict], scored: dict[str, dict], with_stegcore: bool) -> No
                 continue
             auc = roc_auc(scores, labels)
             print(f"{arm:<22} {counted:>4}  "
-                  f"{auc if auc is None else round(auc, 3):>6} "
+                  f"{'-' if auc is None else round(auc, 3):>6} "
                   f"{flagged / counted:>7.0%}")
 
 

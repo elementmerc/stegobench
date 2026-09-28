@@ -101,7 +101,11 @@ def main(argv: list[str] | None = None) -> int:
                          "300 MB, which resumes cheaply on a poor connection")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     covers = pathlib.Path(args.covers)
     manifest_path = pathlib.Path(args.manifest) if args.manifest else covers / "manifest.jsonl"
     out = pathlib.Path(args.out)
@@ -130,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     for shard_no, (start, end) in enumerate(plan):
         shard = out / f"pentimento-{name.lower()}-{shard_no:05d}.tar"
         digest = hashlib.sha256()
+        packed = 0
         with tarfile.open(shard, "w", format=tarfile.PAX_FORMAT) as tar:
             for position in range(start, end):
                 path = chosen[position]
@@ -140,10 +145,22 @@ def main(argv: list[str] | None = None) -> int:
                 # This is the last point at which the bytes and the record are
                 # in the same place at the same time.
                 actual = hashlib.sha256(payload).hexdigest()
-                if row.get("sha256") and actual != row["sha256"]:
+                declared = row.get("sha256")
+                # A row with no digest used to take the same path as a row that
+                # matched, so it shipped inside a tier whose own documentation
+                # says every image was checked. Nothing downstream could tell
+                # the two apart, which is the state this module exists to stop
+                # a corpus being in.
+                if not declared:
+                    mismatches += 1
+                    print(f"  NO DIGEST {path.name}: the manifest states none, "
+                          f"so packing it would ship an unverified file inside "
+                          f"a verified tier", file=sys.stderr)
+                    continue
+                if actual != declared:
                     mismatches += 1
                     print(f"  DIGEST MISMATCH {path.name}: manifest "
-                          f"{row['sha256'][:16]}, file {actual[:16]}", file=sys.stderr)
+                          f"{declared[:16]}, file {actual[:16]}", file=sys.stderr)
                     continue
 
                 # The key is the tier position, not the original filename, so a
@@ -153,12 +170,16 @@ def main(argv: list[str] | None = None) -> int:
                 add(tar, f"{key}.png", payload)
                 add(tar, f"{key}.json", json.dumps(row, sort_keys=True).encode())
                 digest.update(payload)
+                packed += 1
 
         size = shard.stat().st_size
         shard_sha = hashlib.sha256(shard.read_bytes()).hexdigest()
         index.append({
             "shard": shard.name,
-            "samples": end - start,
+            # What went in, not what was planned. They differ only on a run
+            # that already exits non-zero, and an index overstating a shard is
+            # how that run's output gets mistaken for a finished one.
+            "samples": packed,
             "first_tier_order": start,
             "last_tier_order": end - 1,
             "bytes": size,

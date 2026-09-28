@@ -271,7 +271,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="per extraction; rich models are slow and this is a whole job")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     corpus = pathlib.Path(args.corpus)
     manifest = corpus / "manifest.jsonl"
     if not manifest.is_file():

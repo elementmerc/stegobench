@@ -560,7 +560,11 @@ def main(argv: list[str] | None = None) -> int:
                          "is a prefix for the same reason the cover tier is")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     arms_root = pathlib.Path(args.arms)
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

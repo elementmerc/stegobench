@@ -72,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     root = pathlib.Path(args.arms)
     manifest = root / "manifest.jsonl"
     if not manifest.is_file():

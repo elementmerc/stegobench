@@ -184,7 +184,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--schemes", default=",".join(sorted(SPATIAL) + list(JPEG_SCHEMES)))
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rates = [float(r) for r in args.rates.split(",") if r.strip()]
@@ -387,8 +391,17 @@ def main(argv: list[str] | None = None) -> int:
                         arm = f"{scheme}/{int(rate * 1000):04d}"
                         stego = out / arm / f"{stem}.jpg"
                         key = str(stego.relative_to(out))
-                        if key in done or stego.is_file():
+                        # The same rule as the spatial loop above, for the same
+                        # reason: an image with no manifest row is one an
+                        # interrupted run wrote, and skipping it because it
+                        # exists is what leaves an arm short with every count
+                        # inside it consistent. This loop kept the old
+                        # behaviour when that one was fixed.
+                        if key in done:
                             continue
+                        if stego.is_file():
+                            counts["unrecorded"] = counts.get("unrecorded", 0) + 1
+                            stego.unlink()
                         seed = (args.seed + index * 7919
                                 + int(rate * 100000)) % (2 ** 31)
                         try:

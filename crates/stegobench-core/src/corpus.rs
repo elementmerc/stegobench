@@ -43,6 +43,16 @@ use crate::registry::RegistryError;
 /// A sha256 digest written as lowercase hexadecimal: 32 bytes, 64 characters.
 const SHA256_HEX_LEN: usize = 64;
 
+/// How far below the registry root the corpus walk will descend.
+///
+/// The shipped registry is flat: one directory of TOML files. The cap is for
+/// the pathological case rather than the real one, and specifically for a
+/// directory symbolic link that points back at an ancestor. Following links is
+/// what makes that a tree of unbounded depth; without the cap the walk descends
+/// it until the operating system's own limit on chained links stops it, which
+/// is thousands of directory reads later and reports a path nobody wrote.
+const MAX_REGISTRY_DEPTH: usize = 16;
+
 /// A registered dataset. Never executed, only pointed at.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CorpusEntry {
@@ -622,19 +632,59 @@ fn is_iso_date(s: &str) -> bool {
 /// notices weeks later.
 pub(crate) fn load_dir(dir: &Path) -> Result<BTreeMap<String, CorpusEntry>, RegistryError> {
     let mut out: BTreeMap<String, CorpusEntry> = BTreeMap::new();
-    if !dir.is_dir() {
-        return Ok(out);
+    // A registry with no corpora directory is an ordinary state and loads as
+    // an empty set. A corpora directory that is there and cannot be read is
+    // not: `is_dir()` reported both as "no corpora", so a permission the user
+    // lacked produced a registry that listed nothing and said nothing.
+    match std::fs::metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => {
+            return Err(RegistryError::Read {
+                path: dir.display().to_string(),
+                source: e,
+            })
+        }
+        Ok(meta) if !meta.is_dir() => return Ok(out),
+        Ok(_) => {}
     }
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((d, depth)) = stack.pop() {
         let read = std::fs::read_dir(&d).map_err(|e| RegistryError::Read {
             path: d.display().to_string(),
             source: e,
         })?;
-        for item in read.flatten() {
+        for item in read {
+            // Not `flatten()`. An entry the filesystem cannot describe is a
+            // corpus this walk did not see, and dropping it here is the silent
+            // omission the paragraph above says the loud failure is worth
+            // paying for.
+            let item = item.map_err(|e| RegistryError::Read {
+                path: d.display().to_string(),
+                source: e,
+            })?;
             let p = item.path();
-            if p.is_dir() {
-                stack.push(p);
+            // Not `p.is_dir()`. That answers false for a directory it could not
+            // stat, so a registry subdirectory behind a permission the user
+            // lacks, or at the far end of a chain of links, is quietly walked
+            // past and the corpora under it never appear at all.
+            let meta = std::fs::metadata(&p).map_err(|e| RegistryError::Read {
+                path: p.display().to_string(),
+                source: e,
+            })?;
+            if meta.is_dir() {
+                if depth + 1 > MAX_REGISTRY_DEPTH {
+                    return Err(RegistryError::Read {
+                        path: p.display().to_string(),
+                        source: std::io::Error::other(format!(
+                            "more than {MAX_REGISTRY_DEPTH} directories below the \
+                             registry root. A registry is one directory of TOML \
+                             files per kind, so this is either the wrong \
+                             directory or a link that points back at one already \
+                             visited"
+                        )),
+                    });
+                }
+                stack.push((p, depth + 1));
             } else if p.extension().is_some_and(|e| e == "toml") {
                 let text = std::fs::read_to_string(&p).map_err(|e| RegistryError::Read {
                     path: p.display().to_string(),
@@ -1098,6 +1148,47 @@ base_images = 100
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub/a.toml"), toml_for("")).unwrap();
         assert_eq!(load_dir(dir.path()).unwrap().len(), 1);
+    }
+
+    /// A name the walk cannot resolve is not evidence that no corpus is behind
+    /// it. `is_dir` answers false for one, which sent it down the branch for
+    /// ordinary files, where anything not ending in `.toml` is skipped without
+    /// a word; a broken link named `pentimento-core.toml` would have taken that
+    /// path and left the registry one corpus short of what it holds.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_the_walk_cannot_resolve_is_reported_rather_than_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.toml"), toml_for("")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("was-here-once"),
+            dir.path().join("dangling"),
+        )
+        .unwrap();
+        let err = load_dir(dir.path()).expect_err("an unresolvable name is refused");
+        assert!(err.to_string().contains("dangling"), "got: {err}");
+    }
+
+    /// A link pointing back at an ancestor is a directory tree with no bottom,
+    /// and the walk follows links. Without the cap it descends until the
+    /// operating system refuses to resolve any more of them, and because
+    /// `is_dir` reports an unreadable path as "not a directory" the refusal
+    /// arrived as an empty registry rather than as an error: the load reported
+    /// success having found nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_link_pointing_at_its_own_parent_is_refused_rather_than_walked() {
+        // No entry file anywhere: the duplicate-id check would otherwise stop
+        // the walk on the second pass and hide that the walk itself never ends.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/loop")).unwrap();
+        let err = load_dir(dir.path()).expect_err("a link loop is refused");
+        assert!(
+            err.to_string()
+                .contains("directories below the registry root"),
+            "got: {err}"
+        );
     }
 
     // ── The version-inferred flag ──────────────────────────────────────────

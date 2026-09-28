@@ -512,7 +512,11 @@ def main(argv: list[str] | None = None) -> int:
     # This runs detached overnight with its output redirected to a file, and
     # Python block-buffers stdout when it is not a terminal. A heartbeat sitting
     # in an 8 KB buffer is not a heartbeat, so ask for line buffering explicitly.
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

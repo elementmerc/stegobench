@@ -30,7 +30,7 @@ import verify_release as vr  # noqa: E402
 from verify_release import (  # noqa: E402
     Report, check_attribution, check_covers, check_licences, check_packed,
     check_packed_arms,
-    check_pool,
+    check_pool, check_stale,
 )
 
 
@@ -68,6 +68,25 @@ class CoverTests(unittest.TestCase):
         r = Report()
         check_covers(rows, 10, r)
         self.assertTrue(any("not dense" in m for m in r.failures["covers"]))
+
+    def test_a_row_with_no_tier_order_is_reported_rather_than_crashing(self):
+        """The sort compares an absent tier_order against an integer and
+        raises, so the gate died on the malformed manifest it exists to catch,
+        before any other check had run."""
+        rows = [cover(n) for n in range(10)]
+        del rows[3]["tier_order"]
+        r = Report()
+        check_covers(rows, 10, r)
+        self.assertTrue(any("no whole-number tier_order" in m
+                            for m in r.failures["covers"]), r.failures)
+
+    def test_a_tier_order_that_is_not_a_number_is_reported_too(self):
+        rows = [cover(n) for n in range(10)]
+        rows[4]["tier_order"] = "4"
+        r = Report()
+        check_covers(rows, 10, r)
+        self.assertTrue(any("no whole-number tier_order" in m
+                            for m in r.failures["covers"]), r.failures)
 
     def test_a_duplicate_pageid_is_caught(self):
         """The defect a second backfill run would have produced: one photograph
@@ -180,10 +199,61 @@ class PackedTierTests(unittest.TestCase):
         check_packed(self.release, self.rows, 10 ** 9, r)
         self.assertTrue(any("not on disk" in m for m in r.failures["packed"]))
 
+    def test_a_shard_index_with_no_tier_order_span_is_caught(self):
+        """It used to default to 0..0, which compared exactly one member and
+        still counted the shard as checked, so a stale tier passed on the
+        strength of member 000000.png."""
+        index = self.release / "pentimento-nano-index.json"
+        doc = json.loads(index.read_text(encoding="utf-8"))
+        del doc["shards"][0]["first_tier_order"]
+        del doc["shards"][0]["last_tier_order"]
+        index.write_text(json.dumps(doc), encoding="utf-8")
+        # Every cover in the pack is stale, and only 000000.png would be seen.
+        for row in self.rows[1:]:
+            row["sha256"] = hashlib.sha256(b"the replacement").hexdigest()
+        r = Report()
+        check_packed(self.release, self.rows, 10 ** 9, r)
+        self.assertTrue(any("no tier_order span" in m
+                            for m in r.failures["packed"]), r.failures)
+
     def test_a_release_with_no_packed_tier_is_caught_rather_than_skipped(self):
         r = Report()
         check_packed(self.release.parent / "empty", self.rows, 10, r)
         self.assertIn("packed", r.failures)
+
+
+class StaleArmTests(unittest.TestCase):
+    """The clean half's recorded digest is the only witness that an arm was
+    built from the cover it names, so a clean half that is not there is not a
+    clean half that matches."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.arm = pathlib.Path(self.tmp.name) / "wow-0200"
+        (self.arm / "clean").mkdir(parents=True)
+        rows = []
+        for n in range(4):
+            payload = f"clean {n}".encode()
+            (self.arm / "clean" / f"{n:05d}.png").write_bytes(payload)
+            rows.append({"clean": f"clean/{n:05d}.png",
+                         "clean_sha256": hashlib.sha256(payload).hexdigest()})
+        (self.arm / "manifest.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    def test_matching_clean_halves_pass(self):
+        r = Report()
+        check_stale(self.arm.parent, 10, r)
+        self.assertTrue(r.ok, r.failures)
+
+    def test_a_clean_half_that_is_not_on_disk_is_reported_rather_than_skipped(self):
+        """Skipped quietly, it left the check reporting how many of the
+        survivors matched, which reads as a pass over the whole arm."""
+        (self.arm / "clean" / "00002.png").unlink()
+        r = Report()
+        check_stale(self.arm.parent, 10, r)
+        self.assertTrue(any("not on disk" in m for m in r.failures["stale"]),
+                        r.failures)
 
 
 class AttributionCheckTests(unittest.TestCase):

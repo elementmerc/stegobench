@@ -228,7 +228,11 @@ def main(argv: list[str] | None = None) -> int:
                          "reporting that only the structural check ran")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     path = pathlib.Path(args.record)
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))

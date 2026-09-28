@@ -90,11 +90,29 @@ fn cmp_f64(a: f64, b: f64) -> Ordering {
     a.partial_cmp(&b).unwrap_or(Ordering::Equal)
 }
 
+/// Whether these two slices can be ranked against each other at all.
+///
+/// A length mismatch means the caller built the scores and the labels from
+/// different record sets, and a ranking over the shorter of the two is a number
+/// measured on a subset nobody named. A score that is not a number cannot be
+/// ordered, so every comparison against it is false and the ranking silently
+/// stops meaning anything. Both answer `None` rather than a figure, because in
+/// a measurement tool a quietly wrong number is worse than no number: it gets
+/// published.
+fn rankable(scores: &[f64], labels: &[bool]) -> bool {
+    scores.len() == labels.len() && scores.iter().all(|s| !s.is_nan())
+}
+
 /// Rank-based ROC AUC (equivalent to the Mann-Whitney U statistic), tie-aware
-/// via average ranks. Returns `None` when one class is absent, since AUC is
-/// undefined without both a positive and a negative sample.
+/// via average ranks.
+///
+/// Returns `None` when one class is absent, since AUC is undefined without both
+/// a positive and a negative sample; when the two slices are of different
+/// lengths; and when any score is NaN.
 pub fn roc_auc(scores: &[f64], labels: &[bool]) -> Option<f64> {
-    debug_assert_eq!(scores.len(), labels.len());
+    if !rankable(scores, labels) {
+        return None;
+    }
     let n_pos = labels.iter().filter(|&&l| l).count();
     let n_neg = labels.len() - n_pos;
     if n_pos == 0 || n_neg == 0 {
@@ -132,8 +150,14 @@ pub fn roc_auc(scores: &[f64], labels: &[bool]) -> Option<f64> {
 
 /// ROC curve as `(fpr, tpr)` points, swept from the highest score downward
 /// (predicted positive when `score >= threshold`). Begins at `(0, 0)` and ends
-/// at `(1, 1)`. Empty when either class is absent.
+/// at `(1, 1)`.
+///
+/// Empty when either class is absent, when the two slices are of different
+/// lengths, and when any score is NaN. See [`roc_auc`].
 pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
+    if !rankable(scores, labels) {
+        return Vec::new();
+    }
     let n_pos = labels.iter().filter(|&&l| l).count() as f64;
     let n_neg = labels.len() as f64 - n_pos;
     if n_pos == 0.0 || n_neg == 0.0 {
@@ -164,7 +188,12 @@ pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
 }
 
 /// The best true-positive rate this detector reaches without exceeding
-/// `max_fpr`. `None` when either class is absent.
+/// `max_fpr`.
+///
+/// `None` when the curve cannot be drawn (see [`roc_curve`]) and when `max_fpr`
+/// is not a false-alarm budget: a negative, a NaN or a figure above 1 is a
+/// caller's mistake rather than a strict budget, and answering 0.0 to it would
+/// read as a detector that caught nothing.
 ///
 /// This is the headline number for an external evaluation and accuracy is not.
 /// A detector facing a corpus that is mostly clean can score 95% accuracy by
@@ -172,6 +201,9 @@ pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
 /// the results is not a measurement. Pinning the false-positive budget first and
 /// asking what detection it buys is the comparison that survives review.
 pub fn tpr_at_fpr(scores: &[f64], labels: &[bool], max_fpr: f64) -> Option<f64> {
+    if !(0.0..=1.0).contains(&max_fpr) {
+        return None;
+    }
     let curve = roc_curve(scores, labels);
     if curve.is_empty() {
         return None;
@@ -307,5 +339,44 @@ mod tests {
     #[test]
     fn roc_curve_empty_without_both_classes() {
         assert!(roc_curve(&[0.1, 0.2], &[true, true]).is_empty());
+    }
+
+    /// Scores and labels of different lengths mean they were built from
+    /// different record sets. Walking the shorter of the two would answer with a
+    /// figure measured on a subset nobody named, and the caller would have no
+    /// way of telling that from a real one.
+    #[test]
+    fn a_length_mismatch_is_refused_rather_than_truncated() {
+        let scores = [0.9, 0.8, 0.2, 0.1];
+        assert_eq!(roc_auc(&scores, &[true, false, true]), None);
+        assert_eq!(roc_auc(&scores[..3], &[true, false, true, false]), None);
+        assert!(roc_curve(&scores, &[true, false, true]).is_empty());
+        assert_eq!(tpr_at_fpr(&scores, &[true, false, true], 0.01), None);
+    }
+
+    /// A detector that answers NaN for an image has not scored it. NaN compares
+    /// false against everything, so it lands wherever the sort happens to leave
+    /// it and the rank sum built on top of that is arbitrary.
+    #[test]
+    fn a_nan_score_is_refused_rather_than_ranked() {
+        let scores = [0.9, f64::NAN, 0.2, 0.1];
+        let labels = [true, true, false, false];
+        assert_eq!(roc_auc(&scores, &labels), None);
+        assert!(roc_curve(&scores, &labels).is_empty());
+        assert_eq!(tpr_at_fpr(&scores, &labels, 0.01), None);
+    }
+
+    /// A budget that is not a rate is a caller's mistake, and 0.0 would read as
+    /// a detector that caught nothing at a budget it was never asked about.
+    #[test]
+    fn a_budget_that_is_not_a_rate_is_refused() {
+        let scores = [0.9, 0.4, 0.5, 0.1];
+        let labels = [true, true, false, false];
+        assert_eq!(tpr_at_fpr(&scores, &labels, -0.1), None);
+        assert_eq!(tpr_at_fpr(&scores, &labels, 1.5), None);
+        assert_eq!(tpr_at_fpr(&scores, &labels, f64::NAN), None);
+        // The ends of the range are budgets, not mistakes.
+        assert_eq!(tpr_at_fpr(&scores, &labels, 0.0), Some(0.5));
+        assert_eq!(tpr_at_fpr(&scores, &labels, 1.0), Some(1.0));
     }
 }

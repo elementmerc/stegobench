@@ -104,21 +104,38 @@ HARDENING = [
 
 
 def reap() -> int:
-    """Stop every container this run started. Safe to call more than once."""
+    """Stop every container this run started. Safe to call more than once.
+
+    Returns the number actually stopped, and says so on the way out when it
+    could not stop them: a container left holding a core after the scorer has
+    gone is the failure this whole labelling scheme exists to prevent, and
+    reporting a kill that did not happen hides exactly that.
+    """
     try:
         listing = subprocess.run(
             ["docker", "ps", "-q", "--filter", f"label={RUN_LABEL}"],
             capture_output=True, text=True, timeout=60)
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"could not ask docker what this run left running ({e}); check "
+              f"by hand with: docker ps --filter label={RUN_LABEL}",
+              file=sys.stderr)
         return 0
     ids = [i for i in listing.stdout.split() if i]
     if not ids:
         return 0
     try:
-        subprocess.run(["docker", "kill", *ids], capture_output=True,
-                       text=True, timeout=120)
-    except (subprocess.SubprocessError, OSError):
-        pass
+        killed = subprocess.run(["docker", "kill", *ids], capture_output=True,
+                                text=True, timeout=120)
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"could not stop {len(ids)} container(s) this run started ({e}). "
+              f"They are still holding memory and cores; stop them with: "
+              f"docker kill {' '.join(ids)}", file=sys.stderr)
+        return 0
+    if killed.returncode != 0:
+        print(f"docker refused to stop {len(ids)} container(s) this run "
+              f"started: {(killed.stderr or killed.stdout).strip()[-500:]}",
+              file=sys.stderr)
+        return 0
     return len(ids)
 
 
@@ -183,6 +200,12 @@ def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
                 outputs.append(text)
 
     out: dict[str, dict] = {}
+    # A line the driver wrote that this cannot read is an image with no answer,
+    # and an image with no answer drops out of the arm silently: the AUC below
+    # is then measured over the survivors and reads exactly like the real one.
+    # The container also writes ordinary noise to stdout, so this counts and
+    # reports rather than refusing outright.
+    unreadable, first_unreadable = 0, ""
     for text in outputs:
         for line in text.splitlines():
             if not line.strip():
@@ -190,8 +213,18 @@ def aletheia_dir(image: str, directory: pathlib.Path, timeout: int,
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
+                unreadable += 1
+                first_unreadable = first_unreadable or line.strip()
+                continue
+            if "file" not in rec:
+                unreadable += 1
+                first_unreadable = first_unreadable or line.strip()
                 continue
             out[rec["file"]] = rec
+    if unreadable:
+        print(f"  aletheia on {directory.name}: {unreadable} line(s) of "
+              f"output were not a per-image answer, so those images carry no "
+              f"score. First: {first_unreadable[:200]}", file=sys.stderr)
     return out
 
 
@@ -226,15 +259,24 @@ def stegexpose_dir(image: str, directory: pathlib.Path, scratch: pathlib.Path,
     if not csv.is_file():
         return {}
     scores: dict[str, float] = {}
+    unreadable = 0
     lines = [l for l in csv.read_text(encoding="utf-8").splitlines() if l.strip()]
     for line in lines[1:]:
         parts = line.split(",")
         if len(parts) < 8:
+            unreadable += 1
             continue
         try:
             scores[parts[0]] = float(parts[-1])
         except ValueError:
+            unreadable += 1
             continue
+    # Same reason as the Aletheia reader: a row that cannot be read is an image
+    # that silently leaves the measurement.
+    if unreadable:
+        print(f"  stegexpose on {directory.name}: {unreadable} CSV row(s) "
+              f"carried no readable score, so those images are unscored",
+              file=sys.stderr)
     return scores
 
 
@@ -316,7 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report-only", action="store_true")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # Line buffering is so a long run's progress reaches a tail as it happens.
+    # A caller that redirected stdout may have put something else there, and
+    # losing the buffering is a cosmetic loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     corpus = pathlib.Path(args.corpus)
     manifest = corpus / "manifest.jsonl"
     if not manifest.is_file():
@@ -345,10 +391,35 @@ def main(argv: list[str] | None = None) -> int:
     scored: dict[str, dict] = {}
     if out_path.exists():
         empty = 0
-        for line in out_path.read_text(encoding="utf-8").splitlines():
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        for number, line in enumerate(lines, 1):
             if not line.strip():
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                # The scores file is an append log, so a run killed mid-write
+                # leaves its last line half finished. That one is discarded
+                # with a word said about it. A broken line anywhere else means
+                # something other than an interruption wrote here, and
+                # resuming on top of it would score around whatever it holds.
+                if number == len(lines):
+                    print(f"the last line of {out_path.name} is incomplete, "
+                          f"which is what an interrupted run leaves behind; "
+                          f"ignoring it and re-scoring that file")
+                    continue
+                print(f"{out_path}, line {number} is not valid JSON ({e}). "
+                      f"This file is an append log and only its last line can "
+                      f"be truncated, so something else has written here. "
+                      f"Move it aside to re-score from scratch, or repair the "
+                      f"line.", file=sys.stderr)
+                return 2
+            if "file" not in rec:
+                print(f"{out_path}, line {number} names no file, so there "
+                      f"is no telling which image it scored. Move the file "
+                      f"aside to re-score from scratch, or repair the line.",
+                      file=sys.stderr)
+                return 2
             if any(f in rec for f in DETECTOR_FIELDS):
                 scored[rec["file"]] = rec
             else:
@@ -378,6 +449,13 @@ def main(argv: list[str] | None = None) -> int:
             for n, (d, rels) in enumerate(sorted(by_dir.items()), 1):
                 directory = corpus / d
                 if not directory.is_dir():
+                    # Every file under it stays unscored, and the arms it holds
+                    # are then reported on whatever else survived. The report
+                    # prints n per arm, but n only reads as short against a
+                    # number nobody has unless this is said out loud.
+                    print(f"  {d} is not in this corpus, so {len(rels)} file(s) "
+                          f"go unscored and the arms they belong to are "
+                          f"measured on less than they name", file=sys.stderr)
                     continue
                 print(f"[{n}/{len(by_dir)}] {d}: {len(rels)} files "
                       f"({time.monotonic() - started:.0f}s)")

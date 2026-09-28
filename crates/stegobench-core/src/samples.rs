@@ -684,7 +684,7 @@ fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleErro
 
     let cover = match object.get("source_png") {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(s)) => Some(check_cover_name(id, s)?),
+        Some(serde_json::Value::String(s)) => Some(check_cover_name(id, "source_png", s)?),
         Some(other) => {
             return Err(SampleError::BadRecord {
                 id: id.to_string(),
@@ -732,7 +732,7 @@ fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleErro
             // A manifest may carry a path here rather than a bare name, and the
             // join only ever needs the last component.
             let last = s.rsplit(['/', '\\']).next().unwrap_or(s);
-            Some(check_cover_name(id, last)?)
+            Some(check_cover_name(id, "file", last)?)
         }
         _ => None,
     };
@@ -755,7 +755,7 @@ fn text(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Optio
 /// Nothing here joins it onto a path, but a caller reconciling pairs across a
 /// release very reasonably would, and `../../etc/passwd` arriving from a record
 /// somebody downloaded is the boundary this crate is supposed to hold.
-fn check_cover_name(id: &str, name: &str) -> Result<String, SampleError> {
+fn check_cover_name(id: &str, field: &str, name: &str) -> Result<String, SampleError> {
     let bad = name.is_empty()
         || name == "."
         || name == ".."
@@ -766,10 +766,9 @@ fn check_cover_name(id: &str, name: &str) -> Result<String, SampleError> {
         return Err(SampleError::BadRecord {
             id: id.to_string(),
             problem: format!(
-                "source_png is {name:?}, which is not a plain file name. The \
-                 field names the cover this image was made from and is joined \
-                 against a manifest, so a path in it would reach outside the \
-                 corpus"
+                "{field} is {name:?}, which is not a plain file name. The \
+                 field names an image and is joined against a manifest, so a \
+                 path in it would reach outside the corpus"
             ),
         });
     }
@@ -1122,7 +1121,24 @@ mod tests {
             ", \"source_png\": \"../../etc/passwd\"",
         );
         let err = first_error(dir.path());
-        assert!(err.to_string().contains("not a plain file name"));
+        let text = err.to_string();
+        assert!(text.contains("not a plain file name"), "got: {text}");
+        assert!(text.contains("source_png"), "got: {text}");
+    }
+
+    /// The same check guards `file`, and the message has to name the field the
+    /// reader has to go and fix. Saying `source_png` to somebody whose record
+    /// carries a bad `file` sends them to a key that is perfectly fine.
+    #[test]
+    fn a_bad_file_field_is_refused_in_its_own_name() {
+        let dir = TempDir::new().unwrap();
+        pair(dir.path(), "000000", "png", ", \"file\": \"..\"");
+        let text = first_error(dir.path()).to_string();
+        assert!(text.contains("not a plain file name"), "got: {text}");
+        assert!(
+            text.contains("file is") && !text.contains("source_png"),
+            "got: {text}"
+        );
     }
 
     #[test]

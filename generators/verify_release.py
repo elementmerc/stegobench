@@ -328,7 +328,22 @@ def check_covers(rows: list[dict], expected: int, report: Report) -> None:
     if len(rows) != expected:
         report.fail("covers", f"{len(rows):,} rows, expected {expected:,}")
 
-    orders = sorted(r.get("tier_order") for r in rows)
+    # A row with no tier_order, or one carrying a string, used to reach the
+    # sort, where comparing it against an integer raises: the gate died with a
+    # traceback on exactly the malformed manifest it exists to catch, before
+    # any other check had run.
+    unstamped = [r.get("file", "<unnamed>") for r in rows
+                 if not isinstance(r.get("tier_order"), int)
+                 or isinstance(r.get("tier_order"), bool)]
+    if unstamped:
+        report.fail("covers",
+                    f"{len(unstamped):,} row(s) carry no whole-number "
+                    f"tier_order, e.g. {unstamped[:3]}. Tier order is the one "
+                    f"ordering the tiers nest over, so a row without it "
+                    f"belongs to no tier. Run manifest_repair.py")
+    orders = sorted(r["tier_order"] for r in rows
+                    if isinstance(r.get("tier_order"), int)
+                    and not isinstance(r.get("tier_order"), bool))
     if orders != list(range(len(rows))):
         holes = set(range(len(rows))) - set(orders)
         report.fail("covers",
@@ -416,10 +431,20 @@ def check_packed(release: pathlib.Path, rows: list[dict],
             if not tar_path.is_file():
                 unreadable.append(str(tar_path.name))
                 continue
-            first = shard.get("first_tier_order", 0)
+            # Defaulting the span to 0..0 narrowed this to a single member and
+            # still reported the shard as checked, so an index missing the
+            # fields, which is what a truncated or older packer writes, passed
+            # the check on the strength of member 000000.png.
+            if not isinstance(shard.get("first_tier_order"), int) \
+                    or not isinstance(shard.get("last_tier_order"), int):
+                unreadable.append(
+                    f"{shard.get('shard', tar_path.name)}: the index names no "
+                    f"tier_order span for this shard, so there is no telling "
+                    f"which covers it should hold")
+                continue
+            first = shard["first_tier_order"]
             wanted = {f"{n:06d}.png" for n in
-                      _positions(first, shard.get("last_tier_order", first),
-                                 sample)}
+                      _positions(first, shard["last_tier_order"], sample)}
             with tarfile.open(tar_path) as tar:
                 for member in tar:
                     if member.name not in wanted:
@@ -860,16 +885,28 @@ def check_stale(arm_root: pathlib.Path, sample_per_arm: int,
     """
     manifests = sorted(arm_root.rglob("manifest.jsonl"))
     stale, checked = [], 0
+    # A clean half that is not on disk is not a clean half that matches. It
+    # used to be skipped without a count, so the line below reported how many
+    # of the survivors matched and read as a pass over the whole arm.
+    absent, absent_examples = 0, []
     for path in manifests:
         base = path.parent
         rows = [r for r in load_rows(path) if r.get("clean_sha256")]
         for row in _sample(rows, sample_per_arm):
             clean = base / row["clean"]
             if not clean.is_file():
+                absent += 1
+                if len(absent_examples) < 3:
+                    absent_examples.append(row["clean"])
                 continue
             checked += 1
             if digest(clean) != row["clean_sha256"]:
                 stale.append(row["clean"])
+    if absent:
+        report.fail("stale",
+                    f"{absent:,} clean half/halves an arm manifest names are "
+                    f"not on disk, e.g. {absent_examples}, so this check could "
+                    f"not look at them")
     if nothing_checked("stale", checked, report, "clean halves"):
         return
     if stale:

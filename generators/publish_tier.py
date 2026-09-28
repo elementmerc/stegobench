@@ -744,7 +744,10 @@ def cmd_upload(args) -> int:
     print("Upload is not wired yet: the SDKs are not installed on this box and "
           "installing them is a deliberate step, not something a release script "
           "should do to a machine on its own.")
-    return 0
+    # Not zero. A release script reads the status, and a command named `upload`
+    # that reports success having uploaded nothing is how the next step marks a
+    # tier published that nobody can download.
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -772,7 +775,11 @@ def main(argv: list[str] | None = None) -> int:
     u.set_defaults(func=cmd_upload)
 
     args = ap.parse_args(argv)
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     return args.func(args)
 
 

@@ -359,7 +359,11 @@ def main(argv: list[str] | None = None) -> int:
         return cross_check(pathlib.Path(args.manifest), args.limit,
                            pathlib.Path(args.report) if args.report else None)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     manifest = pathlib.Path(args.manifest)
     if not manifest.is_file():
         print(f"no manifest at {manifest}", file=sys.stderr)

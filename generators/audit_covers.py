@@ -221,7 +221,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="rewrite covers from their pixels, then re-audit")
     args = ap.parse_args(argv)
 
-    sys.stdout.reconfigure(line_buffering=True)
+    # A caller that redirected stdout may have put something there that
+    # cannot be reconfigured, and losing the line buffering is a cosmetic
+    # loss where crashing on it is a real one.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     root = pathlib.Path(args.covers)
     manifest_path = pathlib.Path(args.manifest) if args.manifest else root / "manifest.jsonl"
     if not root.is_dir():
