@@ -1,0 +1,73 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# coverage.py configuration for both Python halves of this repository.
+#
+# Paths here are relative to the working directory, not to this file, so every
+# invocation runs from the repository root. `tools/coverage/measure.py` does
+# that for you and is the supported entry point.
+
+[run]
+# Branch coverage, not line coverage. The rule in CLAUDE.md Section 7 is about
+# branches, and a line figure quietly overstates it: a one-line `if` with an
+# untaken else counts as fully covered by lines and half covered by branches.
+branch = True
+
+# Measuring the same code twice from two different runs has to add up rather
+# than overwrite, because each half is measured in its own process.
+parallel = True
+
+# Anything imported but never executed still gets a row, so a module with no
+# tests at all shows as 0% rather than disappearing from the denominator.
+# Without this the figure improves when somebody deletes a test file.
+source =
+    generators
+    tools/release
+
+omit =
+    # Test files themselves. A suite that measures its own coverage always
+    # scores near 100% and drags the total up by the size of the suite, which
+    # is the single easiest way to make this number decorative.
+    */test_*.py
+    # Build and cache artefacts, never source.
+    */__pycache__/*
+    # The measurement harness. It runs the tests rather than being run by
+    # them, so it would always read as uncovered and would report on itself.
+    tools/coverage/*
+
+[report]
+# Report partial branches too, so a branch taken in one direction only is
+# visible rather than rounded into the line figure.
+show_missing = True
+skip_covered = False
+precision = 2
+
+exclude_also =
+    # The standard escape hatch, kept so a genuinely unreachable line can be
+    # marked at the point it lives rather than by a blanket rule here.
+    pragma: no cover
+
+    # Import-time type-checking blocks never execute at runtime by design.
+    # They contain no behaviour, so counting them measures nothing.
+    ^\s*if TYPE_CHECKING:
+
+    # Script entry points. `python3 -m unittest` imports the module, so this
+    # block is unreachable from any test by construction; covering it would
+    # mean spawning a subprocess per module to exercise two lines of argv
+    # plumbing. The CLI paths these blocks call ARE covered, through `main()`.
+    ^\s*if __name__ == ["']__main__["']:
+
+    # An abstract method body. The contract is that it is never called.
+    ^\s*raise NotImplementedError
+
+# Deliberately NOT excluded, because each one hides something real:
+#   - `except ImportError` blocks. Those are the optional-dependency
+#     degradation paths, and whether they work is exactly what a reader who
+#     installs `requirements.txt` without the optional set depends on.
+#   - `if sys.platform` blocks. The generators claim to run on three operating
+#     systems and CI runs them on three, so the untaken side on one runner is
+#     information rather than noise.
+#   - Defensive `raise` lines. Fail-loud error paths are what CLAUDE.md
+#     Section 2 asks for; excusing them from measurement is how they rot.

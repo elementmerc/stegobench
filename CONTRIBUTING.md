@@ -174,6 +174,33 @@ If you added a Python module under `generators/`, `test_readme.py` fails until
 `generators/README.md` has a row for it. That's deliberate: the table is the
 index, and an undocumented module is an invisible one.
 
+## Coverage
+
+There's a bar for new work: at least 90% branch coverage on the files your
+change touches. You can measure it rather than guess at it, one command per
+half, from the repository root:
+
+```sh
+pip install coverage==7.16.0
+python3 tools/coverage/measure.py python
+
+cargo install cargo-llvm-cov --locked --version 0.8.7
+rustup component add llvm-tools-preview
+python3 tools/coverage/measure.py rust
+```
+
+Each one runs the real suites and prints every file under 90%, so you can look
+up the files you touched. CI runs both and puts the same list in the run
+summary.
+
+What CI actually fails on is a drop, not the 90% bar. `tools/coverage/floors.toml`
+records the coverage each half has already reached, and a run that comes in
+under its floor is a failure. The floor only goes up, and only through a commit:
+run the command again with `--bump` and commit the rewritten file. The 90% bar
+is reported so a human reads it; the floor is enforced so the tree can't slide
+backwards. `tools/coverage/README.md` has the reasoning, the current figures,
+and what's excluded from the measurement and why.
+
 ## Writing style in documentation
 
 The prose here is British English, uses contractions, and avoids em dashes as

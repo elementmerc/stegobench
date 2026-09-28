@@ -64,6 +64,12 @@ jobs:
         # The shared bandwidth budget is timing sensitive and uses flock, so it
         # is the one piece here whose behaviour genuinely differs per platform.
         run: python -m unittest discover -s tools/release -p "test_*.py" -v
+      - name: Coverage tooling tests
+        # The tool that holds this repository to a coverage figure is held to
+        # one too. It arrived without tests, and the first thing they found was
+        # that a component the floors file had never heard of was skipped in
+        # silence, so a new crate would have been measured and never gated.
+        run: python -m unittest discover -s tools/coverage -p "test_*.py" -v
 
   tiers:
     name: Tiers on ${{ matrix.os }}, Nano built, all three selected
@@ -189,6 +195,107 @@ jobs:
         # `--strict` fails on a dependency the tool could not resolve, so a
         # package skipped for being unreadable is a failure rather than a pass.
         run: pip-audit --requirement requirements.txt --strict
+
+  # COVERAGE, AND WHY THE GATE IS A RATCHET RATHER THAN A FLAT 90%
+  #
+  # CLAUDE.md Section 7 asks for at least 90% branch coverage on CHANGED
+  # files. Until these two jobs existed, nothing in this repository had ever
+  # measured that; every claim of meeting it was a count of tests written.
+  #
+  # Three things had to be true of whatever went in here, and they pull
+  # against each other:
+  #
+  #   1. The rule is about changed files, not the whole tree. A whole-tree
+  #      gate at 90% fails on its first run, on code nobody is touching. The
+  #      first measurement, on 2026-09-28, was 44.54% for `generators` and
+  #      68.05% for `tools/release`; only the Rust workspace, at 90.42%,
+  #      would have cleared it. Section 6 is explicit that pre-existing
+  #      problems on untouched code are left alone.
+  #   2. A job that is red for a reason nobody intends to fix is a job people
+  #      learn to scroll past. This repository already carries that lesson:
+  #      `docs.yml` is `workflow_dispatch` only because a permanently red
+  #      check costs more than it reports. A second one would be worse than
+  #      no coverage job at all.
+  #   3. A job that only prints a number and never fails is decorative.
+  #
+  # So the gate is a RATCHET. `tools/coverage/floors.toml` records the
+  # coverage already reached, per component, in the repository where anybody
+  # can read it and its history shows every move. A run below its floor fails
+  # loud; a run above it passes and says the floor can be raised. The floor
+  # only ever goes up, by a deliberate `--bump` commit, never by CI writing
+  # to the repository behind anybody's back. That satisfies (1) because
+  # today's low figures are recorded rather than punished, (2) because the
+  # first run is green by construction, and (3) because a genuine regression
+  # is a failure rather than a smaller number in a log.
+  #
+  # The 90% rule itself is not abandoned: both jobs print every file under
+  # 90% into the run summary, so a reviewer looking at a pull request can see
+  # in one place whether the files it touched are on that list. That is
+  # reported rather than enforced on purpose. A one-line typo fix in a
+  # module sitting at 6% would otherwise turn a pull request red and demand
+  # a test-writing project nobody asked for, which is failure mode (2) with
+  # extra steps. The honest division is that the machine holds the line and
+  # a human reads the list.
+  #
+  # The floors were set one whole point under the developer-machine
+  # measurement because no runner had produced a figure yet. After the first
+  # green run here, bump them to what the runner reports.
+  coverage-python:
+    name: Coverage, Python half
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install, from the pinned set only
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Install coverage.py
+        # Pinned, and deliberately not added to `requirements.txt`: that file
+        # is what a reader installs to build the corpus, and a measurement
+        # tool is not part of building it. 7.16.0 was uploaded on 2026-08-28
+        # and pinned on 2026-09-28, so it was 31 days old and well past the
+        # seven day cooldown in baseline Section 5.
+        run: python -m pip install coverage==7.16.0
+      - name: Measure, and hold the floor
+        # Runs both suites exactly as the `generators` job discovers them, so
+        # a figure here is measured on the same tests that job reports on.
+        run: python tools/coverage/measure.py python --summary "$GITHUB_STEP_SUMMARY"
+
+  coverage-rust:
+    name: Coverage, Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Add the LLVM tools the instrumentation needs
+        # Not added to `rust-toolchain.toml`, because that file governs every
+        # build in the repository and this component is needed by one job.
+        run: rustup component add llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        # Pinned by version, unlike `cargo-audit` above. The reason that one
+        # floats is that an audit tool frozen at an old version stops reading
+        # the advisory format it exists to read. A coverage tool has no such
+        # problem, and a floating one would move the measured figure without
+        # a commit of ours in between, which is exactly what a ratchet must
+        # not have under it. 0.8.7 was published on 2026-05-13 and pinned on
+        # 2026-09-28, so it was 138 days old and past the cooldown.
+        run: cargo install cargo-llvm-cov --locked --version 0.8.7
+      - name: Measure, and hold the floor
+        # One crate at a time rather than `--workspace`: an instrumented
+        # workspace build is heavy enough to be killed by a memory limit on a
+        # developer machine, and `cargo llvm-cov report` merges the profiles
+        # afterwards into the same combined figure.
+        #
+        # This is REGION coverage, not branch coverage, and the distinction is
+        # written down rather than glossed. `cargo llvm-cov --branch` requires
+        # a nightly compiler and `rust-toolchain.toml` pins stable on purpose.
+        run: python3 tools/coverage/measure.py rust --summary "$GITHUB_STEP_SUMMARY"
 
   docs:
     name: ${{ matrix.name }} documentation builds

@@ -1,0 +1,65 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# The coverage ratchet. Each floor is the coverage that has already been
+# reached, rounded DOWN to a whole percent, and a run that comes in under it
+# fails. Raise a floor with
+#
+#     python3 tools/coverage/measure.py <half> --bump
+#
+# and commit the result. Lowering one is a hand edit in its own commit, with
+# the reason in the commit message, because a floor that can quietly drop is
+# not a floor.
+#
+# These are NOT targets. The target is CLAUDE.md Section 7: 90% branch
+# coverage on the files a change touches. The floors exist so the tree cannot
+# slide backwards on the way there, and `measure.py` prints every file below
+# 90% so the target stays visible next to the floor.
+#
+# Each floor below sits one whole point under the figure measured on a
+# developer machine on 2026-09-28, because no CI runner had ever produced one
+# and a floor set from a number the runner has not confirmed is how a check
+# goes red on its first run for a reason nobody intended. Once a run on the
+# runner is green, `--bump` lifts each floor to what the runner actually
+# reports and the allowance is gone.
+#
+# Rounding down to a whole percent gives up to one point of natural headroom,
+# which absorbs the ordinary wobble of a report (a compiler version that
+# splits a region differently, a test that skips on one runner) without
+# needing a tolerance that would let real regressions through.
+
+[component.generators]
+# `generators/`, statements and branches blended, measured by coverage.py.
+#
+# Low, and honestly so. The suite concentrates on the parts that decide what
+# ships: the tier prefix guarantee, the licence and provenance records, the
+# release verifier. The one-shot corpus construction scripts that each ran
+# once, at scale, against real images are largely unexercised, and pretending
+# otherwise by excluding them from the denominator is exactly the move this
+# file exists to prevent.
+#
+# Measured 44.54% on 2026-09-28, on the committed tree, on a developer machine.
+floor = 43
+
+[component."tools/release"]
+# `tools/release/`, same unit. Higher, because publishing is close to
+# irreversible (CLAUDE.md PART C Section 3) and this is where the checks that
+# run before an upload live.
+#
+# Measured 68.05% on 2026-09-28, on the committed tree, on a developer machine.
+floor = 67
+
+[component.rust]
+# The Rust workspace, as REGION coverage rather than branch coverage.
+#
+# `cargo llvm-cov --branch` needs a nightly compiler, and `rust-toolchain.toml`
+# pins stable 1.98.1 on purpose: a floating toolchain turned an untouched
+# branch red on 2026-09-18. Region coverage is the closest honest measure on
+# stable. It is finer than line coverage, since an expression that never
+# evaluates is its own region, but it is NOT branch coverage and this file does
+# not claim it is.
+#
+# Measured 90.42% on 2026-09-28, on the committed tree, on a developer machine.
+floor = 89
