@@ -1,0 +1,45 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# Addresses in this repository's published prose that are known not to answer,
+# and why. `check_prose_links.py` reports these instead of failing on them.
+#
+# WHY THIS FILE RATHER THAN A LIST INSIDE THE CHECKER
+#
+# Two different things look alike to a link checker and are not alike at all:
+# an address that is broken, and an address that is an identifier or is not
+# live yet. Without somewhere to say which is which, a nightly job goes red for
+# a reason nobody intends to fix, and a red tick everybody learns to ignore
+# costs more than it reports. This repository already carries that cautionary
+# tale in `docs.yml`.
+#
+# WHAT STOPS THIS FILE BECOMING A PLACE TO HIDE THINGS
+#
+# An entry expires by itself. When an address listed here STARTS answering, the
+# checker fails and tells you to delete the entry, because the reason it was
+# written down has gone. That is the same shape as the channel gate in
+# `channels.toml`: the exemption is allowed to exist only while its reason
+# does, and nothing depends on somebody remembering to revisit it.
+#
+# Every entry needs a reason a stranger can evaluate. "Flaky" is not one.
+
+[[address]]
+url = "https://github.com/elementmerc/stegobench"
+reason = """
+This repository is private today. The address is correct and answers 404 to \
+everybody outside the account, and it starts working the moment the repo is \
+made public, which is the plan rather than a hypothetical. Delete this entry \
+at the flip; the checker will fail and ask you to, the first night after.\
+"""
+
+[[address]]
+url = "https://token.actions.githubusercontent.com"
+reason = """
+An OpenID Connect issuer identifier, not a page. It appears in \
+`tools/release/RELEASING.md` because it is the issuer that trusted publishing \
+checks tokens against, and an issuer identifier is a name that happens to be \
+spelled as a URL. There is nothing at it for a browser to show and there never \
+will be.\
+"""

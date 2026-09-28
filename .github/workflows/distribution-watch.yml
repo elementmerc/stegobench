@@ -89,3 +89,31 @@ jobs:
           path: distribution.json
           retention-days: 90
           if-no-files-found: warn
+
+  prose-links:
+    name: Every address in the published prose still goes somewhere
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # A separate job from the channel check above, because it answers a
+      # different question and a failure in one should not hide the other. That
+      # one asks whether each destination serves this release; this one asks
+      # whether the addresses a reader follows out of our own prose still reach
+      # anything. The failure it exists to catch has already happened next
+      # door: a DATASHEET told photographers to raise objections at a URL that
+      # answered 404, and the licence the corpus depends on assumes that
+      # channel exists.
+      - name: Check the addresses in the published prose
+        run: |
+          python3 tools/release/check_prose_links.py \
+            --out prose-links.json
+
+      - name: Keep the ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: prose-links
+          path: prose-links.json
+          retention-days: 90
+          if-no-files-found: warn
