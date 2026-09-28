@@ -1,21 +1,44 @@
 # Stegobench
 
-A reproducible benchmark for steganalysis: run detectors and embedders as
-sandboxed plugins, score them against a labelled corpus, and get back a
-versioned JSON document that names the exact bytes it was measured on.
+**Stegobench measures how good a steganography detector is.** You give it
+images whose answers are already known (this one is clean, this one hides a
+payload), it runs a detector over every one of them, and it reports how often
+the detector was right, in a versioned JSON document that names the exact
+bytes the number was measured on.
+
+**It does not examine your own images.** If your question is "is something
+hidden in these pictures", that's the opposite direction: unknown images, and
+a detector you already trust. Stegobench is how you find out whether to trust
+one. Run `stegobench help scope` for the difference in full, and for where to
+go instead.
 
 Most published steganalysis results can't be checked by the people reading
 them. The corpora usually can't be redistributed, and the discipline that
 keeps a measurement honest (a clean image and its stego twin must differ in
 nothing but the payload, a cover and its stego twin must land on the same
 side of a train/test split) is described in a paper rather than enforced by
-the tool that produced the number. Stegobench is an attempt at fixing both:
-[Pentimento](https://github.com/elementmerc/pentimento) is the redistributable
-corpus, and this repository is the harness.
+the tool that produced the number. Stegobench is an attempt at fixing both.
+
+## Two halves, two names, one repository
+
+| | What it does | Language | Install |
+|---|---|---|---|
+| **`stegobench`** | the harness: runs detectors over a labelled corpus and scores them | Rust | `cargo install --path crates/stegobench-cli` |
+| **`pentimento`** | the generators: build, audit, pack and verify a labelled corpus in the first place | Python | `pip install -e .` |
+
+They're deliberately not given one name. Two different programs sharing one
+name on one PATH is a worse problem than the one a single entry point would
+solve.
+
+If you only want the corpus and your own code, you don't need either:
+[Pentimento](https://github.com/elementmerc/pentimento) is published on
+Internet Archive, HuggingFace and Kaggle, and it's a JPEG-decompressed spatial
+corpus, not comparable to BOSSbase. Read `docs/design/pentimento.md` before
+quoting a number from it.
 
 ## What's here today, honestly
 
-Two halves, at different stages:
+The two halves are at different stages:
 
 - **A Rust command-line tool** (`stegobench`) that reads a registry of
   detectors, embedders and corpora, checks whether this machine can run them,
@@ -34,33 +57,176 @@ do yet is score a registered tier: it reads an unpacked directory, so a packed
 tier has to be extracted first and the run is marked `custom`. That, and
 building a corpus from the Rust side, is what the Python half still owns.
 
-## Three commands to try
+## Your first five minutes
+
+Install it, then work down the page. Every command below is one you can run,
+and the output shown is output it printed.
 
 ```sh
-# Build the tool
-cargo build --release -p stegobench-cli
-
-# What can this installation run, and where did that answer come from?
-# (Read live from plugins/registry/, so it can't go stale like a README can.)
-./target/release/stegobench list detectors --json
-
-# Is this machine actually able to run what the registry claims?
-# (Checks for each tool's container or binary, and where present, asks it
-# to score a known planted signal and a known clean fixture.)
-./target/release/stegobench doctor
-
-# What does a measurement look like, structurally?
-./target/release/stegobench schema result-v1
+cargo install --path crates/stegobench-cli
 ```
+
+You need no configuration files and no checkout afterwards. The tool registry
+is compiled into the binary as a fallback, so `stegobench` works from any
+directory on a fresh machine.
+
+**1. What is this?** Type the bare name.
+
+```
+$ stegobench
+stegobench measures how good a steganography detector is, by running it over images whose answers are already known.
+
+It does NOT examine your own images to find out what is in them. That is the other direction, and `stegobench help scope` says where to go for it.
+
+Try this first:
+  stegobench list detectors    what this installation can run
+
+Then:
+  stegobench doctor            what is installed here, and what each tool still needs
+  stegobench help              the reasoning, one topic at a time
+  stegobench --help            every command and flag
+```
+
+**2. What can it run?** The list is read from the registry, so it can't go
+stale the way a README can.
+
+```
+$ stegobench list detectors
+aletheia-rich    MIT                container  stegobench/aletheia-rich
+aletheia-rs      MIT                container  stegobench/aletheia
+aletheia-spa     MIT                container  stegobench/aletheia
+stegashield      proprietary        container  5iprojects/stegashield  needs STEGASHIELD_LICENCE
+stegcore         AGPL-3.0-or-later  local      stegcore
+stegexpose       GPL-3.0            container  stegobench/stegexpose
+zsteg            MIT                container  stegobench/zsteg
+
+container  runs in a sandbox with no network, pinned by image digest, so two machines run identical bytes. Needs a container runtime.
+local      runs a program you installed, pinned by the hash of the file that ran. No sandbox, and the hash is particular to your build.
+```
+
+**3. Can this machine actually run them?** `doctor` checks each tool's
+container or binary and prints the line to type for each one that's missing.
+Its first line names which registry answered, because a machine can hold more
+than one.
+
+```
+$ stegobench doctor --no-selftest
+registry: built in (compiled into this binary, because no registry was found on disk)
+
+aletheia-rich    MISSING   not pulled. docker pull stegobench/aletheia-rich@sha256:5b08e93aaed2b2c30753ec3654df41d1406a4669f998384a04c26e24952f3ddf  not verified
+    docker pull stegobench/aletheia-rich@sha256:5b08e93aaed2b2c30753ec3654df41d1406a4669f998384a04c26e24952f3ddf
+...
+13 tool(s): 0 verified, 0 answering, 0 broken, 13 not installed, 0 undetermined, 13 not checked.
+```
+
+Drop `--no-selftest` and it also asks each installed tool to flag a known
+planted signal and clear a known clean fixture, in both directions, because a
+tool that answers "stego" to everything passes a one-sided check.
+
+**4. Check what a run would cost, before you commit to it.** `plan` takes the
+command you'd type, so it can't describe a different run from the one that
+would happen. It counts the corpus rather than guessing from its size, and
+says the time is unknown where a tool declares no measured rate:
+
+```
+$ stegobench plan score --corpus ./demo-corpus --detector all
+6 item(s) to score with each of 7 detector(s):
+aletheia-rich    about 32 seconds
+aletheia-rs      about 8 seconds
+aletheia-spa     about 5 seconds
+stegashield      about 5 seconds
+stegcore         about 1 seconds
+stegexpose       about 2 seconds
+zsteg            about 1 seconds
+
+Total: about 55 seconds, over the 7 detector(s) that declare a rate.
+The corpus is walked once however many detectors are asked, so adding one costs its own scoring pass and nothing else.
+Records files: about 0.0 MB in total. Worst case, if every item hit the 60s deadline for every detector: 42 minutes.
+Each result would be custom: no --corpus-id was given, so there is no registered corpus to check this directory against. A custom result is comparable with itself rather than with anybody else's number
+```
+
+**5. Score the corpus.** This is the job. Point it at a directory of labelled
+samples and a detector you have installed:
+
+```sh
+stegobench score --corpus ./demo-corpus --detector zsteg --out result.json
+```
+
+It asks the detector about every image, writes each answer as it goes, and
+emits a validated `result-v1` document. Interrupt it and run the same command
+again and it picks up where it stopped. `--detector all` runs every registered
+detector over the same bytes in one pass.
+
+Point it at a folder of your own photographs and it refuses, and explains why
+rather than reporting a missing file:
+
+```
+$ stegobench score --corpus ./holiday-photos --detector all
+./holiday-photos holds 3 image(s) and not one record saying which of them hides anything, so there is nothing here to be right or wrong about.
+
+Stegobench measures DETECTORS, using images whose answers were fixed before any detector saw them. It does not examine images to find out what is in them. If your question is "is something hidden in these pictures", you want a detector pointed at your own files, and stegobench is how you find out whether to trust one.
+
+`stegobench help scope` sets out the difference and where to go instead.
+`stegobench list detectors` names every detector registered here.
+`stegobench help pairing` explains what a corpus has to carry before a number measured on it means anything.
+```
+
+It exits 3, a pre-flight refusal, which a script can tell apart from an error
+and knows not to retry.
+
+**6. Turn results into a table.** `report` reads result documents and renders
+the conditions into every row, so a figure can't be lifted out without them.
+This repository ships 24 real result documents under `results/v1`:
+
+```
+$ stegobench report results/v1 --format markdown
+# Steganalysis results
+
+24 result document(s) from results/v1, in 2 table(s).
+
+The tables are separate because the figures in them are not comparable with each other. [...]
+
+## rich-suniward (custom)
+
+Corpus digest: `sha256:d93e9720af0c3ab7a21dd9e81f2d4b4cbc2f6025fa3d8ef00110d76aea2c97b4`
+
+[... one paragraph saying what `custom` rules out ...]
+
+| detector | route | corpus | config | arm | domain | AUC | TPR@1%FA | TPR@10%FA | pairing | split | clean/stego/unscored | conditions |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| aletheia-rs | container | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5087 | 0.0090 | 0.0950 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+| aletheia-spa | container | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5018 | 0.0110 | 0.1010 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+| stegexpose | container | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5097 | 0.0090 | 0.0990 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+```
+
+Rows are ordered by arm and then by detector, never by score. It isn't a
+ranking and no ranking can be derived from it.
+
+### Two things worth knowing early
 
 Every subcommand accepts `--json`, which puts machine-readable output on
 stdout and leaves progress and human text on stderr, so
 `stegobench doctor --json | jq` works while you can still watch it run.
 
 Conceptual reasoning that doesn't fit on a `--help` line lives behind
-`stegobench help <topic>`: try `stegobench help pairing` or
-`stegobench help results`, which is how to judge a number somebody else
-produced.
+`stegobench help <topic>`: `scope` is what this measures and what it doesn't,
+`pairing` is why a clean image and its stego twin must differ in nothing but
+the payload, and `results` is how to judge a number somebody else produced.
+
+### Where the registry comes from
+
+In order: `--registry` or `STEGOBENCH_REGISTRY`, then `./plugins/registry`,
+then beside the executable, then your user data directory, then the system
+data directory, and finally the copy compiled into the binary. A path you name
+yourself is used as given: if it isn't there that's an error, never a quiet
+fall back to a different registry. `stegobench doctor` prints which one
+answered.
+
+**The first one found answers in full.** Registries aren't merged, so a
+directory holding one detector of your own gives you one detector and not
+fourteen. To add your own tool to the set that ships, copy `plugins/registry/`
+somewhere and add your file to the copy. `stegobench list` then shows all of
+them and names the directory it read.
 
 ## Adding your own detector
 

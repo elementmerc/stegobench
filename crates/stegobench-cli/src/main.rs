@@ -28,6 +28,8 @@ use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command, ReportFormat};
 use stegobench_cli::help_topics;
 use stegobench_cli::needs;
+use stegobench_cli::registry;
+use stegobench_cli::registry::Resolved;
 use stegobench_cli::report;
 use stegobench_cli::score;
 use stegobench_core::registry::{Kind, Registry};
@@ -109,17 +111,16 @@ fn cmd_schema(name: &str) -> Output {
     }
 }
 
-fn load_registry(dir: &Path) -> Result<Registry, Output> {
-    Registry::load(dir).map_err(|e| {
-        Output::err(
-            exit::FAILURE,
-            format!(
-                "{e}\n\nLooked in {}. Point --registry or STEGOBENCH_REGISTRY \
-                 at the directory holding the tool descriptions.",
-                dir.display()
-            ),
-        )
-    })
+/// Finds the registry once, and hands it to the command that asked for it.
+///
+/// Every failure to find one is the same shape and the same exit code, so the
+/// five commands that read a registry report it identically rather than each
+/// inventing its own wording.
+fn with_registry(cli: &Cli, f: impl FnOnce(&Resolved) -> Output) -> Output {
+    match registry::resolve(cli.registry.as_deref()) {
+        Ok(resolved) => f(&resolved),
+        Err(e) => Output::err(e.exit_code(), e.to_string()),
+    }
 }
 
 /// The human block for the registered corpora.
@@ -130,13 +131,12 @@ fn load_registry(dir: &Path) -> Result<Registry, Output> {
 /// different fact from there being no corpus in the world. `list` is a listing
 /// rather than a check, so an empty one is not a failure: it is the count that
 /// has to be visible, and it is, in both the text and the JSON.
-fn corpora_block(reg: &Registry, dir: &Path) -> String {
+fn corpora_block(reg: &Registry, where_from: &str) -> String {
     if reg.corpora.is_empty() {
         return format!(
-            "No corpora are registered in {}/corpora. A corpus entry declares \
+            "No corpora are registered in {where_from}. A corpus entry declares \
              where a dataset lives and what its terms permit; nothing here \
-             means nothing has been declared.",
-            dir.display()
+             means nothing has been declared."
         );
     }
     let mut text = reg
@@ -159,18 +159,32 @@ fn corpora_block(reg: &Registry, dir: &Path) -> String {
     text
 }
 
-fn cmd_list(dir: &Path, kind: &str) -> Output {
-    let reg = match load_registry(dir) {
-        Ok(r) => r,
-        Err(o) => return o,
+fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
+    let reg = &resolved.registry;
+    // Said on every listing, not only in `doctor`. `list` is the first command
+    // a person runs, and a machine with an installed registry and a checkout
+    // has two answers to "what can this run"; which one answered is part of
+    // the answer.
+    let where_from = match resolved.source.path() {
+        Some(p) => p.display().to_string(),
+        None => "the registry compiled into this binary".to_string(),
+    };
+    let corpora_from = match resolved.source.path() {
+        Some(p) => format!("{}/corpora", p.display()),
+        None => where_from.clone(),
     };
     if kind == "corpora" {
         return Output::ok(
             serde_json::json!({
                 "corpora": reg.corpora.values().collect::<Vec<_>>(),
                 "count": reg.corpora.len(),
+                "registry": resolved.to_json(),
             }),
-            corpora_block(&reg, dir),
+            format!(
+                "{}\n\n{}",
+                corpora_block(reg, &corpora_from),
+                resolved.source.line()
+            ),
         );
     }
     let wanted: Vec<_> = match kind {
@@ -196,18 +210,16 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
         // because those two call for different actions.
         human = if reg.entries.is_empty() {
             format!(
-                "No tools are registered under {}, so there is nothing to list \
-                 as {kind:?}. A tool entry declares how to run a detector or an \
-                 embedder; nothing here means nothing has been declared, which \
-                 is not the same as nothing existing.",
-                dir.display()
+                "No tools are registered in {where_from}, so there is nothing \
+                 to list as {kind:?}. A tool entry declares how to run a \
+                 detector or an embedder; nothing here means nothing has been \
+                 declared, which is not the same as nothing existing."
             )
         } else {
             format!(
-                "{} tool(s) are registered under {}, but none of them is a {}. \
-                 `list all` prints every one.",
+                "{} tool(s) are registered in {where_from}, but none of them is \
+                 a {}. `list all` prints every one.",
                 reg.entries.len(),
-                dir.display(),
                 kind.trim_end_matches('s')
             )
         };
@@ -262,19 +274,21 @@ fn cmd_list(dir: &Path, kind: &str) -> Output {
             f.on_demand_mb as f64 / 1024.0
         ));
     }
-    let mut json = serde_json::json!({ "tools": wanted, "footprint": reg.footprint() });
+    let mut json = serde_json::json!({
+        "tools": wanted,
+        "footprint": reg.footprint(),
+        "registry": resolved.to_json(),
+    });
     if kind == "all" {
-        human.push_str(&format!("\n\n{}", corpora_block(&reg, dir)));
+        human.push_str(&format!("\n\n{}", corpora_block(reg, &corpora_from)));
         json["corpora"] = serde_json::json!(reg.corpora.values().collect::<Vec<_>>());
     }
+    human.push_str(&format!("\n\n{}", resolved.source.line()));
     Output::ok(json, human)
 }
 
-fn cmd_describe(dir: &Path, name: &str) -> Output {
-    let reg = match load_registry(dir) {
-        Ok(r) => r,
-        Err(o) => return o,
-    };
+fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
+    let reg = &resolved.registry;
     // The needs block goes FIRST, above the entry, because it is the question
     // somebody typing `describe` is usually asking. The TOML below it is the
     // whole truth and is what they read second. One shape for every subject:
@@ -340,11 +354,8 @@ fn describe_block<T: serde::Serialize + std::fmt::Debug>(
     )
 }
 
-fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
-    let reg = match load_registry(dir) {
-        Ok(r) => r,
-        Err(o) => return o,
-    };
+fn cmd_doctor(resolved: &Resolved, fixtures: &Path, no_selftest: bool) -> Output {
+    let reg = &resolved.registry;
 
     let mut rows = Vec::new();
     let (mut missing, mut broken, mut passed, mut skipped, mut answered) = (0, 0, 0, 0, 0);
@@ -413,6 +424,13 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
     // so a reader scanning thirteen rows finds the instruction beside the
     // problem rather than having to match names up afterwards.
     let mut human: Vec<String> = Vec::new();
+    // First line, before any tool. Every row below is a fact about the
+    // registry that answered, and a machine can easily hold two: a checkout,
+    // an installed copy, and the one compiled into the binary. A reader
+    // looking at a row they did not expect needs to know which one it came
+    // from before they start looking for the tool.
+    human.push(resolved.source.line());
+    human.push(String::new());
     for (_, _, detail, needs) in &rows {
         human.push(detail.clone());
         let block = needs.block();
@@ -473,6 +491,7 @@ fn cmd_doctor(dir: &Path, fixtures: &Path, no_selftest: bool) -> Output {
     }
 
     let json = serde_json::json!({
+        "registry": resolved.to_json(),
         "checked": rows.len(),
         "needing_action": needing,
         "verified": passed,
@@ -771,7 +790,7 @@ fn cmd_help(topic: Option<&str>) -> Output {
 /// there is no second set of arguments to keep in step with `score`. The same
 /// parser reads both, which means a plan cannot silently describe a different
 /// run from the one that would happen.
-fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
+fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     if command.is_empty() {
         return Output::err(
             exit::USAGE,
@@ -790,14 +809,14 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
             )
         }
     };
-    let Command::Score {
+    let Some(Command::Score {
         corpus,
         detector,
         corpus_id,
         limit,
         timeout,
         ..
-    } = &parsed.command
+    }) = &parsed.command
     else {
         return Output::err(
             exit::USAGE,
@@ -807,14 +826,19 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
         );
     };
 
-    let reg = match load_registry(registry_dir) {
-        Ok(r) => r,
-        Err(o) => return o,
-    };
-    let entries = match resolve_detectors(&reg, detector) {
+    let reg = &resolved.registry;
+    let entries = match resolve_detectors(reg, detector) {
         Ok(e) => e,
         Err(o) => return o,
     };
+
+    // The same teaching refusal `score` gives, for the same reason: somebody
+    // asking what a run would cost over their own photographs is on the wrong
+    // side of what this measures, and "no record beside DSC_0001" does not
+    // tell them so.
+    if let Some(why) = unlabelled_corpus(corpus) {
+        return Output::err(exit::PREFLIGHT_REFUSED, why);
+    }
 
     // Counted rather than guessed from the directory size. Walking the corpus
     // is the only way to know how many scorable samples it holds, and an
@@ -836,7 +860,7 @@ fn cmd_plan(registry_dir: &Path, command: &[String]) -> Output {
     // What the run would be WORTH, beside what it would cost. A plan that
     // reports six hours and omits that the result will be `custom` has
     // answered half the question somebody asks before committing six hours.
-    let (configuration, why) = plan_configuration(&reg, corpus_id.as_deref(), limit.is_some());
+    let (configuration, why) = plan_configuration(reg, corpus_id.as_deref(), limit.is_some());
 
     // One JSON line per answer, measured at roughly sixty bytes on the real
     // records this writes, and one records file per detector.
@@ -1092,8 +1116,96 @@ fn resolve_detectors<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Image file extensions, lowercased, that a person is likely to have a folder
+/// of. Not the set the scorer supports: this is a heuristic for recognising
+/// "somebody's pictures", so it is deliberately wider.
+const LOOKS_LIKE_AN_IMAGE: &[&str] = &[
+    "png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "gif", "pgm", "ppm", "heic",
+];
+
+/// How many directory entries the shape check is allowed to look at.
+///
+/// It runs before a command that may take hours, so it has to be cheap and
+/// bounded rather than correct on a pathological tree. Enough to be sure about
+/// a folder of holiday photographs, and it gives up quietly on anything
+/// larger, which then meets the ordinary corpus errors as before.
+const SHAPE_CHECK_ENTRIES: usize = 4096;
+
+/// Whether this looks like a folder of unlabelled images rather than a corpus.
+///
+/// WHY THE REFUSAL TEACHES RATHER THAN REPORTS
+/// -------------------------------------------
+/// Most people who reach for a steganalysis tool want to know whether THEIR
+/// images are hiding something. That is the opposite direction from what this
+/// measures, and the moment somebody points `score` at a folder of their own
+/// files is the moment that distinction is worth the most: they have already
+/// installed the thing and typed a real command, so a message that only says
+/// "no records found" costs them another twenty minutes before they work out
+/// they are in the wrong place.
+///
+/// Returns `None` whenever it cannot be sure, which includes an empty
+/// directory, a directory it could not read, and a tree wider than the bound.
+/// Those cases meet the ordinary corpus errors, which is the safe direction to
+/// be wrong in: a corpus wrongly accused of being a photo album would be a
+/// refusal nobody could work around.
+fn unlabelled_corpus(corpus: &Path) -> Option<String> {
+    let mut images = 0usize;
+    let mut seen = 0usize;
+    let mut stack = vec![(corpus.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let read = std::fs::read_dir(&dir).ok()?;
+        for item in read.flatten() {
+            seen += 1;
+            if seen > SHAPE_CHECK_ENTRIES {
+                return None;
+            }
+            let path = item.path();
+            let Ok(meta) = std::fs::metadata(&path) else {
+                return None;
+            };
+            if meta.is_dir() {
+                if depth < 2 {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            match path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .as_deref()
+            {
+                // One record anywhere is enough to stop guessing. Whether the
+                // records are the RIGHT ones is the corpus loader's job, and
+                // it says so far better than a heuristic could.
+                Some("json" | "jsonl") => return None,
+                Some(ext) if LOOKS_LIKE_AN_IMAGE.contains(&ext) => images += 1,
+                _ => {}
+            }
+        }
+    }
+    if images == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} holds {images} image(s) and not one record saying which of them \
+         hides anything, so there is nothing here to be right or wrong \
+         about.\n\n\
+         Stegobench measures DETECTORS, using images whose answers were fixed \
+         before any detector saw them. It does not examine images to find out \
+         what is in them. If your question is \"is something hidden in these \
+         pictures\", you want a detector pointed at your own files, and \
+         stegobench is how you find out whether to trust one.\n\n\
+         `stegobench help scope` sets out the difference and where to go \
+         instead.\n\
+         `stegobench list detectors` names every detector registered here.\n\
+         `stegobench help pairing` explains what a corpus has to carry before \
+         a number measured on it means anything.",
+        corpus.display()
+    ))
+}
+
 fn cmd_score(
-    registry_dir: &Path,
+    resolved: &Resolved,
     corpus: &Path,
     detectors: &[String],
     corpus_id: Option<&str>,
@@ -1102,15 +1214,21 @@ fn cmd_score(
     timeout: u64,
     limit: Option<u64>,
 ) -> Output {
-    let reg = match load_registry(registry_dir) {
-        Ok(r) => r,
-        Err(o) => return o,
-    };
-    let entries = match resolve_detectors(&reg, detectors) {
+    let reg = &resolved.registry;
+    let entries = match resolve_detectors(reg, detectors) {
         Ok(e) => e,
         Err(o) => return o,
     };
     let many = entries.len() > 1;
+
+    // Asked BEFORE availability, because it is the more useful refusal and
+    // because it does not depend on any detector. Somebody who points `score`
+    // at their own folder of photographs is on the wrong side of the thing
+    // this tool does, and telling them "docker pull ..." sends them to install
+    // a container that will not answer their question either.
+    if let Some(why) = unlabelled_corpus(corpus) {
+        return Output::err(exit::PREFLIGHT_REFUSED, why);
+    }
 
     // Resolved before anything runs, so a typo costs a usage error rather than
     // a corpus walk followed by one.
@@ -1678,18 +1796,83 @@ fn cmd_report(paths: &[PathBuf], format: ReportFormat, out: Option<&Path>) -> Ou
     output
 }
 
+/// What a bare `stegobench` prints.
+///
+/// It used to print the whole help, which is three screens answering a
+/// question nobody typing one word has asked yet. A person who types the bare
+/// name wants to know what this is and what to type next, and both fit in a
+/// few lines. Everything else is one `--help` away and nothing was removed.
+fn cmd_orientation() -> Output {
+    let human = "stegobench measures how good a steganography detector is, by \
+         running it over images whose answers are already known.\n\n\
+         It does NOT examine your own images to find out what is in them. That \
+         is the other direction, and `stegobench help scope` says where to go \
+         for it.\n\n\
+         Try this first:\n  \
+         stegobench list detectors    what this installation can run\n\n\
+         Then:\n  \
+         stegobench doctor            what is installed here, and what each \
+         tool still needs\n  \
+         stegobench help              the reasoning, one topic at a time\n  \
+         stegobench --help            every command and flag"
+        .to_string();
+    let mut out = Output::ok(
+        serde_json::json!({
+            "ok": false,
+            "error": "no command given",
+            "next": ["stegobench list detectors", "stegobench doctor", "stegobench help scope"],
+        }),
+        human,
+    );
+    // Nothing was done, so this is not a success. Exit 2 is what the contract
+    // calls a usage error and what clap returns for the same case, and the
+    // text still goes to stdout because it IS the answer to what was asked.
+    out.code = exit::USAGE;
+    out.payload_on_stdout = true;
+    out
+}
+
+/// The refusal for `check` and `scan`, the two words somebody looking for an
+/// image examiner guesses.
+///
+/// They are routed rather than left to clap's did-you-mean, which suggested
+/// `schema` for `check` and nothing at all for `scan`. Both guesses are about
+/// the same misunderstanding, so both get the same answer to it.
+fn cmd_wrong_direction(word: &str) -> Output {
+    Output::err(
+        exit::USAGE,
+        format!(
+            "there is no `stegobench {word}`, and the thing you are probably \
+             after is not what this tool does.\n\n\
+             Stegobench measures DETECTORS, using images whose answers are \
+             already known. It does not {word} your own images to find out \
+             what is in them. If your question is \"is something hidden in \
+             these pictures\", you want a detector pointed at your own files, \
+             and stegobench is how you find out whether to trust one.\n\n\
+             `stegobench help scope` sets out the difference and where to go \
+             instead.\n\
+             `stegobench list detectors` names every detector registered here.\n\
+             `stegobench score --corpus <labelled corpus> --detector <name>` is \
+             the command this tool is for."
+        ),
+    )
+}
+
 fn run(cli: &Cli) -> Output {
-    match &cli.command {
+    let Some(command) = &cli.command else {
+        return cmd_orientation();
+    };
+    match command {
         Command::Schema { name } => cmd_schema(name),
         Command::Validate { file } => cmd_validate(file),
         Command::Verify { file, corpus } => cmd_verify(file, corpus),
-        Command::List { kind } => cmd_list(&cli.registry, kind),
-        Command::Describe { name } => cmd_describe(&cli.registry, name),
-        Command::Plan { command } => cmd_plan(&cli.registry, command),
+        Command::List { kind } => with_registry(cli, |r| cmd_list(r, kind)),
+        Command::Describe { name } => with_registry(cli, |r| cmd_describe(r, name)),
+        Command::Plan { command } => with_registry(cli, |r| cmd_plan(r, command)),
         Command::Doctor {
             fixtures,
             no_selftest,
-        } => cmd_doctor(&cli.registry, fixtures, *no_selftest),
+        } => with_registry(cli, |r| cmd_doctor(r, fixtures, *no_selftest)),
         Command::Score {
             corpus,
             detector,
@@ -1698,24 +1881,106 @@ fn run(cli: &Cli) -> Output {
             out,
             timeout,
             limit,
-        } => cmd_score(
-            &cli.registry,
-            corpus,
-            detector.as_slice(),
-            corpus_id.as_deref(),
-            records.as_deref(),
-            out.as_deref(),
-            *timeout,
-            *limit,
-        ),
+        } => with_registry(cli, |r| {
+            cmd_score(
+                r,
+                corpus,
+                detector.as_slice(),
+                corpus_id.as_deref(),
+                records.as_deref(),
+                out.as_deref(),
+                *timeout,
+                *limit,
+            )
+        }),
         Command::Report { paths, format, out } => cmd_report(paths, *format, out.as_deref()),
         Command::Completions { shell } => cmd_completions(*shell),
         Command::Help { topic } => cmd_help(topic.as_deref()),
+        Command::Check { .. } => cmd_wrong_direction("check"),
+        Command::Scan { .. } => cmd_wrong_direction("scan"),
     }
 }
 
+/// Parses, and on an unknown subcommand names the closest real one.
+///
+/// clap's own did-you-mean only fires when its threshold is met, so `scan`
+/// produced a usage error naming nothing at all. This always names the nearest
+/// command and always names where the full list is, and falls back to clap's
+/// own message untouched when the offending word cannot be recovered from the
+/// error, because a worse message is better than no message.
+fn parse_or_explain() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if e.kind() == clap::error::ErrorKind::InvalidSubcommand => {
+            let typed = e
+                .get(clap::error::ContextKind::InvalidSubcommand)
+                .map(|v| v.to_string());
+            let Some(typed) = typed else {
+                e.exit();
+            };
+            let nearest = nearest_command(&typed);
+            eprintln!("there is no `stegobench {typed}`.");
+            if let Some(nearest) = nearest {
+                eprintln!("The closest command is `{nearest}`.");
+            }
+            eprintln!(
+                "`stegobench` on its own says what the tool is for, and \
+                 `stegobench --help` lists every command."
+            );
+            std::process::exit(exit::USAGE);
+        }
+        Err(e) => e.exit(),
+    }
+}
+
+/// The visible command whose name is closest to what was typed.
+///
+/// Hidden commands are skipped deliberately: `check` and `scan` are signposts
+/// rather than features, and suggesting one as the nearest match to some third
+/// word would send a reader to a refusal.
+fn nearest_command(typed: &str) -> Option<String> {
+    let mut cmd = Cli::command();
+    cmd.build();
+    let typed = typed.to_lowercase();
+    cmd.get_subcommands()
+        .filter(|s| !s.is_hide_set())
+        .map(|s| s.get_name().to_string())
+        .map(|name| {
+            let d = edit_distance(&typed, &name);
+            (d, name)
+        })
+        // Half the word's length, so a genuinely unrelated word gets no
+        // suggestion rather than a confident wrong one. Two edits at most, AND
+        // no more than half the word: `chek` is three edits from `schema`,
+        // which clap was happy to offer and which is a worse answer than
+        // silence, because it sends somebody to a command about JSON schemas.
+        .filter(|(d, name)| *d <= 2 && *d * 2 <= name.len().max(typed.len()))
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, name)| name)
+}
+
+/// Levenshtein distance, two rows at a time.
+///
+/// Bounded by the product of two command names, both of which are at most a
+/// dozen characters, so there is nothing here to cap.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_or_explain();
     let out = run(&cli);
 
     if cli.json {
@@ -1731,13 +1996,13 @@ fn main() {
         // `schema` writes structured JSON even in human mode, because the
         // schema itself is JSON; `completions` and `help` write the plain
         // text a shell or a reader wants, not a JSON wrapper around it.
-        if matches!(cli.command, Command::Schema { .. }) {
+        if matches!(cli.command, Some(Command::Schema { .. })) {
             let mut stdout = std::io::stdout().lock();
             let _ = serde_json::to_writer_pretty(&mut stdout, &out.json);
             let _ = writeln!(stdout);
         } else if matches!(
             cli.command,
-            Command::Completions { .. } | Command::Help { .. }
+            Some(Command::Completions { .. } | Command::Help { .. })
         ) {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", out.human);
@@ -1914,6 +2179,15 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry")
     }
 
+    /// A registry loaded from exactly the directory a test names.
+    ///
+    /// Deliberately the explicit route rather than `registry::resolve`, so a
+    /// test never picks up whichever registry happens to be installed on the
+    /// machine running it.
+    fn resolved_at(dir: impl AsRef<Path>) -> Resolved {
+        Resolved::from_dir(dir.as_ref()).expect("the registry under test loads")
+    }
+
     /// Every corpus file in the repository is loaded and validated.
     ///
     /// The count is asserted first and deliberately. A loop over an empty
@@ -1984,7 +2258,7 @@ mod tests {
     #[test]
     fn list_corpora_and_describe_reach_a_corpus_the_way_they_reach_a_tool() {
         let dir = shipped_registry();
-        let listed = cmd_list(&dir, "corpora");
+        let listed = cmd_list(&resolved_at(&dir), "corpora");
         assert_eq!(listed.code, exit::OK);
         assert!(
             listed.human.contains("reveal") && listed.human.contains("republish:"),
@@ -1996,15 +2270,15 @@ mod tests {
             "the machine output must carry the count, not only the rows"
         );
 
-        let described = cmd_describe(&dir, "reveal");
+        let described = cmd_describe(&resolved_at(&dir), "reveal");
         assert_eq!(described.code, exit::OK);
         assert_eq!(described.json["licence"]["redistribution"], "permitted");
         assert!(described.human.contains("verified_on"));
 
         // And a tool still answers the same verb.
-        assert_eq!(cmd_describe(&dir, "steghide").code, exit::OK);
+        assert_eq!(cmd_describe(&resolved_at(&dir), "steghide").code, exit::OK);
         // An unknown name is a usage error that names both kinds.
-        let missing = cmd_describe(&dir, "not-registered");
+        let missing = cmd_describe(&resolved_at(&dir), "not-registered");
         assert_eq!(missing.code, exit::USAGE);
         assert!(missing.human.contains("reveal") && missing.human.contains("steghide"));
     }
@@ -2013,7 +2287,7 @@ mod tests {
     /// make the two halves reachable only by knowing which is which.
     #[test]
     fn list_all_carries_the_corpora_as_well_as_the_tools() {
-        let out = cmd_list(&shipped_registry(), "all");
+        let out = cmd_list(&resolved_at(shipped_registry()), "all");
         assert_eq!(out.code, exit::OK);
         assert!(out.json["tools"].as_array().is_some_and(|a| !a.is_empty()));
         assert!(out.json["corpora"]
@@ -2032,7 +2306,7 @@ mod tests {
     #[test]
     fn an_empty_tools_listing_says_where_it_looked() {
         let dir = tempfile::tempdir().unwrap();
-        let out = cmd_list(dir.path(), "detectors");
+        let out = cmd_list(&resolved_at(dir.path()), "detectors");
         assert_eq!(out.code, exit::OK);
         assert!(
             out.human.contains("nothing has been declared")
@@ -2061,7 +2335,7 @@ mod tests {
         )
         .unwrap();
 
-        let out = cmd_list(dir.path(), "embedders");
+        let out = cmd_list(&resolved_at(dir.path()), "embedders");
         assert_eq!(out.code, exit::OK);
         assert!(out.json["tools"].as_array().is_some_and(|a| a.is_empty()));
         assert!(
@@ -2082,7 +2356,7 @@ mod tests {
     #[test]
     fn an_empty_corpora_listing_says_so_rather_than_printing_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let out = cmd_list(dir.path(), "corpora");
+        let out = cmd_list(&resolved_at(dir.path()), "corpora");
         assert_eq!(out.code, exit::OK);
         assert_eq!(out.json["count"], 0);
         assert!(
@@ -2092,9 +2366,270 @@ mod tests {
         );
     }
 
+    /// The defect the analysis called the worst one: the first command a
+    /// person types must work from anywhere. Pinned at the parser, because
+    /// the fix was removing a default value and a default value is one line to
+    /// put back.
+    #[test]
+    fn the_registry_flag_carries_no_relative_default_value() {
+        let mut cmd = Cli::command();
+        cmd.build();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some("registry"))
+            .expect("--registry exists");
+        assert!(
+            arg.get_default_values().is_empty(),
+            "--registry has a default value again, so an installed binary run \
+             outside a checkout resolves it against the current directory and \
+             every command that reads a registry fails"
+        );
+    }
+
+    /// A bare invocation used to print three screens. Somebody who types one
+    /// word is asking what this is, and that answer is short.
+    #[test]
+    fn a_bare_invocation_points_somewhere_rather_than_printing_everything() {
+        let out = cmd_orientation();
+        assert_eq!(out.code, exit::USAGE);
+        assert!(
+            out.payload_on_stdout,
+            "the orientation text is the answer to what was asked, so it \
+             belongs on stdout"
+        );
+        assert!(
+            out.human.contains("stegobench list detectors"),
+            "no obvious next command: {}",
+            out.human
+        );
+        assert!(
+            out.human.contains("help scope"),
+            "the bare invocation does not say what the tool is not for: {}",
+            out.human
+        );
+        assert!(
+            out.human.lines().count() <= 16,
+            "the orientation is {} lines, which is the whole help again",
+            out.human.lines().count()
+        );
+    }
+
+    /// `check` and `scan` are the two words rungs 2 and 3 guess, and clap
+    /// suggested `schema` for one and nothing for the other. Both are the same
+    /// misunderstanding and both get the same answer.
+    #[test]
+    fn check_and_scan_explain_the_direction_rather_than_reporting_a_typo() {
+        for word in ["check", "scan"] {
+            let parsed = Cli::try_parse_from(["stegobench", word, "./images"])
+                .unwrap_or_else(|e| panic!("`{word}` is routed rather than rejected: {e}"));
+            let out = run(&parsed);
+            assert_eq!(out.code, exit::USAGE, "`{word}` should be a usage error");
+            assert!(
+                out.human.contains("help scope"),
+                "`{word}` does not point at the scope topic: {}",
+                out.human
+            );
+            assert!(
+                out.human.contains("measures DETECTORS"),
+                "`{word}` does not say what the tool measures: {}",
+                out.human
+            );
+        }
+    }
+
+    /// Neither of the two signposts may be offered as the nearest match to
+    /// some third word: that would send a reader to a refusal.
+    #[test]
+    fn the_nearest_command_is_named_for_a_near_miss_and_withheld_for_a_stranger() {
+        assert_eq!(nearest_command("lst").as_deref(), Some("list"));
+        assert_eq!(nearest_command("doctr").as_deref(), Some("doctor"));
+        assert_eq!(nearest_command("REPORT").as_deref(), Some("report"));
+        assert_eq!(nearest_command("frobnicate"), None);
+        for word in ["chek", "scn", "sca"] {
+            let got = nearest_command(word);
+            assert!(
+                !matches!(got.as_deref(), Some("check" | "scan")),
+                "{word} was pointed at a hidden signpost: {got:?}"
+            );
+        }
+        assert_eq!(
+            nearest_command("chek"),
+            None,
+            "`chek` was pointed at some third command, which is what clap did \
+             when it answered it with `schema`"
+        );
+    }
+
+    #[test]
+    fn the_edit_distance_is_the_ordinary_one() {
+        assert_eq!(edit_distance("", ""), 0);
+        assert_eq!(edit_distance("", "list"), 4);
+        assert_eq!(edit_distance("list", ""), 4);
+        assert_eq!(edit_distance("list", "list"), 0);
+        assert_eq!(edit_distance("lst", "list"), 1);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+    }
+
+    /// The reorder the ladder asked for, pinned so it cannot quietly revert:
+    /// the commands come before the machine contract, and the machine contract
+    /// is still there.
+    #[test]
+    fn the_long_help_names_the_commands_before_the_exit_codes_and_keeps_both() {
+        let mut cmd = Cli::command();
+        let mut buf: Vec<u8> = Vec::new();
+        cmd.write_long_help(&mut buf).expect("the help renders");
+        let help = String::from_utf8(buf).expect("help is text");
+        let commands = help.find("Commands:").expect("the command list is there");
+        let codes = help
+            .find("EXIT CODES")
+            .expect("the exit codes are still there");
+        assert!(
+            commands < codes,
+            "the exit codes come before the list of commands again"
+        );
+        for code in CONTRACT_EXIT_CODES {
+            assert!(
+                help.contains(&format!("{code}")),
+                "exit code {code} is no longer documented anywhere in the help"
+            );
+        }
+        assert!(
+            help.contains("stdout") && help.contains("stderr"),
+            "the stream contract was dropped rather than moved"
+        );
+        assert!(
+            help.to_lowercase()
+                .contains("does not examine your own images"),
+            "the long help does not separate measuring a detector from \
+             examining your own images"
+        );
+    }
+
+    #[test]
+    fn scope_is_a_help_topic_and_says_what_this_is_not_for() {
+        let out = cmd_help(Some("scope"));
+        assert_eq!(out.code, exit::OK);
+        assert!(out.human.contains("IS SOMETHING HIDDEN IN THESE PICTURES"));
+        assert!(out.human.contains("stegobench list detectors"));
+        let listed = cmd_help(None);
+        assert!(
+            listed.human.contains("scope"),
+            "the topic list does not offer scope: {}",
+            listed.human
+        );
+    }
+
+    /// The heuristic behind the teaching refusal, including both directions it
+    /// must not fire in.
+    #[test]
+    fn a_folder_of_photographs_is_recognised_and_a_corpus_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            unlabelled_corpus(dir.path()),
+            None,
+            "an empty directory is not a photo album"
+        );
+        std::fs::write(dir.path().join("DSC_0001.JPG"), b"x").unwrap();
+        std::fs::write(dir.path().join("DSC_0002.png"), b"x").unwrap();
+        let why = unlabelled_corpus(dir.path()).expect("two images and no records");
+        assert!(why.contains("help scope"), "got: {why}");
+        assert!(why.contains("2 image(s)"), "got: {why}");
+
+        std::fs::write(dir.path().join("DSC_0001.json"), b"{}").unwrap();
+        assert_eq!(
+            unlabelled_corpus(dir.path()),
+            None,
+            "one record is enough to stop guessing and let the corpus loader speak"
+        );
+
+        assert_eq!(
+            unlabelled_corpus(&dir.path().join("not-there")),
+            None,
+            "a missing directory is the corpus loader's error to report, not this one's"
+        );
+    }
+
+    /// The refusal has to reach the person BEFORE the availability check,
+    /// because "docker pull ..." sends them to install something that will not
+    /// answer their question either.
+    #[test]
+    fn score_refuses_a_folder_of_unlabelled_images_before_it_talks_about_detectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("holiday-photos");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.png"), b"x").unwrap();
+        let out = cmd_score(
+            &resolved_at(shipped_registry()),
+            &corpus,
+            &["all".to_string()],
+            None,
+            None,
+            None,
+            5,
+            None,
+        );
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED);
+        assert!(out.human.contains("help scope"), "got: {}", out.human);
+        assert!(
+            !out.human.contains("docker pull"),
+            "the refusal sent somebody to install a container: {}",
+            out.human
+        );
+    }
+
+    /// `plan` is the other command somebody on the wrong side of this points
+    /// at their own pictures, and it used to answer "DSC_0001 has an image but
+    /// no record beside it", which does not tell them what is wrong.
+    #[test]
+    fn plan_refuses_a_folder_of_unlabelled_images_the_same_way_score_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("holiday-photos");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.png"), b"x").unwrap();
+        let out = cmd_plan(
+            &resolved_at(shipped_registry()),
+            &[
+                "score".to_string(),
+                "--corpus".to_string(),
+                corpus.display().to_string(),
+                "--detector".to_string(),
+                "zsteg".to_string(),
+            ],
+        );
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED);
+        assert!(out.human.contains("help scope"), "got: {}", out.human);
+    }
+
+    /// A machine can hold a checkout, an installed copy and the built-in one.
+    /// Which answered is part of the answer.
+    #[test]
+    fn list_and_doctor_both_name_the_registry_that_answered() {
+        let resolved = resolved_at(shipped_registry());
+        let listed = cmd_list(&resolved, "detectors");
+        assert!(
+            listed.human.contains("registry: "),
+            "list does not name the registry: {}",
+            listed.human
+        );
+        assert_eq!(listed.json["registry"]["source"], "explicit");
+        assert_eq!(
+            listed.json["registry"]["path"],
+            shipped_registry().display().to_string()
+        );
+
+        let doctor = cmd_doctor(&resolved, Path::new("fixtures"), true);
+        assert!(
+            doctor.human.starts_with("registry: "),
+            "doctor does not open by naming the registry: {}",
+            doctor.human.lines().next().unwrap_or_default()
+        );
+        assert_eq!(doctor.json["registry"]["source"], "explicit");
+        assert!(doctor.json["registry"]["tools"].as_u64().unwrap() > 0);
+    }
+
     #[test]
     fn an_unknown_list_kind_names_corpora_among_the_known_ones() {
-        let out = cmd_list(&shipped_registry(), "corpuses");
+        let out = cmd_list(&resolved_at(shipped_registry()), "corpuses");
         assert_eq!(out.code, exit::USAGE);
         assert!(out.human.contains("corpora"), "got: {}", out.human);
     }
@@ -2451,7 +2986,7 @@ mod tests {
         let out_dir = tmp.path().join("results");
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["ghost".to_string(), "sizer".to_string()],
             None,
@@ -2507,7 +3042,7 @@ mod tests {
         std::fs::write(out_dir.join("ghost.json"), "{}").unwrap();
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["ghost".to_string(), "sizer".to_string()],
             None,
@@ -2543,7 +3078,7 @@ mod tests {
         std::fs::write(out_dir.join("somebody-elses-tool.json"), "{}").unwrap();
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["sizer".to_string(), "ghost".to_string()],
             None,
@@ -2575,7 +3110,7 @@ mod tests {
         let out_dir = tmp.path().join("results");
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["sizer".to_string(), "sizer2".to_string()],
             None,
@@ -2611,7 +3146,7 @@ mod tests {
         let out_dir = tmp.path().join("results");
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["sizer".to_string(), "sizer2".to_string()],
             None,
@@ -2649,10 +3184,28 @@ mod tests {
         let out_dir = tmp.path().join("results");
         let args = ["sizer".to_string()];
 
-        let first = cmd_score(&reg, &corpus, &args, None, None, Some(&out_dir), 5, None);
+        let first = cmd_score(
+            &resolved_at(&reg),
+            &corpus,
+            &args,
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
         assert_eq!(first.code, exit::OK, "{}", first.human);
 
-        let second = cmd_score(&reg, &corpus, &args, None, None, Some(&out_dir), 5, None);
+        let second = cmd_score(
+            &resolved_at(&reg),
+            &corpus,
+            &args,
+            None,
+            None,
+            Some(&out_dir),
+            5,
+            None,
+        );
         assert_eq!(second.code, exit::OK, "{}", second.human);
         assert!(
             second.human.contains("6 resumed"),
@@ -2673,7 +3226,7 @@ mod tests {
         scratch_corpus(&corpus);
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["sizer".to_string(), "ghost".to_string()],
             None,
@@ -2703,7 +3256,7 @@ mod tests {
         scratch_corpus(&corpus);
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["sizer".to_string()],
             None,
@@ -2742,7 +3295,7 @@ mod tests {
         scratch_corpus(&corpus);
 
         let out = cmd_score(
-            &reg,
+            &resolved_at(&reg),
             &corpus,
             &["all".to_string()],
             None,
@@ -2808,7 +3361,7 @@ mod tests {
     #[test]
     fn doctor_and_describe_both_say_what_a_tool_needs_and_agree() {
         let dir = shipped_registry();
-        let doctor = cmd_doctor(&dir, Path::new("fixtures"), true);
+        let doctor = cmd_doctor(&resolved_at(&dir), Path::new("fixtures"), true);
         assert!(
             doctor.json["needing_action"].is_number(),
             "doctor does not report how many tools need something"
@@ -2823,7 +3376,7 @@ mod tests {
         }
 
         // And `describe` carries the identical structure for the same tool.
-        let described = cmd_describe(&dir, "stegashield");
+        let described = cmd_describe(&resolved_at(&dir), "stegashield");
         assert_eq!(described.code, exit::OK);
         assert!(described.json["needs"]["readiness"].is_string());
         assert!(
@@ -2837,7 +3390,7 @@ mod tests {
 
         // A corpus answers in the same shape, which is the whole point: a
         // reader should not have to know which kind of thing they typed.
-        let corpus = cmd_describe(&dir, "reveal");
+        let corpus = cmd_describe(&resolved_at(&dir), "reveal");
         assert_eq!(corpus.code, exit::OK);
         assert!(corpus.json["needs"]["steps"].is_array());
         assert!(
@@ -2852,7 +3405,7 @@ mod tests {
     /// matters most.
     #[test]
     fn the_list_legend_does_not_call_a_service_a_sandbox() {
-        let out = cmd_list(&shipped_registry(), "detectors");
+        let out = cmd_list(&resolved_at(shipped_registry()), "detectors");
         assert_eq!(out.code, exit::OK);
         assert!(
             out.human.contains("in fact a SERVICE"),
@@ -2908,7 +3461,7 @@ mod tests {
             )
             .unwrap();
             let out = cmd_score(
-                dir.path(),
+                &resolved_at(dir.path()),
                 &dir.path().join("no-such-corpus"),
                 &["ghost".to_string()],
                 None,

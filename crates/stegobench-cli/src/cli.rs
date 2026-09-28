@@ -51,17 +51,64 @@ pub enum ReportFormat {
     // this only removes the implicit bare `help` word clap adds on top of
     // them.
     disable_help_subcommand = true,
-    about = "A reproducible benchmark for image steganalysis",
-    long_about = "Build a labelled corpus, run detectors over identical bytes, \
-                  and report numbers somebody else can check.\n\n\
-                  Machine-readable output goes to stdout with --json; progress \
-                  and diagnostics go to stderr, so the two can be separated.\n\n\
-                  EXIT CODES: 0 success, 1 generic failure, 2 usage error, \
-                  3 pre-flight refusal, 4 plugin failure, 5 verification \
-                  mismatch, 6 schema invalid, 7 licence refusal, \
-                  8 environment unfit, 130 interrupted. Codes 3 and 7 are the \
-                  tool refusing something it is capable of, distinct from an \
-                  ordinary error, so a script or an agent can tell not to retry."
+    // WHAT GOES FIRST, AND WHY IT CHANGED
+    //
+    // This help used to open with the stdout/stderr contract and ten lines of
+    // exit codes, and reach the list of commands after them. That ordering is
+    // right for the person writing a script around the tool and backwards for
+    // the person deciding whether the tool is the one they want: the first
+    // screen answered a question they had not asked, and the question they had
+    // asked ("what is this, and is it for me") was not answered at all.
+    //
+    // So the machine contract moved to `after_long_help`, where a script
+    // author finds it under `--help` and a newcomer is not made to read it
+    // first. Nothing was deleted: both halves are still one command away.
+    about = "Measure how good a steganography detector is, using images whose answers are already known",
+    long_about = "Stegobench measures DETECTORS. You give it a folder of images \
+                  that are already labelled (this one is clean, this one hides \
+                  a payload), it runs a detector over every one of them, and it \
+                  reports how often the detector was right, in a document that \
+                  names the exact bytes the number was measured on.\n\n\
+                  IT DOES NOT EXAMINE YOUR OWN IMAGES. If your question is \
+                  \"is something hidden in these pictures\", that is the \
+                  opposite direction: unknown images, and a detector you \
+                  already trust. Stegobench is how you find out whether to \
+                  trust it. Run `stegobench help scope` for the difference in \
+                  full, and for where to go instead.\n\n\
+                  START HERE\n  \
+                  stegobench list detectors   what this installation can run\n  \
+                  stegobench doctor           what is installed here, and what \
+                  each tool still needs\n  \
+                  stegobench help             the reasoning, one topic at a time",
+    after_help = "Start with `stegobench list detectors`, then `stegobench doctor`.\n\
+                  This measures detectors; it does not examine your own images \
+                  (`stegobench help scope`).\n\
+                  Exit codes and the stdout/stderr contract are under `--help`.",
+    after_long_help = "OUTPUT STREAMS\n  \
+                  Machine-readable output goes to stdout with --json. Progress \
+                  and diagnostics go to stderr, so `stegobench ... --json | jq` \
+                  works while a person can still watch a run that takes hours.\n\n\
+                  EXIT CODES\n  \
+                  0    success\n  \
+                  1    generic failure\n  \
+                  2    usage error\n  \
+                  3    pre-flight refusal\n  \
+                  4    plugin failure\n  \
+                  5    verification mismatch\n  \
+                  6    schema invalid\n  \
+                  7    licence refusal\n  \
+                  8    environment unfit\n  \
+                  130  interrupted\n  \
+                  Codes 3 and 7 are the tool refusing something it is capable \
+                  of, which is distinct from an ordinary error, so a script or \
+                  an agent can tell not to retry.\n\n\
+                  WHERE THE REGISTRY COMES FROM\n  \
+                  In order: --registry or STEGOBENCH_REGISTRY, then \
+                  ./plugins/registry, then beside this executable, then your \
+                  user data directory, then the system data directory, and \
+                  finally the copy compiled into this binary. A path you name \
+                  yourself is used as given and is never quietly swapped for \
+                  another one. `stegobench doctor` prints which one answered."
 )]
 pub struct Cli {
     /// Machine-readable output on stdout. Accepted by every subcommand.
@@ -69,17 +116,20 @@ pub struct Cli {
     pub json: bool,
 
     /// Where the tool registry lives.
-    #[arg(
-        long,
-        global = true,
-        value_name = "DIR",
-        env = "STEGOBENCH_REGISTRY",
-        default_value = "plugins/registry"
-    )]
-    pub registry: std::path::PathBuf,
+    ///
+    /// Left out, stegobench looks in ./plugins/registry, then beside this
+    /// executable, then your user and system data directories, and falls back
+    /// to the copy compiled into the binary. Named here, the path is used as
+    /// given: a path that is not there is an error, never a quiet fall back to
+    /// a different registry.
+    #[arg(long, global = true, value_name = "DIR", env = "STEGOBENCH_REGISTRY")]
+    pub registry: Option<std::path::PathBuf>,
 
+    /// Optional so a bare `stegobench` can print a short orientation rather
+    /// than the whole help. Somebody who types the bare name is asking what
+    /// this is, and the answer to that is three lines, not three screens.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -328,9 +378,28 @@ pub enum Command {
     /// Example:
     ///   stegobench help pairing
     Help {
-        /// One of: pairing, splits, licences, plugins, results, reports.
-        /// Omit to list.
+        /// One of: scope, pairing, splits, licences, plugins, results,
+        /// reports. Omit to list.
         #[arg(value_name = "TOPIC")]
         topic: Option<String>,
+    },
+
+    /// Not a command. `check` is one of the two words somebody looking for an
+    /// image examiner guesses, and it is routed here so the refusal can
+    /// explain the difference rather than leave clap to suggest `schema`.
+    ///
+    /// Hidden because it is a signpost rather than a feature; listing it would
+    /// imply the tool does the thing the signpost exists to say it does not.
+    #[command(hide = true)]
+    Check {
+        #[arg(value_name = "ARGS", trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+
+    /// Not a command. The other guess. See `check`.
+    #[command(hide = true)]
+    Scan {
+        #[arg(value_name = "ARGS", trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
     },
 }

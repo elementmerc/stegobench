@@ -1,8 +1,12 @@
 # Stegobench
 
-> A reproducible benchmark for image steganalysis. Build a labelled
-> corpus, run detectors over identical bytes, and report numbers somebody else
-> can check.
+> Measure how good a steganography detector is, using images whose answers
+> are already known. Build a labelled corpus, run detectors over identical
+> bytes, and report numbers somebody else can check.
+>
+> It does NOT examine unlabelled images to find out what is in them. That is
+> the opposite direction, and there is no command for it. See "The question
+> this tool does not answer" below before routing a user here.
 
 This file is for a model deciding whether and how to call this tool. It
 describes what exists today, not a roadmap. Every command listed below is
@@ -39,8 +43,8 @@ progress still reaches a terminal.
   under a sentence saying what they can be compared with, and never orders
   by score.
 - `stegobench list <detectors|embedders|corpora|all>`: everything a registry
-  can run, plus the datasets it knows about, read live from
-  `plugins/registry/`, so it cannot go stale.
+  can run, plus the datasets it knows about, read live from the registry, so
+  it cannot go stale. The output names which registry answered.
 - `stegobench describe <name>`: one tool's full registered manifest, or one
   corpus's, whichever the name belongs to. A corpus entry records where the
   dataset lives, what its terms say, who established that and on what date,
@@ -52,8 +56,10 @@ progress still reaches a terminal.
   score a known planted signal and a known clean fixture, because a tool that
   is merely installed is not a tool that works.
 - `stegobench completions <bash|zsh|fish|powershell>`: shell completion script.
-- `stegobench help <pairing|splits|licences|plugins>`: the reasoning behind
-  the harness's hard rules, written for a reader who never opens the repo.
+- `stegobench help <scope|pairing|splits|licences|plugins|results|reports>`:
+  the reasoning behind the harness's hard rules, written for a reader who
+  never opens the repo. `scope` is the one to read first: it separates
+  measuring a detector from examining your own images.
 - `stegobench score --corpus <DIR> --detector <NAME>`: asks the detector
   about every sample under the directory and writes a `result-v1` document.
   Resumable: every answer lands in a records file as it is produced, and the
@@ -66,6 +72,37 @@ progress still reaches a terminal.
   estimated time where the tool declares a rate, and the worst case if every
   item hits the deadline. Where no rate is declared it says so rather than
   inventing a figure.
+
+## The question this tool does not answer
+
+A user who asks "are these images hiding something" wants a detector pointed
+at their own files, not a benchmark. Stegobench has no command for that and
+should not be made to look as though it does.
+
+`stegobench check` and `stegobench scan` exist only as signposts: they refuse,
+with exit code 2, and explain the difference. Pointing `score` at a directory
+of images with no records beside them refuses too, with exit code 3, for the
+same reason. Neither is a feature to work around.
+
+What to do instead: `stegobench list detectors` names every registered
+detector and `stegobench describe <name>` says where each one lives and how it
+is run. Run one of those directly on the user's files, and read its own
+documentation for what its output means.
+
+## Where the registry comes from
+
+In order: `--registry` or `STEGOBENCH_REGISTRY`, then `./plugins/registry`,
+then beside the executable, then the per-user data directory, then the system
+data directory, and finally a copy compiled into the binary. An installed
+binary therefore works from any directory with no configuration. A path named
+explicitly is used as given: if it is not there that is exit code 1, never a
+silent fall back to a different registry. `stegobench doctor --json` reports
+the resolved path and how it was found under `registry`.
+
+Registries are not merged. The first one found answers in full, so a directory
+holding a single entry yields a single tool. Do not tell a user to create a
+registry directory containing only their own tool unless that is what they
+want; tell them to copy `plugins/registry/` and add to the copy.
 
 ## Exit codes (a contract, not incidental)
 
@@ -97,6 +134,8 @@ the tool itself is the source of truth for its own reasoning:
   for the whole collection.
 - `plugins`: why a detector or embedder is a TOML registry entry pinned by
   digest or by executable hash, never code wired into the harness.
+- `scope`: what this measures and what it does not, and where to send a user
+  who wants the other thing.
 
 ## What an agent should not do here
 

@@ -9,11 +9,12 @@
 //! rather than pointing at it.
 
 pub const TOPICS: &[&str] = &[
-    "pairing", "splits", "licences", "plugins", "results", "reports",
+    "scope", "pairing", "splits", "licences", "plugins", "results", "reports",
 ];
 
 pub fn text(topic: &str) -> Option<&'static str> {
     match topic {
+        "scope" => Some(SCOPE),
         "pairing" => Some(PAIRING),
         "reports" => Some(REPORTS),
         "splits" => Some(SPLITS),
@@ -23,6 +24,55 @@ pub fn text(topic: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+const SCOPE: &str = "\
+scope: what this measures, and what it does not
+
+There are two different questions, and most people arrive with the second one.
+
+  1. HOW GOOD IS THIS DETECTOR?
+     You have images whose answers are already known: this one is clean, this
+     one hides a payload, and somebody recorded which is which. You run a
+     detector over all of them and count how often it was right. That is what
+     stegobench does.
+
+  2. IS SOMETHING HIDDEN IN THESE PICTURES?
+     You have images nobody has labelled, and you want a verdict on them. That
+     needs a detector you already trust, pointed at your own files. Stegobench
+     is not that tool. It's how you find out whether to trust one.
+
+They run in opposite directions. Question 1 starts from known answers and ends
+with a judgement about the tool. Question 2 starts from a tool you believe and
+ends with a judgement about the images.
+
+IF YOU ARRIVED WITH QUESTION 2
+
+  stegobench list detectors      names every detector registered here
+  stegobench describe <name>     says where that one lives, what it costs, and
+                                 the command that runs it
+
+Run one of those directly on your own images. Then read its own documentation
+for what its output means, because stegobench is not in that loop and cannot
+vouch for a number it did not produce.
+
+And be careful with the answer you get. A detector that is right nine times in
+ten still calls one clean image in ten a hit, and on a folder of a thousand
+holiday photos that's a hundred wrong alarms. Which is exactly why question 1
+exists, and why a number with its conditions attached is worth more than a
+verdict without them.
+
+WHY THERE IS NO COMMAND FOR QUESTION 2
+
+Because a benchmark that also hands out verdicts would be grading its own
+homework. The thing that makes a measurement here worth quoting is that the
+answers were fixed before the detector saw the images, by somebody other than
+the detector, and recorded beside each file. Unlabelled images have none of
+that, so there is nothing to be right or wrong about.
+
+  stegobench help results        what a result document carries and why
+  stegobench help pairing        why a clean image and its stego twin have to
+                                 differ in nothing but the payload
+";
 
 const REPORTS: &str = "\
 reports: putting a number on a page without leaving its conditions behind

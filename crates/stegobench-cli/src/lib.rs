@@ -10,5 +10,6 @@
 pub mod cli;
 pub mod help_topics;
 pub mod needs;
+pub mod registry;
 pub mod report;
 pub mod score;
