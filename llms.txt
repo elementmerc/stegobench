@@ -31,6 +31,13 @@ progress still reaches a terminal.
 - `stegobench verify <file> --corpus DIR`: recompute the corpus digest a
   result claims and say whether the document and the corpus are about each
   other; exits 5 when they are not.
+- `stegobench report <paths...>`: render one or many result documents as a
+  text, Markdown or CSV table for an evaluation write-up, with the pairing
+  verdict, the split verdict, the corpus digest and the named-or-custom
+  configuration on each row rather than in a legend. It refuses to put
+  results from different corpora in one table, sections `custom` runs off
+  under a sentence saying what they can be compared with, and never orders
+  by score.
 - `stegobench list <detectors|embedders|corpora|all>`: everything a registry
   can run, plus the datasets it knows about, read live from
   `plugins/registry/`, so it cannot go stale.

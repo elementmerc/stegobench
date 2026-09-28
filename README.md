@@ -21,7 +21,7 @@ Two halves, at different stages:
   detectors, embedders and corpora, checks whether this machine can run them,
   and scores a corpus against them. Every command in the tree is built and
   tested: `schema`, `validate`, `verify`, `list`, `describe`, `doctor`,
-  `plan`, `score`, `completions` and `help`.
+  `plan`, `score`, `report`, `completions` and `help`.
 - **Python generators** (`generators/`) that build a labelled corpus:
   fetching covers with provenance, embedding stego arms, packing shards, and
   scoring against a detector's HTTP endpoint. This half is older, working,

@@ -82,6 +82,7 @@ export default {
             { text: 'What it is', link: '/guide/what-it-is' },
             { text: 'Quickstart', link: '/guide/quickstart' },
             { text: 'Build a corpus', link: '/guide/build-a-corpus' },
+            { text: 'A detector behind an HTTP endpoint', link: '/guide/http-detector' },
           ],
         },
         {
@@ -90,6 +91,7 @@ export default {
             { text: 'Pairing, and what breaks it', link: '/guide/pairing' },
             { text: 'Scores, not verdicts', link: '/guide/scores' },
             { text: 'Reading a result', link: '/guide/reading-a-result' },
+            { text: 'Writing a report', link: '/guide/writing-a-report' },
           ],
         },
         {

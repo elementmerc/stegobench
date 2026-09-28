@@ -14,8 +14,16 @@ the parts that are deliberately not finished.
 ### CLI
 
 - Every command in the tree is built and tested: `list`, `describe`,
-  `doctor`, `schema`, `validate`, `verify`, `plan`, `score`, `completions`
-  and `help`.
+  `doctor`, `schema`, `validate`, `verify`, `plan`, `score`, `report`,
+  `completions` and `help`.
+- `stegobench report` turns a folder of result documents into a table for an
+  evaluation document, as text, Markdown or CSV. Every row carries the corpus
+  and its digest, the configuration, the pairing and the split beside the
+  number, so a figure can't be copied out of the table without them.
+- `stegobench report` refuses to build a misleading table: two corpora never
+  share one, a `custom` run never sits among `named` ones, nothing is ordered
+  by score, and a file that isn't a valid result document is named at the top
+  of the report with its reason rather than quietly missing from it.
 - `stegobench verify` recomputes the corpus digest a result claims and says
   whether the document and the corpus are about each other. A number somebody
   sends you can now be checked rather than believed.
@@ -102,6 +110,9 @@ the parts that are deliberately not finished.
   which is a finding rather than a gap.
 - Redistribution is recorded as its own field, separate from the licence,
   because a corpus you may use isn't always one you may publish.
+- A registry entry that names a loopback or private-network address in how it
+  runs a tool is refused, naming the entry, the field and the address, so a
+  benchmark can't ship an address and quietly score whatever answers on it.
 
 ### Corpus generators (Python)
 
@@ -123,6 +134,9 @@ the parts that are deliberately not finished.
 - `docs/leaderboard.md` publishes the submission rules before any table
   exists, so the rules can be argued about rather than invented once a
   submission arrives.
+- A guide page walks a team whose detector answers over HTTP from installing
+  the tool to a result document they can quote, which the container and local
+  binary routes already had and this one didn't.
 - `llms.txt` gives a machine-readable orientation to the repository.
 
 ### Release and distribution
@@ -142,6 +156,11 @@ the parts that are deliberately not finished.
   wrong public page days later.
 - That verifier also runs nightly, so a takedown or a silent build failure
   surfaces within a day.
+- A destination that's serving the release while still marked as one we don't
+  check yet now fails that verifier and names itself. Marking a channel
+  unchecked is how the list can describe somewhere before it exists; once the
+  page answers, leaving it unchecked means a later takedown would be reported
+  and pass.
 
 ### CI
 

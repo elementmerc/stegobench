@@ -34,7 +34,9 @@ features:
 | Know what this is before installing anything | [What it is](/guide/what-it-is) |
 | Run it | [Quickstart](/guide/quickstart) |
 | Build a corpus | [Build a corpus](/guide/build-a-corpus) |
+| Score a detector that runs as an HTTP service | [A detector behind an HTTP endpoint](/guide/http-detector) |
 | Understand what makes a measurement valid | [Pairing](/guide/pairing) |
+| Turn results into a table for a report | [Writing a report](/guide/writing-a-report) |
 | Know what it does not do | [Limitations](/guide/limits) |
 
 Looking for the corpus rather than the harness? That is
