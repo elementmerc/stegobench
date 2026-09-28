@@ -5,11 +5,18 @@
 //! Schemas and the corpus model for stegobench.
 //!
 //! This crate holds the formats other people are meant to adopt, and the rules
-//! about them that the type system cannot express. It deliberately does no IO
-//! beyond parsing: scoring, plugin execution and storage live elsewhere, so
-//! that the definition of a result never depends on how a result was obtained.
+//! about them that the type system cannot express. Scoring and plugin execution
+//! live elsewhere, so that the definition of a result never depends on how a
+//! result was obtained.
+//!
+//! The IO it does do is reading: a registry of TOML files, a corpus directory
+//! on somebody's disk, and, behind the injected trait boundaries in
+//! [`fetch`], a corpus tier being downloaded. There is no network client in
+//! here and no default transport; every byte a fetch moves arrives through
+//! something the caller passed in.
 
 pub mod corpus;
+pub mod fetch;
 pub mod header;
 pub mod manifest;
 pub mod registry;
@@ -17,7 +24,8 @@ pub mod result;
 pub mod run;
 pub mod samples;
 
-pub use corpus::{CorpusEntry, LicenceStatus, Redistribution};
+pub use corpus::{ArchiveFormat, CorpusEntry, DownloadRoute, LicenceStatus, Redistribution};
+pub use fetch::{BlobStore, FetchError, Fetched, FileStore, Limits, Progress, Transport};
 pub use header::{Format, Geometry, HeaderError, Shape};
 pub use manifest::{ManifestV1, MANIFEST_SCHEMA_ID};
 pub use registry::{Entry, Kind, Registry};

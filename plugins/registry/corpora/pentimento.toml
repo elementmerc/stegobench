@@ -71,6 +71,40 @@ score` can read it. `load_pentimento.py` ships beside the shards and reads \
 either shape.\
 """
 
+# NO [[download]] BLOCK YET, AND THAT IS THE HONEST STATE.
+#
+# The schema for one now exists (`CorpusEntry::download`), and this is the one
+# corpus in this directory allowed to carry it: the other three either forbid
+# redistribution or grant nothing, and `validate` refuses a route on any of
+# them so that fetching a corpus on a user's behalf can never make this project
+# the mirror.
+#
+# What is missing is evidence, not permission. A route declares the exact URL a
+# tier is served from, the SHA-256 of the bytes that URL returns, and how many
+# bytes that is, and nobody here has downloaded a published tier and hashed it.
+# Writing a plausible digest would be worse than writing none: a wrong one
+# reads as checked and fails later as though the archive were corrupt.
+#
+# To fill it in, download each tier from the mirror it will be served from,
+# hash the file, and add a block per tier:
+#
+#     [[download]]
+#     tier = "nano"
+#     url = "https://.../pentimento-nano-v1.tar"   # the immutable path, not a branch
+#     sha256 = "..."                               # 64 lower case hex, of those bytes
+#     size_bytes = 0                               # of those bytes, not an estimate
+#     archive = "tar"
+#     covers = 200
+#
+# Three cautions the validator enforces rather than suggests. A URL naming a
+# branch or a "latest" alias is refused, for the reason a container image named
+# by a tag is refused: a tag can move under you and a hash cannot, so a
+# HuggingFace route has to name the commit rather than `resolve/main/...`. The
+# digest is over the served file exactly as served. And `size_bytes` is what
+# the fetcher's caps and the resume are measured against, so it is read off the
+# file rather than taken from the server, which is where the bytes come from
+# too.
+
 [properties]
 base_images = 10000
 formats = ["png", "jpg"]

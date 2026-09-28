@@ -14,6 +14,10 @@ keywords = ["steganalysis", "steganography", "benchmark", "forensics", "schema"]
 categories = ["science", "multimedia::images"]
 
 [dependencies]
+# The fetcher checks a download against a digest the registry declared in
+# advance, so it needs one implementation of sha256. The same crate the plugin
+# host and the CLI already use, rather than a second one for somebody to audit.
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

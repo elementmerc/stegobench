@@ -1251,3 +1251,141 @@ mod tests {
         assert!(walk.next().is_none());
     }
 }
+
+/// The starter corpus this repository ships, checked as the corpus it claims
+/// to be.
+///
+/// It exists so a fresh install can score something, which means a first run
+/// takes exactly the paths a real run takes: the walk, the cover join, the
+/// split inheritance and the pairing comparison. If any of those were special
+/// cased here, the first thing a new user saw working would be the one thing
+/// that does not work on a real corpus.
+#[cfg(test)]
+mod starter_corpus_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpora/starter")
+    }
+
+    fn walk() -> Vec<Sample> {
+        Samples::open(&root())
+            .unwrap_or_else(|e| panic!("the shipped starter corpus does not open: {e}"))
+            .map(|s| s.unwrap_or_else(|e| panic!("the shipped starter corpus is defective: {e}")))
+            .collect()
+    }
+
+    #[test]
+    fn it_walks_cleanly_and_has_both_sides_of_a_measurement() {
+        let samples = walk();
+        let stego = samples.iter().filter(|s| s.role == Role::Stego).count();
+        let clean = samples.len() - stego;
+        assert_eq!((clean, stego), (6, 12));
+    }
+
+    #[test]
+    fn every_stego_image_names_a_cover_that_is_actually_here() {
+        let samples = walk();
+        let covers: HashMap<&str, &Sample> = samples
+            .iter()
+            .filter(|s| s.role == Role::Clean)
+            .filter_map(|s| s.declared_name.as_deref().map(|n| (n, s)))
+            .collect();
+        for s in samples.iter().filter(|s| s.role == Role::Stego) {
+            let name = s
+                .cover
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} names no cover", s.id));
+            assert!(
+                covers.contains_key(name),
+                "{} descends from {name}, which is not in this corpus",
+                s.id
+            );
+        }
+    }
+
+    /// The join a real release takes, rather than the degenerate one.
+    ///
+    /// A packed tier renames every member to its position, so a stego row
+    /// reaches its cover by the name the cover's RECORD gives it and not by the
+    /// name on disk. A starter corpus whose two names agreed would exercise a
+    /// path no real corpus uses, and the first thing to break on real data
+    /// would be the thing the demonstration proved worked.
+    #[test]
+    fn the_cover_join_goes_through_the_declared_name_not_the_name_on_disk() {
+        for s in walk().iter().filter(|s| s.role == Role::Clean) {
+            let declared = s.declared_name.as_deref().expect("a cover with no name");
+            let on_disk = s.image.file_name().and_then(|n| n.to_str()).unwrap();
+            assert_ne!(declared, on_disk, "{} takes the easy join", s.id);
+        }
+    }
+
+    #[test]
+    fn the_split_is_a_property_of_the_cover_and_has_both_sides() {
+        let samples = walk();
+        let mut sides: Vec<&str> = samples
+            .iter()
+            .filter(|s| s.role == Role::Clean)
+            .filter_map(|s| s.split.as_deref())
+            .collect();
+        sides.sort_unstable();
+        sides.dedup();
+        assert_eq!(sides, vec!["test", "train"]);
+        // No stego row states one, so none can contradict its cover. That is
+        // the corpus getting split discipline right by construction rather
+        // than by agreeing with itself.
+        assert!(samples
+            .iter()
+            .filter(|s| s.role == Role::Stego)
+            .all(|s| s.split.is_none()));
+    }
+
+    /// The reachable half of the pairing rule, run against the shipped files.
+    #[test]
+    fn a_stego_image_differs_from_its_cover_in_nothing_a_header_can_see() {
+        let samples = walk();
+        let shapes: HashMap<&str, crate::header::Shape> = samples
+            .iter()
+            .filter(|s| s.role == Role::Clean)
+            .filter_map(|s| {
+                let name = s.declared_name.as_deref()?;
+                Some((name, crate::header::read(&s.image).ok()?))
+            })
+            .collect();
+        let mut compared = 0;
+        for s in samples.iter().filter(|s| s.role == Role::Stego) {
+            let cover = shapes[s.cover.as_deref().unwrap()];
+            let stego = crate::header::read(&s.image).expect("a stego image that cannot be read");
+            assert_eq!(
+                stego, cover,
+                "{} differs from its cover in its header",
+                s.id
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, 12, "the pairing check looked at nothing");
+    }
+
+    /// The guarantee that stops a number from here being quoted.
+    #[test]
+    fn its_registry_entry_can_never_earn_a_named_run() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry");
+        let reg = crate::registry::Registry::load(&dir).expect("the shipped registry loads");
+        let entry = reg
+            .corpora
+            .get("stegobench-starter")
+            .expect("the starter corpus is not registered");
+        assert!(entry.demonstration);
+        // `score` marks a run `named` only when this digest is declared AND
+        // matches, so a demonstration entry forbidden from declaring one can
+        // only ever produce `custom`.
+        assert!(entry
+            .integrity
+            .as_ref()
+            .and_then(|i| i.records_sha256.as_deref())
+            .is_none());
+        assert!(entry.download.is_empty());
+        assert_eq!(entry.validate(), Ok(()));
+    }
+}

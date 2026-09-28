@@ -43,6 +43,24 @@ use crate::registry::RegistryError;
 /// A sha256 digest written as lowercase hexadecimal: 32 bytes, 64 characters.
 const SHA256_HEX_LEN: usize = 64;
 
+/// The largest single download a route may declare, in bytes: 1 TiB.
+///
+/// The largest tier this project publishes is 48 GB, so this is twenty times
+/// the real case. It is a cap rather than a guess because `size_bytes` feeds a
+/// disk pre-flight, and a route that declared an absurd figure would refuse
+/// every machine on earth without saying why.
+pub const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+
+/// Path segments that name a pointer rather than a thing.
+///
+/// Each of these is somebody's default branch or floating alias, and the URL
+/// shapes that carry them are the common ones: a forge's `raw/main/...`, a
+/// model host's `resolve/main/...`, a release page's `latest/download/...`. A
+/// digest beside one of these is a pin that stops matching the first time the
+/// pointer moves, and the failure reads as corruption rather than as the
+/// mistake it is.
+const MOVING_POINTERS: &[&str] = &["latest", "main", "master", "head", "trunk", "tip"];
+
 /// How far below the registry root the corpus walk will descend.
 ///
 /// The shipped registry is flat: one directory of TOML files. The cap is for
@@ -80,13 +98,94 @@ pub struct CorpusEntry {
     pub tier: Option<String>,
     pub licence: Licence,
     pub obtain: Obtain,
+    /// Per-tier routes the harness may fetch without a human in the loop.
+    ///
+    /// Empty for every corpus somebody else publishes, and that is the ordinary
+    /// state rather than a gap to be filled. See [`DownloadRoute`].
+    #[serde(default)]
+    pub download: Vec<DownloadRoute>,
     /// A digest or manifest reference, where one exists. Most published corpora
     /// have neither, which is itself worth recording rather than hiding.
     #[serde(default)]
     pub integrity: Option<Integrity>,
     pub properties: Properties,
+    /// This corpus exists to show the machinery working, not to produce a
+    /// number.
+    ///
+    /// A handful of pairs is enough to prove a detector runs and nowhere near
+    /// enough to measure one, and the difference is invisible in a result
+    /// document that reports an AUC either way. So the entry says which it is,
+    /// and [`CorpusEntry::validate`] makes the marking load-bearing rather than
+    /// decorative: a demonstration corpus may not declare the records digest
+    /// that `stegobench score` requires before it will mark a run `named`, so
+    /// every run over one is `custom` by construction rather than by anybody
+    /// remembering.
+    #[serde(default)]
+    pub demonstration: bool,
     #[serde(default)]
     pub notes: Option<String>,
+}
+
+/// One fetchable copy of one tier, pinned by digest.
+///
+/// WHY THE ROUTE IS PER TIER
+/// -------------------------
+/// Nano, Lite and Core are different byte sets with different digests, and a
+/// single route for "the corpus" would either name the largest one or name
+/// nothing. A user who asked for 200 covers and got 48 GB has been answered
+/// with a different question.
+///
+/// WHY A DIGEST IS MANDATORY HERE
+/// ------------------------------
+/// For exactly the reason [`crate::registry::Entry::validate`] refuses a
+/// container image named by a tag: a tag can move under you and a hash cannot.
+/// A URL is the same kind of reference as a tag. Whoever serves it can change
+/// what it returns at any moment, and a download that cannot be checked against
+/// something declared in advance is a download that has to be trusted. So the
+/// digest is declared here, by the registry, and checked by the fetcher before
+/// a single byte is handed to a caller.
+///
+/// A URL that names a moving pointer as well is refused on top of that, because
+/// a digest beside `resolve/main/...` is a pin that will stop matching the first
+/// time the branch moves, and the failure then looks like corruption rather than
+/// like the mistake it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadRoute {
+    /// Which tier these bytes are, in the vocabulary the corpus publishes:
+    /// `nano`, `lite`, `core`.
+    pub tier: String,
+    /// Where the bytes are. HTTPS only.
+    pub url: String,
+    /// SHA-256 over the bytes exactly as served, lower case hex, 64 characters.
+    pub sha256: String,
+    /// How many bytes the URL serves.
+    ///
+    /// Required, and not merely a convenience for a progress bar: it is what a
+    /// pre-flight disk check and the fetcher's own cap are measured against,
+    /// and a server's `Content-Length` is the wrong thing to measure them
+    /// against because it arrives from the same place as the bytes.
+    pub size_bytes: u64,
+    /// What the served file is, so a caller knows what it is holding. The
+    /// fetcher never unpacks; it delivers verified bytes and says what they are.
+    pub archive: ArchiveFormat,
+    /// Covers in this tier, where the tier is counted in covers.
+    #[serde(default)]
+    pub covers: Option<u64>,
+    /// Anything a person needs in order to act on the three fields above.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// What a route serves, named rather than guessed from the URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArchiveFormat {
+    Tar,
+    TarGz,
+    TarZst,
+    Zip,
+    /// A single file, served as it is.
+    None,
 }
 
 /// What is actually known about the terms, as opposed to what is assumed.
@@ -293,8 +392,10 @@ impl CorpusEntry {
 
         self.validate_licence(&mut bad);
         self.validate_obtain(&mut bad);
+        self.validate_download(&mut bad);
         self.validate_integrity(&mut bad);
         self.validate_properties(&mut bad);
+        self.validate_demonstration(&mut bad);
 
         if bad.is_empty() {
             Ok(())
@@ -451,6 +552,204 @@ impl CorpusEntry {
         }
     }
 
+    fn validate_download(&self, bad: &mut Vec<String>) {
+        if self.download.is_empty() {
+            return;
+        }
+
+        // The rule that keeps this project out of the business it exists to
+        // correct. Fetching somebody's corpus on a user's behalf is us serving
+        // it to them, whatever the transfer is called, and doing that for a
+        // corpus whose terms do not permit redistribution would make this the
+        // mirror. `docs/design/cover-source-licensing.md` catalogues what
+        // mirrors of academic corpora have done to their licences.
+        //
+        // Read off the entry rather than listed per corpus, so a corpus added
+        // next year gets the right behaviour without anybody remembering.
+        if !self.licence.redistribution.allows_publishing() {
+            bad.push(format!(
+                "this entry declares a download route while its redistribution \
+                 is {}. Fetching a corpus on a user's behalf is serving it to \
+                 them, so a route here would make this project the mirror for \
+                 a dataset whose terms do not allow one. Record the route in \
+                 obtain.instructions for a person to follow instead",
+                redistribution_word(self.licence.redistribution)
+            ));
+        }
+        // Automating around an acceptance step is not a thing this tool offers,
+        // and a route beside `requires_acceptance` claims it does.
+        if self.obtain.requires_acceptance {
+            bad.push(
+                "this entry declares a download route while obtain.requires_acceptance \
+                 is set. Accepting somebody's terms is the user's act, not the \
+                 harness's, and a route that skips it is a route around the \
+                 agreement"
+                    .into(),
+            );
+        }
+
+        let mut seen: Vec<&str> = Vec::new();
+        for route in &self.download {
+            let where_ = format!("download route {:?}", route.tier);
+
+            if route.tier.trim().is_empty() {
+                bad.push(
+                    "a download route declares no tier; a route with no tier \
+                     names bytes nobody can ask for by name"
+                        .into(),
+                );
+            } else if !route
+                .tier
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
+                bad.push(format!(
+                    "{where_} must be lower case letters, digits and hyphens \
+                     only: it is typed on a command line"
+                ));
+            }
+            if seen.contains(&route.tier.as_str()) {
+                bad.push(format!(
+                    "{where_} is declared twice. Two routes for one tier means \
+                     two sets of bytes with one name, and which one a run \
+                     measured would depend on the order the file was read in"
+                ));
+            }
+            seen.push(&route.tier);
+
+            if !route.url.starts_with("https://") {
+                bad.push(format!(
+                    "{where_} has url {:?}, which is not https. The digest \
+                     below makes tampering detectable rather than impossible, \
+                     and plain http also tells the network which corpus is \
+                     being downloaded",
+                    route.url
+                ));
+            }
+            if let Some(pointer) = moving_pointer(&route.url) {
+                bad.push(format!(
+                    "{where_} has url {:?}, which names {pointer:?}: a pointer \
+                     that moves. It is refused for the same reason a container \
+                     image named by a tag is (see registry::Entry::validate): a \
+                     tag can move under you and a hash cannot. Name the commit, \
+                     the version or the immutable path the bytes actually live \
+                     at",
+                    route.url
+                ));
+            }
+
+            let d = &route.sha256;
+            if d.len() != SHA256_HEX_LEN || !d.bytes().all(|b| b.is_ascii_hexdigit()) {
+                bad.push(format!(
+                    "{where_} has sha256 {d:?}, which is {} character(s); a \
+                     sha256 digest is {SHA256_HEX_LEN} hexadecimal characters. \
+                     A short or placeholder digest reads as pinned and pins \
+                     nothing, and a route with nothing to check against is a \
+                     download that has to be trusted",
+                    d.len()
+                ));
+            } else if d.bytes().any(|b| b.is_ascii_uppercase()) {
+                bad.push(format!(
+                    "{where_} has sha256 {d:?} in upper case hex; digests are \
+                     compared as text here, so case has to be settled"
+                ));
+            }
+
+            if route.size_bytes == 0 {
+                bad.push(format!(
+                    "{where_} declares size_bytes of 0. A route to nothing \
+                     would pass a disk check and deliver an empty corpus"
+                ));
+            } else if route.size_bytes > MAX_DOWNLOAD_BYTES {
+                bad.push(format!(
+                    "{where_} declares {} bytes, over the {MAX_DOWNLOAD_BYTES} \
+                     byte ceiling a single route may name. A corpus larger than \
+                     this ships as tiers or as shards, and a number this size is \
+                     more often a unit mistake than a dataset",
+                    route.size_bytes
+                ));
+            }
+            if route.covers == Some(0) {
+                bad.push(format!(
+                    "{where_} declares 0 covers. Leave the field out if the \
+                     count is unknown; zero says the tier is empty"
+                ));
+            }
+        }
+    }
+
+    fn validate_demonstration(&self, bad: &mut Vec<String>) {
+        if !self.demonstration {
+            return;
+        }
+        if self
+            .integrity
+            .as_ref()
+            .is_some_and(|i| i.records_sha256.is_some())
+        {
+            bad.push(
+                "this entry is marked demonstration and declares \
+                 integrity.records_sha256. That digest is the one thing that \
+                 lets `stegobench score` mark a run `named`, and a named run \
+                 over a handful of pairs is a number somebody will quote. A \
+                 demonstration corpus earns `custom`, which is what it is"
+                    .into(),
+            );
+        }
+        if !self.download.is_empty() {
+            bad.push(
+                "this entry is marked demonstration and declares a download \
+                 route. A corpus small enough to demonstrate with is small \
+                 enough to ship, and a demonstration nobody can run without a \
+                 network is not one"
+                    .into(),
+            );
+        }
+    }
+
+    /// Why this corpus may not be fetched on a user's behalf, or `None` when it
+    /// may be.
+    ///
+    /// The single place the rule lives. [`crate::fetch`] asks this rather than
+    /// re-deriving it, so the registry's answer and the fetcher's answer cannot
+    /// drift apart.
+    pub fn fetch_refusal(&self) -> Option<String> {
+        if !self.licence.redistribution.allows_publishing() {
+            return Some(format!(
+                "{} may not be redistributed ({}), so this tool will not fetch \
+                 it for you: doing that would make this project the mirror. Its \
+                 reason is recorded as: {}",
+                self.id,
+                redistribution_word(self.licence.redistribution),
+                self.licence.redistribution_reason.trim()
+            ));
+        }
+        if self.obtain.requires_acceptance {
+            return Some(format!(
+                "{} is obtained by accepting its terms, which is your act and \
+                 not this tool's. Follow the route in `stegobench describe {}` \
+                 and point `score` at the copy you obtained",
+                self.id, self.id
+            ));
+        }
+        if self.download.is_empty() {
+            return Some(format!(
+                "{} declares no download route, so there is nothing for this to \
+                 fetch. `stegobench describe {}` prints how to obtain it",
+                self.id, self.id
+            ));
+        }
+        None
+    }
+
+    /// The route for one tier, or `None` where this corpus declares none.
+    ///
+    /// Says nothing about whether fetching is allowed; ask
+    /// [`CorpusEntry::fetch_refusal`] for that.
+    pub fn route(&self, tier: &str) -> Option<&DownloadRoute> {
+        self.download.iter().find(|r| r.tier == tier)
+    }
+
     fn validate_integrity(&self, bad: &mut Vec<String>) {
         let Some(i) = &self.integrity else {
             return;
@@ -589,6 +888,57 @@ impl CorpusEntry {
         };
         format!("{:<16} {:<16} {:<18} {republish}", self.id, licence, size)
     }
+}
+
+fn redistribution_word(r: Redistribution) -> &'static str {
+    match r {
+        Redistribution::Permitted => "permitted",
+        Redistribution::Forbidden => "forbidden",
+        Redistribution::Unknown => "unknown",
+    }
+}
+
+/// The moving pointer a URL names, if it names one.
+///
+/// Looks only at path segments and at a `ref=` query parameter, both compared
+/// without regard to case. A file called `latest.tar` is not a moving pointer
+/// and is not flagged: the segment has to be the whole segment, which is what
+/// `raw/main/x.tar` and `releases/latest/download/x.tar` both are.
+fn moving_pointer(url: &str) -> Option<&'static str> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let (path, query) = match after_scheme.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (after_scheme, None),
+    };
+    // The first segment is the host, which is never a pointer and may legitimately
+    // be called anything.
+    let mut segments = path.split('/');
+    segments.next();
+    for segment in segments {
+        if let Some(found) = MOVING_POINTERS
+            .iter()
+            .find(|p| segment.eq_ignore_ascii_case(p))
+        {
+            return Some(found);
+        }
+    }
+    if let Some(query) = query {
+        for pair in query.split('&') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            if !key.eq_ignore_ascii_case("ref") && !key.eq_ignore_ascii_case("branch") {
+                continue;
+            }
+            if let Some(found) = MOVING_POINTERS
+                .iter()
+                .find(|p| value.eq_ignore_ascii_case(p))
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn status_word(s: LicenceStatus) -> &'static str {
@@ -1294,5 +1644,221 @@ note = "the terms page is gone"
     #[test]
     fn a_stated_version_is_not_marked() {
         assert!(!parse("").summary().contains('?'));
+    }
+
+    /// A download route that is fine, spliced into the valid entry above.
+    fn route() -> String {
+        format!(
+            r#"
+[[download]]
+tier = "nano"
+url = "https://archive.example.org/corpus/v1/nano.tar"
+sha256 = "{DIGEST}"
+size_bytes = 69206016
+archive = "tar"
+covers = 200
+"#
+        )
+    }
+
+    /// The route above with one line rewritten.
+    ///
+    /// Not an appended override: TOML refuses a duplicate key outright rather
+    /// than taking the last one, so a test that appended would be testing the
+    /// parser's error message instead of the validator's.
+    fn route_but(key: &str, line: &str) -> String {
+        let base = route();
+        let target = base
+            .lines()
+            .find(|l| l.starts_with(&format!("{key} = ")))
+            .unwrap_or_else(|| panic!("the fixture route has no {key} line"))
+            .to_string();
+        base.replace(&target, line)
+    }
+
+    #[test]
+    fn a_well_formed_download_route_is_accepted_and_readable_by_tier() {
+        let e = parse(&route());
+        assert_eq!(e.validate(), Ok(()));
+        let r = e.route("nano").expect("the route it just declared");
+        assert_eq!(r.size_bytes, 69_206_016);
+        assert_eq!(r.archive, ArchiveFormat::Tar);
+        assert_eq!(e.route("core"), None);
+        assert_eq!(e.fetch_refusal(), None);
+    }
+
+    #[test]
+    fn a_route_on_a_corpus_nobody_may_redistribute_is_refused() {
+        let extra = format!(
+            r#"{}
+[licence]
+status = "verified"
+spdx = "CC-BY-NC-ND-4.0"
+url = "https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode"
+verified_on = "2026-09-15"
+source = "the organisers' own terms page"
+redistribution = "forbidden"
+redistribution_reason = "No derivatives, so a stego image may not be published."
+"#,
+            route()
+        );
+        // The fixture's own `[licence]` follows this one and TOML refuses a
+        // duplicate table, so the entry is built by hand rather than spliced.
+        let text = format!(
+            r#"
+id = "example"
+name = "Example Corpus"
+description = "A corpus that exists only in this test."
+{extra}
+[obtain]
+url = "https://example.org/corpus"
+
+[properties]
+base_images = 100
+"#
+        );
+        let e: CorpusEntry = toml::from_str(&text).expect("parses");
+        refused_for(&e, "would make this project the mirror");
+    }
+
+    #[test]
+    fn the_same_rule_refuses_a_fetch_at_runtime_and_says_why() {
+        let mut e = parse(&route());
+        e.licence.redistribution = Redistribution::Forbidden;
+        let why = e.fetch_refusal().expect("a forbidden corpus was fetchable");
+        assert!(why.contains("may not be redistributed"), "{why}");
+        assert!(why.contains("the mirror"), "{why}");
+    }
+
+    #[test]
+    fn a_route_beside_an_acceptance_step_is_refused() {
+        let mut e = parse(&route());
+        e.obtain.requires_acceptance = true;
+        refused_for(&e, "route around the agreement");
+    }
+
+    #[test]
+    fn a_route_with_no_digest_of_the_right_shape_is_refused() {
+        let e = parse(&route_but("sha256", r#"sha256 = "PIN-ME""#));
+        refused_for(&e, "pins nothing");
+    }
+
+    #[test]
+    fn an_upper_case_digest_is_refused_here_as_it_is_everywhere_else() {
+        let e = parse(&route_but(
+            "sha256",
+            &format!(r#"sha256 = "{}""#, DIGEST.to_uppercase()),
+        ));
+        refused_for(&e, "case has to be settled");
+    }
+
+    #[test]
+    fn a_url_that_names_a_branch_is_refused_the_way_a_container_tag_is() {
+        let e = parse(&route_but(
+            "url",
+            r#"url = "https://models.example.org/x/resolve/main/nano.tar""#,
+        ));
+        refused_for(&e, "a pointer that moves");
+    }
+
+    #[test]
+    fn a_release_page_pointing_at_whatever_is_newest_is_refused_too() {
+        let e = parse(&route_but(
+            "url",
+            r#"url = "https://forge.example.org/x/releases/latest/download/nano.tar""#,
+        ));
+        refused_for(&e, "a pointer that moves");
+    }
+
+    #[test]
+    fn a_file_merely_called_latest_is_not_a_moving_pointer() {
+        // The segment has to be the whole segment. Refusing `latest.tar` would
+        // be a false alarm on a perfectly pinned URL.
+        assert_eq!(moving_pointer("https://example.org/v1/latest.tar"), None);
+        assert_eq!(moving_pointer("https://main.example.org/v1/nano.tar"), None);
+        assert_eq!(
+            moving_pointer("https://example.org/x?ref=main"),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn plain_http_is_refused_for_a_route() {
+        let e = parse(&route_but(
+            "url",
+            r#"url = "http://archive.example.org/nano.tar""#,
+        ));
+        refused_for(&e, "not https");
+    }
+
+    #[test]
+    fn a_route_of_no_bytes_is_refused() {
+        let e = parse(&route_but("size_bytes", "size_bytes = 0"));
+        refused_for(&e, "route to nothing");
+    }
+
+    #[test]
+    fn a_route_over_the_ceiling_is_refused() {
+        let e = parse(&route_but(
+            "size_bytes",
+            &format!("size_bytes = {}", MAX_DOWNLOAD_BYTES + 1),
+        ));
+        refused_for(&e, "byte ceiling");
+    }
+
+    #[test]
+    fn a_route_declaring_no_covers_is_refused_only_when_it_declares_zero() {
+        refused_for(&parse(&route_but("covers", "covers = 0")), "0 covers");
+        let e = parse(&route().replace("covers = 200\n", ""));
+        assert_eq!(e.validate(), Ok(()));
+    }
+
+    #[test]
+    fn two_routes_for_one_tier_are_refused() {
+        let doubled = format!("{}{}", route(), route());
+        refused_for(&parse(&doubled), "declared twice");
+    }
+
+    #[test]
+    fn a_tier_that_cannot_be_typed_on_a_command_line_is_refused() {
+        let e = parse(&route_but("tier", r#"tier = "Nano Tier""#));
+        refused_for(&e, "typed on a command line");
+    }
+
+    #[test]
+    fn an_archive_format_nobody_defined_is_a_parse_error_rather_than_a_shrug() {
+        let text = toml_for(&route_but("archive", r#"archive = "rar""#));
+        assert!(toml::from_str::<CorpusEntry>(&text).is_err());
+    }
+
+    #[test]
+    fn a_demonstration_corpus_may_not_declare_the_digest_that_earns_a_named_run() {
+        let e = parse(&format!(
+            r#"demonstration = true
+
+[integrity]
+records_sha256 = "sha256:{DIGEST}"
+"#
+        ));
+        refused_for(&e, "earns `custom`");
+    }
+
+    #[test]
+    fn a_demonstration_corpus_may_not_declare_a_download_route() {
+        let e = parse(&format!("demonstration = true\n{}", route()));
+        refused_for(&e, "small enough to ship");
+    }
+
+    #[test]
+    fn a_demonstration_corpus_with_neither_is_accepted() {
+        assert_eq!(parse("demonstration = true").validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_route_survives_a_round_trip_through_toml_unchanged() {
+        let a = parse(&route());
+        let text = toml::to_string(&a).expect("serialises");
+        let b: CorpusEntry = toml::from_str(&text).expect("parses back");
+        assert_eq!(a, b);
     }
 }

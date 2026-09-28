@@ -1,0 +1,20 @@
+{
+ "arm": "lsb-0400",
+ "changed": 13002,
+ "domain": "spatial",
+ "file": "lsb-0400-0005.png",
+ "height": 256,
+ "licence": "AGPL-3.0-or-later",
+ "licence_url": "https://www.gnu.org/licenses/agpl-3.0.en.html",
+ "original_mime": "image/png",
+ "pristine": true,
+ "rate": 0.4,
+ "rate_unit": "bpp",
+ "role": "stego",
+ "sha256": "d11f58affd3b979eab8ea0b0df6fb9d1406295432b3b19b2fa26a4209c538a5d",
+ "source_png": "starter-0005.png",
+ "split_salt": "stegobench-starter-v1",
+ "tier_order": 5,
+ "tool": "lsb",
+ "width": 256
+}
