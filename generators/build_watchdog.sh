@@ -34,7 +34,9 @@ BUILD_PATTERN="${BUILD_PATTERN:-build_core_tier}"
 MIN_AVAILABLE_MB="${MIN_AVAILABLE_MB:-2048}"
 INTERVAL="${INTERVAL:-60}"
 LOG="${LOG:-$HOME/pentimento/logs/watchdog.log}"
-BRAIN_UNIT="${BRAIN_UNIT:-hephaestus-local-brain}"
+# Empty by default: naming a unit here is a property of the machine, not of
+# the build, and a wrong name would report a healthy service as restarting.
+BRAIN_UNIT="${BRAIN_UNIT:-}"
 
 say() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
@@ -98,7 +100,12 @@ fi
 baseline=$(journalctl -k --since "10 minutes ago" 2>/dev/null | grep -c "Killed process")
 say "self test passed: watching $(build_pids "$WATCH_RE" | wc -l) build process(es)"
 say "watching '$WATCH_RE'; abort below ${MIN_AVAILABLE_MB}MB available, on any"
-say "  new OOM kill, or if $BRAIN_UNIT restarts. Baseline kills: $baseline"
+if [ -n "$BRAIN_UNIT" ]; then
+  say "  new OOM kill, or if $BRAIN_UNIT restarts. Baseline kills: $baseline"
+else
+  say "  new OOM kill. Baseline kills: $baseline. No unit is being watched;"
+  say "  set BRAIN_UNIT to a systemd unit to abort when that unit restarts."
+fi
 
 abort() {
   say "ABORTING BUILD: $1"
@@ -120,7 +127,11 @@ abort() {
 while [ -n "$(build_pids "$WATCH_RE")" ]; do
   available=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
   kills=$(journalctl -k --since "10 minutes ago" 2>/dev/null | grep -c "Killed process")
-  restarts=$(systemctl show "$BRAIN_UNIT" -p NRestarts --value 2>/dev/null || echo 0)
+  if [ -n "$BRAIN_UNIT" ]; then
+    restarts=$(systemctl show "$BRAIN_UNIT" -p NRestarts --value 2>/dev/null || echo 0)
+  else
+    restarts=0
+  fi
 
   if [ "${available:-0}" -lt "$MIN_AVAILABLE_MB" ]; then
     abort "available memory ${available}MB is below ${MIN_AVAILABLE_MB}MB"

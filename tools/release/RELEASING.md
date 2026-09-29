@@ -51,13 +51,14 @@ Codename: <the one the operator picked>
 
 <one paragraph on what this release is for>"
 
-git push olympus dev v1.2.3
-git push origin dev v1.2.3
+for remote in $(git remote); do
+  git push "$remote" dev v1.2.3
+done
 ```
 
-Push to every remote the project has (baseline Section 8). `origin` is the
-GitHub repository the workflow runs in, so the tag has to reach it for anything
-below to happen.
+Push to every remote the project has (baseline Section 8); some checkouts
+mirror to more than one. `origin` is the GitHub repository the workflow runs
+in, so the tag has to reach it for anything below to happen.
 
 ## What the workflow does, unattended
 

@@ -14,7 +14,9 @@ reachable, including the ones the harness cannot construct.
 """
 from __future__ import annotations
 
+import os
 import pathlib
+import shutil
 
 import pytest
 
@@ -23,6 +25,21 @@ from plugin import MAX_PICTURE_BYTES, NS, SteganographyPlugin
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "fixtures"
 MISSING_BINARY = "/nonexistent/stegcore"
+
+
+def _analyser() -> str | None:
+    """Where a build of the analyser is, if this machine has one.
+
+    Resolved the same way `plugin.py` resolves it, so a machine that can run
+    the plugin can run these tests, and one that cannot skips them.
+    """
+    declared = os.environ.get("STEGCORE_BINARY")
+    if declared:
+        return declared if pathlib.Path(declared).exists() else None
+    return shutil.which("stegcore")
+
+
+ANALYSER = _analyser()
 
 
 class FakeTrace:
@@ -143,17 +160,11 @@ class TestBoundaryInputs:
 
 
 @pytest.mark.skipif(
-    not pathlib.Path(
-        "/tmp/claude-1000/-home-mercury-the-factory-Stegcore/"
-        "6d060d48-2dbe-4c07-a062-bc349072cca6/scratchpad/stegcore"
-    ).exists(),
-    reason="no local build of the analyser",
+    ANALYSER is None,
+    reason="no build of the analyser: set STEGCORE_BINARY or put stegcore on PATH",
 )
 class TestWithTheAnalyser:
-    BINARY = (
-        "/tmp/claude-1000/-home-mercury-the-factory-Stegcore/"
-        "6d060d48-2dbe-4c07-a062-bc349072cca6/scratchpad/stegcore"
-    )
+    BINARY = ANALYSER
 
     def test_a_jpeg_is_not_assessed_rather_than_cleared(self):
         written = run_plugin(

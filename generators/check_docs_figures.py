@@ -41,9 +41,9 @@ same packed index, and fail the same way.
 
 Usage::
 
-    python check_docs_figures.py --docs ~/the-factory/pentimento/docs \\
-                                 --release ~/pentimento/release \\
-                                 --covers ~/pentimento/covers/commons
+    python check_docs_figures.py --docs path/to/pentimento/docs \\
+                                 --release path/to/release \\
+                                 --covers path/to/covers/commons
 """
 from __future__ import annotations
 
