@@ -122,6 +122,16 @@ const DOCKER_TIMEOUT: Duration = Duration::from_secs(20);
 /// Shells out rather than talking to the daemon socket: the socket is a
 /// privileged interface and a benchmark has no business holding one open.
 fn image_present(reference: &str) -> Presence {
+    // Asked before spawning, because the two cases need different sentences
+    // and a spawn failure cannot tell them apart: `captured` reports its
+    // error as a string, so "docker is not installed" and "docker is
+    // installed and broke" arrive here identically. Only the second deserves
+    // the runner's own words; the first deserves plain ones.
+    if which("docker").is_none() {
+        return Presence::Unknown {
+            reason: "no container runtime: docker is not on PATH".to_string(),
+        };
+    }
     let mut cmd = Command::new("docker");
     cmd.args(["image", "inspect", "--format", "{{.Id}}", reference]);
     // Bounded, because a container daemon that has wedged answers nothing and
