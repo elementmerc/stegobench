@@ -54,6 +54,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+      # Same route as the Rust jobs below: rustup ships on the runner and
+      # `rust-toolchain.toml` pins the version, so no third-party action.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the binary the metrics go through
+        # `generators/metrics.py` shells out to `stegobench metrics` and has no
+        # Python fallback, on purpose: a second implementation of a metric is a
+        # second answer to the same question. That makes the binary a
+        # dependency of this suite rather than an optional extra, so it is
+        # built here and the suite is run the way a reader runs it. Without
+        # this the generators jobs fail with MetricsUnavailable, which is the
+        # module telling the truth about a CI job that never built it.
+        run: cargo build --release -p stegobench-cli
       - name: Unit tests
         # The generators' tests run on the standard library's own runner, so
         # they need nothing beyond `requirements.txt`. A suite that only runs
@@ -267,6 +280,13 @@ jobs:
         # and pinned on 2026-09-28, so it was 31 days old and well past the
         # seven day cooldown in baseline Section 5.
         run: python -m pip install coverage==7.16.0
+      # Same reason as the `generators` job: the suite being measured shells
+      # out to `stegobench metrics`, so without the binary this measures a
+      # tree that cannot run rather than the tree.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the binary the metrics go through
+        run: cargo build --release -p stegobench-cli
       - name: Measure, and hold the floor
         # Runs both suites exactly as the `generators` job discovers them, so
         # a figure here is measured on the same tests that job reports on.

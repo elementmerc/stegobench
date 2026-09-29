@@ -26,6 +26,7 @@ this can assert around.
 from __future__ import annotations
 
 import math
+import os
 import pathlib
 import sys
 import unittest
@@ -95,11 +96,29 @@ class BinaryResolutionTests(unittest.TestCase):
         )
 
     def test_a_release_build_is_preferred_over_a_debug_one(self):
-        paths = [str(p) for _, p in M._candidates() if p is not None]
-        release = [i for i, p in enumerate(paths) if p.endswith("release/stegobench")]
-        debug = [i for i, p in enumerate(paths) if p.endswith("debug/stegobench")]
+        # Compared by path parts rather than by a substring, because a
+        # substring with a separator in it only matches on the platforms that
+        # use that separator, and this is asserting an order that holds
+        # everywhere.
+        paths = [p for _, p in M._candidates() if p is not None]
+        release = [i for i, p in enumerate(paths) if p.parent.name == "release"]
+        debug = [i for i, p in enumerate(paths) if p.parent.name == "debug"]
         self.assertTrue(release and debug)
         self.assertLess(release[0], debug[0])
+
+    def test_the_checkout_looks_for_the_name_this_platform_actually_builds(self):
+        """A Windows build is `stegobench.exe` and nothing else.
+
+        `shutil.which` applies PATHEXT, so the PATH candidate is fine either
+        way, but the two that name a path in this checkout do not go through
+        it. Without the extension they look for a file a Windows build never
+        writes, and report the binary as missing while it sits beside them.
+        """
+        expected = "stegobench.exe" if os.name == "nt" else "stegobench"
+        checkout = [p for where, p in M._candidates() if where.startswith("this checkout")]
+        self.assertEqual(len(checkout), 2)
+        for path in checkout:
+            self.assertEqual(path.name, expected)
 
     def test_nothing_anywhere_names_every_place_and_the_line_to_type(self):
         original = M._candidates

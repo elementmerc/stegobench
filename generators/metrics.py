@@ -70,6 +70,14 @@ REPO = HERE.parent
 #: The binary this drives. The name is the crate's, not the package's.
 BINARY_NAME = "stegobench"
 
+#: The same name as a file on disk, which on Windows carries an extension.
+#:
+#: `shutil.which` applies PATHEXT for us, but the two candidates that name a
+#: path in this checkout do not go through it, so without this they look for a
+#: file that a Windows build never produces and report the binary as missing
+#: while it sits beside them.
+BINARY_FILE = BINARY_NAME + (".exe" if os.name == "nt" else "")
+
 #: Wall-clock ceiling on one call.
 #:
 #: The work is a sort and one pass, so the largest published arm (Pentimento
@@ -112,8 +120,8 @@ def _candidates() -> list[tuple[str, pathlib.Path | None]]:
     return [
         ("STEGOBENCH_BIN", pathlib.Path(named) if named else None),
         ("on PATH", pathlib.Path(found) if found else None),
-        ("this checkout, release build", REPO / "target" / "release" / BINARY_NAME),
-        ("this checkout, debug build", REPO / "target" / "debug" / BINARY_NAME),
+        ("this checkout, release build", REPO / "target" / "release" / BINARY_FILE),
+        ("this checkout, debug build", REPO / "target" / "debug" / BINARY_FILE),
     ]
 
 
