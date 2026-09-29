@@ -249,7 +249,9 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
             ));
         }
         human.push_str("\n\n`stegobench doctor` says what each one still needs.");
-        let f = reg.footprint();
+        // Over what was listed, not over the registry. Printed under seven
+        // detectors, a thirteen tool total reads as the cost of the seven.
+        let f = stegobench_core::registry::Registry::footprint_of(wanted.iter().copied());
         human.push_str(&format!(
             "\n\n{} tools in {} images. Up to {} MB bundled, {:.1} GB more on \
              demand.",
@@ -261,7 +263,7 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
     }
     let mut json = serde_json::json!({
         "tools": wanted,
-        "footprint": reg.footprint(),
+        "footprint": stegobench_core::registry::Registry::footprint_of(wanted.iter().copied()),
         "registry": resolved.to_json(),
     });
     if kind == "all" {

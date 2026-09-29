@@ -1232,9 +1232,22 @@ impl Registry {
     /// somebody to free nine gigabytes they do not need is not a rounding
     /// error, it is a wrong answer to the only question they asked.
     pub fn footprint(&self) -> Footprint {
+        Self::footprint_of(self.entries.values())
+    }
+
+    /// The same sum over any set of entries, so a filtered listing can report
+    /// what IT costs.
+    ///
+    /// `list detectors` used to print this registry's whole footprint under
+    /// seven of its thirteen tools, which reads as the cost of what is on the
+    /// screen and is not. The shared-image rule still applies within whatever
+    /// set is handed in: two detectors in one image are one image here.
+    pub fn footprint_of<'a>(entries: impl Iterator<Item = &'a Entry>) -> Footprint {
         let mut seen: BTreeMap<&str, (u64, bool)> = BTreeMap::new();
         let mut binaries_mb = 0;
-        for e in self.entries.values() {
+        let mut tools = 0usize;
+        for e in entries {
+            tools += 1;
             match (&e.image, &e.binary) {
                 (Some(img), _) => {
                     // Keyed on the reference, so two tools sharing an image
@@ -1253,7 +1266,7 @@ impl Registry {
             bundled_mb: bundled_images + binaries_mb,
             on_demand_mb: seen.values().filter(|(_, b)| !*b).map(|(s, _)| s).sum(),
             unique_images: seen.len(),
-            tools: self.entries.len(),
+            tools,
         }
     }
 }
@@ -2018,6 +2031,27 @@ must_clear = "b.png"
         assert_eq!(f.on_demand_mb, 8340);
         assert_eq!(f.unique_images, 1);
         assert_eq!(f.tools, 2);
+    }
+
+    /// A filtered listing reports what IT costs, not what the registry does.
+    #[test]
+    fn a_subset_is_summed_over_the_subset() {
+        let r = reg(vec![
+            ("a", "a@sha256:1", 100, true),
+            ("b", "b@sha256:2", 200, true),
+            ("c", "c@sha256:3", 400, true),
+        ]);
+        let whole = r.footprint();
+        assert_eq!((whole.tools, whole.bundled_mb), (3, 700));
+
+        let two = Registry::footprint_of(
+            r.entries.values().filter(|e| e.name != "c"),
+        );
+        assert_eq!(
+            (two.tools, two.bundled_mb, two.unique_images),
+            (2, 300, 2),
+            "a subset that reports the whole registry's cost is the bug this              guards"
+        );
     }
 
     #[test]
