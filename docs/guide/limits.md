@@ -35,7 +35,7 @@ appears as a verdict rate and is not comparable with an AUC. See
 |---|---|
 | Generators, pairing, scoring | Exercised on real corpora; the published numbers came out of them |
 | Packing and publishing | Built and run over a full corpus, but not yet used for a public release. Treat as the least travelled code here |
-| Platforms | The generators are tested on Linux, macOS and Windows on every push. The Rust workspace is tested on Linux only |
+| Platforms | The generators are tested on Linux, macOS and Windows on every push. The Rust workspace runs its tests on Linux and macOS; on Windows it is compiled, test targets included, but the tests are not run, because a dozen of them drive a shell script as a stand-in detector and a suite that skips its own subject reports a green tick for having checked nothing |
 
 ## It measures; it does not rank
 

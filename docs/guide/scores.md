@@ -22,7 +22,7 @@ same function and keeps the number rather than parsing the sentence.
 | Metric | What it tells you | What it hides |
 |---|---|---|
 | AUC | The whole trade-off as one number. Good for ranking | Whether the detector is usable at any threshold |
-| Detection at 1% and 0.1% false alarms | Whether it is deployable | Behaviour at thresholds you would never use |
+| Detection at 1% and 10% false alarms | Whether it is deployable | Behaviour at thresholds you would never use |
 | Verdict rate | All a verdict-only tool can give | Everything, really: it is one point from somebody else's threshold |
 
 Never report bare accuracy. On a corpus that is half clean, a detector that

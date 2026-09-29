@@ -81,6 +81,7 @@ export default {
           items: [
             { text: 'What it is', link: '/guide/what-it-is' },
             { text: 'Quickstart', link: '/guide/quickstart' },
+            { text: 'Getting a corpus', link: '/guide/getting-a-corpus' },
             { text: 'Build a corpus', link: '/guide/build-a-corpus' },
             { text: 'A detector behind an HTTP endpoint', link: '/guide/http-detector' },
             { text: 'A baseline over every detector', link: '/guide/a-baseline-over-every-detector' },

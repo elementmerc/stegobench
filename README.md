@@ -44,7 +44,7 @@ The two halves are at different stages:
   detectors, embedders and corpora, checks whether this machine can run them,
   and scores a corpus against them. Every command in the tree is built and
   tested: `schema`, `validate`, `verify`, `list`, `describe`, `doctor`,
-  `plan`, `score`, `report`, `completions` and `help`.
+  `plan`, `score`, `fetch`, `report`, `completions` and `help`.
 - **Python generators** (`generators/`) that build a labelled corpus:
   fetching covers with provenance, embedding stego arms, packing shards, and
   scoring against a detector's HTTP endpoint. This half is older, working,
@@ -66,25 +66,24 @@ and the output shown is output it printed.
 cargo install --path crates/stegobench-cli
 ```
 
-You need no configuration files and no checkout afterwards. The tool registry
-is compiled into the binary as a fallback, so `stegobench` works from any
-directory on a fresh machine.
+You need no configuration files, and no checkout for the tool itself: the
+registry is compiled into the binary as a fallback, so `stegobench` works from
+any directory on a fresh machine. Steps 4 to 6 below read files that ship in
+the clone (`corpora/starter` and `results/v1`), so run them from it.
 
 **1. What is this?** Type the bare name.
 
 ```
 $ stegobench
 stegobench measures how good a steganography detector is, by running it over images whose answers are already known.
+It does NOT examine your own images (`stegobench help scope`).
 
-It does NOT examine your own images to find out what is in them. That is the other direction, and `stegobench help scope` says where to go for it.
-
-Try this first:
   stegobench list detectors    what this installation can run
-
-Then:
-  stegobench doctor            what is installed here, and what each tool still needs
+  stegobench doctor            what is installed, and what it needs
   stegobench help              the reasoning, one topic at a time
   stegobench --help            every command and flag
+
+  stegobench describe pentimento-core    10,000 covers with their licences attached, to quote a number from
 ```
 
 **2. What can it run?** The list is read from the registry, so it can't go
@@ -100,8 +99,16 @@ stegcore         AGPL-3.0-or-later  local      stegcore
 stegexpose       GPL-3.0            container  stegobench/stegexpose
 zsteg            MIT                container  stegobench/zsteg
 
-container  runs in a sandbox with no network, pinned by image digest, so two machines run identical bytes. Needs a container runtime.
-local      runs a program you installed, pinned by the hash of the file that ran. No sandbox, and the hash is particular to your build.
+container  pinned by image digest, sandboxed, no network. Needs a container runtime.
+local      a program you installed, pinned by the hash of the file that ran. No sandbox, your network.
+
+SERVICE, not sandboxed, and needs the network: stegashield. The image names the subject; an adapter here reaches an instance you started. Nothing checks that instance was built from that image, so a result of it reads `unpinned`.
+
+`stegobench doctor` says what each one still needs.
+
+13 tools in 10 images. Up to 1055 MB bundled, 21.3 GB more on demand.
+
+registry  plugins/registry
 ```
 
 **3. Can this machine actually run them?** `doctor` checks each tool's
@@ -111,13 +118,20 @@ than one.
 
 ```
 $ stegobench doctor --no-selftest
-registry: built in (compiled into this binary, because no registry was found on disk)
+registry  plugins/registry
 
 aletheia-rich    MISSING   not pulled. docker pull stegobench/aletheia-rich@sha256:5b08e93aaed2b2c30753ec3654df41d1406a4669f998384a04c26e24952f3ddf  not verified
     docker pull stegobench/aletheia-rich@sha256:5b08e93aaed2b2c30753ec3654df41d1406a4669f998384a04c26e24952f3ddf
+        about 9090 MB, pinned by digest
 ...
-13 tool(s): 0 verified, 0 answering, 0 broken, 13 not installed, 0 undetermined, 13 not checked.
+13 tool(s): 0 verified, 0 answering, 0 broken, 12 not installed, 1 undetermined, 13 not checked.
+1 undetermined: nothing to install would settle it. Its line says what it needs.
+not checked is not the same as working; each line says why.
+13 need something from you, indented under each.
 ```
+
+That run was from a clone, so `./plugins/registry` answered. Away from one the
+same line reads `registry  built in`.
 
 Drop `--no-selftest` and it also asks each installed tool to flag a known
 planted signal and clear a known clean fixture, in both directions, because a
@@ -129,27 +143,31 @@ would happen. It counts the corpus rather than guessing from its size, and
 says the time is unknown where a tool declares no measured rate:
 
 ```
-$ stegobench plan score --corpus ./demo-corpus --detector all
-6 item(s) to score with each of 7 detector(s):
-aletheia-rich    about 32 seconds
-aletheia-rs      about 8 seconds
-aletheia-spa     about 5 seconds
-stegashield      about 5 seconds
-stegcore         about 1 seconds
-stegexpose       about 2 seconds
-zsteg            about 1 seconds
+$ stegobench plan score --corpus corpora/starter --detector all
+18 item(s) to score with each of 7 detector(s):
+aletheia-rich    about 2 minutes
+aletheia-rs      about 25 seconds
+aletheia-spa     about 14 seconds
+stegashield      about 16 seconds
+stegcore         about 4 seconds
+stegexpose       about 5 seconds
+zsteg            about 2 seconds
 
-Total: about 55 seconds, over the 7 detector(s) that declare a rate.
-The corpus is walked once however many detectors are asked, so adding one costs its own scoring pass and nothing else.
-Records files: about 0.0 MB in total. Worst case, if every item hit the 60s deadline for every detector: 42 minutes.
-Each result would be custom: no --corpus-id was given, so there is no registered corpus to check this directory against. A custom result is comparable with itself rather than with anybody else's number
+Total          about 3 minutes, over the 7 that declare a rate
+Records        about 0.0 MB
+Worst case     2.1 hours (every item hitting the 60s deadline)
+Configuration  custom: no --corpus-id, so nothing to check this directory against. Comparable with itself, not with anybody else's number
 ```
+
+`corpora/starter` is the corpus that ships in the box: six covers and twelve
+stego images, enough to watch the machinery work and far too few to quote a
+number from. `corpora/starter/README.md` says so at more length.
 
 **5. Score the corpus.** This is the job. Point it at a directory of labelled
 samples and a detector you have installed:
 
 ```sh
-stegobench score --corpus ./demo-corpus --detector zsteg --out result.json
+stegobench score --corpus corpora/starter --detector zsteg --out result.json
 ```
 
 It asks the detector about every image, writes each answer as it goes, and
@@ -162,13 +180,12 @@ rather than reporting a missing file:
 
 ```
 $ stegobench score --corpus ./holiday-photos --detector all
-./holiday-photos holds 3 image(s) and not one record saying which of them hides anything, so there is nothing here to be right or wrong about.
+./holiday-photos holds 3 image(s) and no records saying which of them hides anything, so there is nothing to be right or wrong about.
 
-Stegobench measures DETECTORS, using images whose answers were fixed before any detector saw them. It does not examine images to find out what is in them. If your question is "is something hidden in these pictures", you want a detector pointed at your own files, and stegobench is how you find out whether to trust one.
-
-`stegobench help scope` sets out the difference and where to go instead.
-`stegobench list detectors` names every detector registered here.
-`stegobench help pairing` explains what a corpus has to carry before a number measured on it means anything.
+Stegobench measures DETECTORS against labelled images; it does not examine your own.
+`stegobench help scope`      the difference, and where to go instead
+`stegobench list detectors`  what is registered here
+`stegobench help pairing`    what a corpus has to carry first
 ```
 
 It exits 3, a pre-flight refusal, which a script can tell apart from an error
@@ -176,31 +193,34 @@ and knows not to retry.
 
 **6. Turn results into a table.** `report` reads result documents and renders
 the conditions into every row, so a figure can't be lifted out without them.
-This repository ships 24 real result documents under `results/v1`:
+This repository ships 21 real result documents under `results/v1`:
 
 ```
 $ stegobench report results/v1 --format markdown
 # Steganalysis results
 
-24 result document(s) from results/v1, in 2 table(s).
+21 result document(s) from results/v1, in 1 table(s).
+Ordered by arm then detector, never by score. Not a ranking. (`stegobench help reports`)
 
-The tables are separate because the figures in them are not comparable with each other. [...]
+## round3-q95 (custom)
 
-## rich-suniward (custom)
+Corpus digest: `sha256:481a17f2592dd6042b9298f436150ae08d0d0c70d0ccffebe647f075166d77b6`
 
-Corpus digest: `sha256:d93e9720af0c3ab7a21dd9e81f2d4b4cbc2f6025fa3d8ef00110d76aea2c97b4`
-
-[... one paragraph saying what `custom` rules out ...]
+CUSTOM: round3-q95 declared no digest in advance. Quote these figures beside nothing else.
 
 | detector | isolation | corpus | config | arm | domain | AUC | TPR@1%FA | TPR@10%FA | pairing | split | clean/stego/unscored | conditions |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| aletheia-rs | sandbox-no-network | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5087 | 0.0090 | 0.0950 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
-| aletheia-spa | sandbox-no-network | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5018 | 0.0110 | 0.1010 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
-| stegexpose | sandbox-no-network | rich-suniward @ sha256:d93e9720 | custom | suniward at 0.4 bpp | spatial | 0.5097 | 0.0090 | 0.0990 | single-variable | not-applicable | 1000/1000/0 | nothing flagged |
+| aletheia-rs | sandbox-no-network | round3-q95 @ sha256:481a17f2 | custom | outguess at 5.000% of capacity | jpeg | 0.4909 | 0.0063 | 0.0813 | confounded | not-applicable | 158/160/2 | CONFOUNDED: the pair differs in more than the payload · 2 image(s) unscored and not counted |
+| aletheia-spa | sandbox-no-network | round3-q95 @ sha256:481a17f2 | custom | outguess at 5.000% of capacity | jpeg | 0.4923 | 0.0000 | 0.0563 | confounded | not-applicable | 158/160/2 | CONFOUNDED: the pair differs in more than the payload · 2 image(s) unscored and not counted |
+| stegexpose | sandbox-no-network | round3-q95 @ sha256:481a17f2 | custom | outguess at 5.000% of capacity | jpeg | 0.4813 | 0.0000 | 0.0563 | confounded | not-applicable | 160/160/0 | CONFOUNDED: the pair differs in more than the payload |
 ```
 
+Eighteen further rows follow, one for each remaining detector and arm.
+
 Rows are ordered by arm and then by detector, never by score. It isn't a
-ranking and no ranking can be derived from it.
+ranking and no ranking can be derived from it. Every row above is flagged
+`confounded`, which is the point: these are real measurements, and the report
+says what's wrong with them in the same cell as the number.
 
 ### Two things worth knowing early
 
@@ -224,7 +244,7 @@ answered.
 
 **The first one found answers in full.** Registries aren't merged, so a
 directory holding one detector of your own gives you one detector and not
-fourteen. To add your own tool to the set that ships, copy `plugins/registry/`
+thirteen. To add your own tool to the set that ships, copy `plugins/registry/`
 somewhere and add your file to the copy. `stegobench list` then shows all of
 them and names the directory it read.
 
@@ -293,7 +313,12 @@ point at, a plugin is code you run. It has a licence, a download route and a
 cover count; it has no container image, no argv and no self-test.
 
 `stegobench list corpora` and `stegobench describe <id>` read them the same
-way they read a tool, so a user sees one registry.
+way they read a tool, so a user sees one registry. Where an entry declares a
+download route, `stegobench fetch <id> --tier <tier>` downloads it and checks
+the bytes against the SHA-256 and the size the entry declared in advance. A
+corpus whose terms don't permit redistribution is refused before a connection
+opens, because fetching somebody else's dataset for you would make this
+project the mirror; `describe` prints how to obtain those yourself.
 
 ```toml
 id = "example"
@@ -438,9 +463,9 @@ identifier.
 deliberately not registered and not listed anywhere as if it worked. It stays
 out until it builds, rather than sitting in the registry as a dead reference.
 
-**stegoveritas, F5, jsteg and jphide are not present.** They're candidates
-for later, not silently dropped: naming them here rather than letting a
-reader discover the gap is the point of this section existing at all.
+**F5, jsteg and jphide are not present either.** They're candidates for later,
+not silently dropped: naming them here rather than letting a reader discover
+the gap is the point of this section existing at all.
 
 ## Verifying a download
 

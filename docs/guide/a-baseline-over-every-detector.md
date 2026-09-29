@@ -55,9 +55,8 @@ The summary says the same thing in words:
 
 ```
 2 of 3 detector(s) measured.
-1 detector(s) produced NO number at all (1 skipped, 0 failed) and are named
-above. A table built from these documents covers the 2 that ran and nothing
-else.
+1 produced NO number (1 skipped, 0 failed). A report over these documents
+covers only the 2 that ran.
 ```
 
 ## One detector failing does not lose the others
@@ -99,11 +98,11 @@ in the table beside today's. Nothing is deleted, because a measurement is not
 this command's to throw away, but the run says so:
 
 ```
-WARNING: 1 document(s) here were NOT measured by this run and are left over
-from an earlier one: ./pentimento-nano.results/zsteg.json.
+WARNING: 1 document(s) here are from an earlier run, not this one:
+./pentimento-nano.results/zsteg.json. `stegobench report
+./pentimento-nano.results` will include them beside today's numbers. Move them
+aside if this run is meant to be the whole table.
 ```
-
-Move it aside if this run is meant to be the whole table.
 
 ## Before you start
 

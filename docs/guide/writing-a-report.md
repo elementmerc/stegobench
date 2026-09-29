@@ -29,13 +29,13 @@ copying meant it or not.
 ## What a row says
 
 ```
-detector     isolation           corpus                           config  arm                  AUC     pairing          split
-aletheia-rs  sandbox-no-network  rich-suniward @ sha256:d93e9720  custom  suniward at 0.4 bpp  0.5087  single-variable  not-applicable
+detector     isolation           corpus                        config  arm                             AUC     pairing          split
+aletheia-rs  sandbox-no-network  round3-q95 @ sha256:481a17f2  custom  steghide at 5.000% of capacity  0.5047  single-variable  not-applicable
 ```
 
 | Cell | The question it answers |
 |---|---|
-| `detector` and `isolation` | What was asked, and what it could reach while it answered. `sandbox-no-network` is a container that saw nothing but the images; `host` is a program on the operator's machine with their network; `remote-service` means the images went over the wire to an instance they started. How the tool is pinned is a separate question, and `--format csv` and `--format json` carry it as `pinned_by` |
+| `detector` and `isolation` | What was asked, and what it could reach while it answered. `sandbox-no-network` is a container that saw nothing but the images; `host` is a program on the operator's machine with their network; `remote-service` means the images went over the wire to an instance they started. How the tool is pinned is a separate question, and `--format csv` and `--json` carry it as `pinned_by` |
 | `corpus` | Which images, by name and by the first eight characters of the digest. The full digest sits above the table, and `--format csv` carries it in every row |
 | `config` | `named` if the corpus digest was declared in advance and this run matched it, `custom` otherwise |
 | `arm` | What was hidden and how much of it, with the unit. `0.4 bpp` and `5% of capacity` are different quantities |
@@ -45,10 +45,10 @@ aletheia-rs  sandbox-no-network  rich-suniward @ sha256:d93e9720  custom  suniwa
 | `clean/stego/unscored` | How many images each side, and how many the detector couldn't answer about |
 | `conditions` | Everything above that needs a sentence: a confounded arm, a contaminated detector, a corpus with no digest |
 
-The `conditions` cell spells its warnings out in words. `CONFOUNDED: the clean
-and stego images differ in something besides the payload` is longer than a
-symbol and a footnote, and it's longer on purpose: a symbol needs a legend,
-and a legend is the thing a copied row leaves behind.
+The `conditions` cell spells its warnings out in words. `CONFOUNDED: the pair
+differs in more than the payload` is longer than a symbol and a footnote, and
+it's longer on purpose: a symbol needs a legend, and a legend is the thing a
+copied row leaves behind.
 
 ## The four things it won't do
 

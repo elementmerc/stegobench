@@ -71,10 +71,18 @@ progress still reaches a terminal.
   measuring a detector from examining your own images.
 - `stegobench score --corpus <DIR> --detector <NAME>`: asks the detector
   about every sample under the directory and writes a `result-v1` document.
-  Resumable: every answer lands in a records file as it is produced, and the
-  same command run again continues rather than restarting. It reads an
-  unpacked corpus directory, and marks every such run `custom`, because a
-  directory carries no digest anybody can check.
+  `--detector` is repeatable and `all` means every registered detector; with
+  more than one, `--out` and `--records` name directories and each detector
+  gets its own file and its own records file inside them. Exit 0 means every
+  detector asked for produced a result, 3 that at least one was unavailable,
+  4 that at least one failed, so 0 never means "some".
+  Resumable, per detector: every answer lands in a records file as it is
+  produced, and the same command run again continues rather than restarting.
+  It reads an unpacked corpus directory, and marks every such run `custom`,
+  because a directory carries no digest anybody can check. A tiny corpus
+  ships in the clone at `corpora/starter` (six covers, twelve stego images)
+  so a fresh install has something to score; it is a demonstration and a
+  number from it must not be quoted.
 - `stegobench plan <command>`: what that command would cost, without running
   it. Takes the command as you would type it, so
   `stegobench plan score --corpus D --detector N`. Reports the item count, the

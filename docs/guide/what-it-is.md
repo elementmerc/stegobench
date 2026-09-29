@@ -7,7 +7,7 @@ Steganalysis is the business of looking at a picture and deciding whether
 somebody hid a message inside it. Plenty of tools claim to do it; few publish a
 number a stranger can reproduce.
 
-## The two problems it exists for
+## The problems it exists for
 
 | Problem | What Stegobench does |
 |---|---|
