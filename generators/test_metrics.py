@@ -123,7 +123,12 @@ class BinaryResolutionTests(unittest.TestCase):
     def test_nothing_anywhere_names_every_place_and_the_line_to_type(self):
         original = M._candidates
         M.resolve_binary.cache_clear()
-        M._candidates = lambda: [("nowhere", pathlib.Path("/nonexistent/stegobench"))]
+        # Rendered rather than written out, because the message prints the
+        # path the way this platform spells it: a literal with forward slashes
+        # in it asserts the separator as well as the path, and only one
+        # platform agrees.
+        missing = pathlib.Path("/nonexistent/stegobench")
+        M._candidates = lambda: [("nowhere", missing)]
         try:
             with self.assertRaises(MetricsUnavailable) as caught:
                 M.resolve_binary()
@@ -131,7 +136,7 @@ class BinaryResolutionTests(unittest.TestCase):
             M._candidates = original
             M.resolve_binary.cache_clear()
         message = str(caught.exception)
-        self.assertIn("/nonexistent/stegobench", message)
+        self.assertIn(str(missing), message)
         self.assertIn("cargo build --release", message)
         self.assertIn("STEGOBENCH_BIN", message)
         # The absence of a fallback is part of the message, because somebody
