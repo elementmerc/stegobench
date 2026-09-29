@@ -267,10 +267,13 @@ class ADownloaderIsToldHowToCheck(unittest.TestCase):
 
 class TheWorkflowIsValidYaml(unittest.TestCase):
     def test_it_parses(self) -> None:
-        try:
-            import yaml  # noqa: PLC0415
-        except ImportError:  # pragma: no cover - depends on the environment
-            self.skipTest("PyYAML is not installed; it is not in requirements.txt")
+        # Imported without a guard since 2026-09-29, when PyYAML entered
+        # `requirements.txt`. It used to skip when the parser was absent, and
+        # the skip was honest then. Now an absent parser means the pinned set
+        # did not install, and reporting that as "nothing to check here" would
+        # turn a broken environment into a green run.
+        import yaml  # noqa: PLC0415
+
         for workflow in sorted(WORKFLOWS.glob("*.yml")):
             with self.subTest(workflow=workflow.name):
                 with workflow.open(encoding="utf-8") as handle:

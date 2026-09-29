@@ -28,3 +28,23 @@ opencv-python==5.0.0.93
 
 # Tests.
 pytest==9.1.1
+
+# The YAML parser the published metadata is checked with. It is here rather
+# than in `requirements-optional.txt` on purpose: the tests that need it read
+# the HuggingFace dataset card's frontmatter, and that frontmatter is what
+# decides whether the dataset loads at all for HuggingFace, Kaggle and the ML
+# Commons tooling. A check on a published artefact that only runs where
+# somebody happens to have the parser installed is the same defect as a check
+# that cannot be re-run.
+#
+# Measured: it was absent from both requirement files while three tests
+# imported it unguarded, so CI went red on 2026-09-23 and stayed red through
+# six runs, 13 errors every time, while the suite passed on every machine that
+# had it. That is exactly the failure `ci.yml` warns about a few lines above
+# where it installs this file.
+#
+# Cooldown (baseline Section 5): 6.0.3 has been installed on the machine that
+# pinned it since 2026-04-23, so it is at least 159 days old and far past the
+# 7 day window. The upload date itself was not read, and the installed date is
+# a lower bound rather than the real age.
+PyYAML==6.0.3
