@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 use stegobench_core::registry::Registry;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_registry.rs"));
+include!(concat!(env!("OUT_DIR"), "/embedded_adapters.rs"));
 
 /// The directory name a registry is installed under, below a data directory.
 const INSTALL_SUBDIR: &str = "stegobench";
@@ -129,6 +130,11 @@ impl Source {
 pub struct Resolved {
     pub registry: Registry,
     pub source: Source,
+    /// Holds the temporary directory the built-in adapters were written to,
+    /// so they outlive the resolution and are removed when the command ends.
+    /// `None` for every registry read from disk, which has its adapters beside
+    /// it already.
+    _adapters: Option<tempfile::TempDir>,
 }
 
 impl Resolved {
@@ -141,14 +147,18 @@ impl Resolved {
         Ok(Resolved {
             registry: load(dir)?,
             source: Source::Explicit(dir.to_path_buf()),
+            _adapters: None,
         })
     }
 
     /// The copy compiled into this binary.
     pub fn built_in() -> Result<Self, Error> {
+        let mut registry = embedded()?;
+        let adapters = unpack_built_in_adapters(&mut registry)?;
         Ok(Resolved {
-            registry: embedded()?,
+            registry,
             source: Source::BuiltIn,
+            _adapters: adapters,
         })
     }
 
@@ -229,6 +239,7 @@ pub fn resolve(explicit: Option<&Path>) -> Result<Resolved, Error> {
             return Ok(Resolved {
                 registry,
                 source: make(dir.clone()),
+                _adapters: None,
             });
         }
     }
@@ -391,6 +402,92 @@ fn embedded() -> Result<Registry, Error> {
     Ok(reg)
 }
 
+/// Writes the built-in adapters out and repoints the entries at them.
+///
+/// WHY THE BUILT-IN REGISTRY CANNOT LEAVE THESE PATHS ALONE
+/// --------------------------------------------------------
+/// A `host = true` entry names its adapter the way the repository holds it,
+/// `plugins/adapters/aletheia_one.py`, and that path is resolved against the
+/// directory the user runs from. A registry read from disk can be fixed by
+/// measuring from the directory it was read from, and is. The built-in copy
+/// has no directory to measure from and exists for the machine that has no
+/// checkout, so the three entries that declare an adapter would name a file
+/// that is not there and fail with advice ("run from the root of the clone")
+/// that a reader who installed a package cannot act on.
+///
+/// The bytes are therefore carried in the binary beside the TOML and written
+/// to a temporary directory held for the life of the command, which is the
+/// same shape the self-test fixtures use. Nothing is left behind, and no
+/// cache has to be invalidated when an adapter changes, because the copy is
+/// only ever as old as the binary.
+///
+/// Returns `None` when no entry declares an adapter, so a registry that needs
+/// no adapters writes nothing at all.
+fn unpack_built_in_adapters(registry: &mut Registry) -> Result<Option<tempfile::TempDir>, Error> {
+    let wanted: Vec<String> = registry
+        .entries
+        .values()
+        .filter_map(|e| e.invoke.as_ref().and_then(|i| i.adapter.clone()))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+
+    let scratch = tempfile::Builder::new()
+        .prefix("stegobench-adapters-")
+        .tempdir()
+        .map_err(|e| Error::BuiltInBroken(format!("could not unpack the adapters: {e}")))?;
+
+    let mut written: std::collections::HashMap<&str, PathBuf> = std::collections::HashMap::new();
+    for (name, bytes) in EMBEDDED_ADAPTERS {
+        // The names come from a directory listing at build time, so they carry
+        // no separators. Checked anyway, because this writes files.
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(Error::BuiltInBroken(format!(
+                "built-in adapter {name:?} is not a plain file name"
+            )));
+        }
+        let dest = scratch.path().join(name);
+        std::fs::write(&dest, bytes).map_err(|e| {
+            Error::BuiltInBroken(format!("could not write the built-in adapter {name}: {e}"))
+        })?;
+        written.insert(name, dest);
+    }
+
+    // An entry naming an adapter this binary does not carry is a broken build
+    // rather than a user's problem, and saying so here beats a file-not-found
+    // from three layers down at the moment a detector was meant to run.
+    for rel in &wanted {
+        let base = Path::new(rel)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !written.contains_key(base) {
+            return Err(Error::BuiltInBroken(format!(
+                "an entry names the adapter {rel}, which is not compiled into this binary"
+            )));
+        }
+    }
+
+    for entry in registry.entries.values_mut() {
+        let Some(invoke) = entry.invoke.as_mut() else {
+            continue;
+        };
+        let Some(rel) = invoke.adapter.as_ref() else {
+            continue;
+        };
+        let base = Path::new(rel)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if let Some(dest) = written.get(base) {
+            invoke.adapter = Some(dest.display().to_string());
+        }
+    }
+
+    Ok(Some(scratch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +499,54 @@ mod tests {
     /// The whole point of embedding. A binary with a built-in copy that has
     /// drifted from the repository answers `list detectors` with a world that
     /// no longer exists, and nothing on the machine would say so.
+    /// The built-in registry is for the machine with no checkout, and until
+    /// this landed its three host entries named an adapter by a path relative
+    /// to wherever the user happened to be standing. Measured from a scratch
+    /// directory, all three reported BROKEN with advice to run from the root
+    /// of a clone the reader does not have.
+    #[test]
+    fn every_built_in_adapter_is_a_file_that_is_actually_there() {
+        let resolved = Resolved::built_in().expect("the built-in registry loads");
+        let declared: Vec<&str> = resolved
+            .registry
+            .entries
+            .values()
+            .filter_map(|e| e.invoke.as_ref().and_then(|i| i.adapter.as_deref()))
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "no entry declares an adapter, so this test proves nothing; if that \
+             is now true, delete it rather than leaving it passing vacuously"
+        );
+        for path in declared {
+            let p = Path::new(path);
+            assert!(
+                p.is_absolute(),
+                "{path} is relative, so it resolves against whatever directory \
+                 the user ran from"
+            );
+            assert!(p.is_file(), "{path} is not there");
+        }
+    }
+
+    /// The temporary directory lives on the `Resolved`, so a caller that keeps
+    /// only the registry would be holding paths whose files had been deleted.
+    #[test]
+    fn the_unpacked_adapters_survive_as_long_as_the_resolution_does() {
+        let resolved = Resolved::built_in().expect("the built-in registry loads");
+        let first = resolved
+            .registry
+            .entries
+            .values()
+            .find_map(|e| e.invoke.as_ref().and_then(|i| i.adapter.clone()))
+            .expect("at least one entry declares an adapter");
+        drop(resolved);
+        assert!(
+            !Path::new(&first).exists(),
+            "{first} outlived its resolution, so the scratch directory is leaking"
+        );
+    }
+
     #[test]
     fn the_built_in_registry_is_the_registry_on_disk() {
         let disk = Registry::load(&shipped()).expect("the shipped registry loads");
