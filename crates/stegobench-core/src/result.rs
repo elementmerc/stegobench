@@ -93,6 +93,19 @@ pub struct CorpusRef {
     /// Empty where the corpus cannot honestly be named, which is any corpus
     /// whose records do not all state a digest for their own image.
     pub digest: String,
+    /// How many matched pairs the measurement covered.
+    ///
+    /// A pair is one cover and the stego image made from it, so this is the
+    /// stego side of the set and NOT the number of images: a run over 6 covers
+    /// and 12 stego images reports 12, not 18.
+    ///
+    /// Written down because it was not. The Rust and the Python writers
+    /// disagreed about this field for as long as both existed, one recording
+    /// items and the other pairs, and an undocumented field is what let them:
+    /// there was nothing either could be wrong against. A reader comparing
+    /// `pairs` with `n_stego` across two documents would have seen them agree
+    /// in one and differ by the clean count in the other, with no way to tell
+    /// which convention they were holding.
     pub pairs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<String>,

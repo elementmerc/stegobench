@@ -644,7 +644,17 @@ where
             // registry entry describes a dataset, it does not deliver one.
             source: CorpusSource::Supplied,
             digest: checks.digest.clone().unwrap_or_default(),
-            pairs: labels.len() as u64,
+            // PAIRS, not items. This wrote `labels.len()`, which is clean plus
+            // stego, while `generators/emit_results.py` wrote the stego rows,
+            // which is pairs. One published field meant two things depending on
+            // which half of this project produced the document, and the field
+            // carried no doc comment to arbitrate: a shipped result says
+            // `pairs: 200` beside `n_stego: 200`, and a run of the starter
+            // corpus said `pairs: 18` for 6 covers and 12 stego images.
+            //
+            // A pair is a cover and its stego twin, so the count is the stego
+            // side. See the field's own documentation in `result.rs`.
+            pairs: labels.iter().filter(|&&stego| stego).count() as u64,
             split: None,
         },
         arm: checks.arm.clone(),
