@@ -8,8 +8,13 @@
 //! `run-v1` that ties them together: the command line that started it, the
 //! registry revision it ran against, the governor's pre-flight estimate next
 //! to what the run actually cost, and any arm that failed rather than only the
-//! ones that finished. It is what `stegobench watch` reads and what `--resume`
-//! restarts from, so it is written incrementally rather than only at the end.
+//! ones that finished.
+//!
+//! The shape is published (`stegobench schema run-v1`) and validated
+//! (`stegobench validate`) ahead of anything writing one, so the vocabulary is
+//! fixed before a campaign runner depends on it. No command emits a `run-v1`
+//! document today; `stegobench score` writes one `result-v1` per detector and
+//! resumes from its records file instead.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,8 +27,8 @@ pub const RUN_SCHEMA_ID: &str = "stegobench/run-v1";
 pub struct RunV1 {
     /// Always [`RUN_SCHEMA_ID`].
     pub schema: String,
-    /// A stable identifier for this run, so `watch` and `--resume` can find it
-    /// again without depending on the order arms happen to appear in.
+    /// A stable identifier for this run, so a reader can find it again without
+    /// depending on the order arms happen to appear in.
     pub run_id: String,
     /// The command line as typed, so a run can be re-issued exactly.
     pub command: Vec<String>,
@@ -95,8 +100,8 @@ impl RunV1 {
         if self.run_id.trim().is_empty() {
             bad.push(
                 "run_id is empty; set it to something stable and unique, such as \
-                 the start timestamp plus the arm name, so `watch` and `--resume` \
-                 can find this run again"
+                 the start timestamp plus the arm name, so this run can be \
+                 found again"
                     .into(),
             );
         }
