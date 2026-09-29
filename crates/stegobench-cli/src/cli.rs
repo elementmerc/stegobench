@@ -246,6 +246,15 @@ pub enum Command {
         /// digest and this directory matches it. Otherwise it is `custom`.
         #[arg(long, value_name = "ID")]
         corpus_id: Option<String>,
+        /// The corpus this detector was trained on, if it was trained at all.
+        ///
+        /// Recorded in the result as a declaration, because a detector scored
+        /// on what it trained on is not being measured, and nothing here can
+        /// tell from the outside. Naming the corpus being scored is allowed
+        /// and says so loudly in the output: it is a real thing to do while
+        /// developing and a bad number to quote.
+        #[arg(long, value_name = "ID")]
+        trained_on: Option<String>,
         /// Where the per-item answers are kept, and where a resumed run reads
         /// what is already done.
         ///

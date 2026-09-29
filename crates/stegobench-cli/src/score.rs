@@ -68,6 +68,13 @@ pub struct Request<'a> {
     /// this run is checked against. See [`Configuration`] for why the check
     /// rather than the name is what earns `named`.
     pub registered: Option<&'a CorpusEntry>,
+    /// The corpus the detector was trained on, as the caller declared it.
+    ///
+    /// Nothing here can establish this from the outside, which is exactly why
+    /// it is a declaration: a trained detector scored on what it trained on
+    /// produces a number that measures memory rather than detection, and a
+    /// reader has no way to tell from the document unless the document says.
+    pub trained_on: Option<&'a str>,
 }
 
 /// Why a run could not produce a result.
@@ -203,6 +210,12 @@ pub struct Prepared {
     /// is one bool per item, so a Core tier is 344 KB, which is an order of
     /// magnitude below the score vector the metrics pass already needs.
     labels: Vec<bool>,
+    /// The corpus the detector was trained on, as the caller declared it.
+    ///
+    /// Copied onto the `Prepared` because every result written from it carries
+    /// the same declaration: it is a property of the detector and the command,
+    /// not of one pass over the corpus.
+    trained_on: Option<String>,
     /// When the shared preparation began, and how long it took.
     ///
     /// Every result written from this `Prepared` reports `started_utc` as the
@@ -248,6 +261,7 @@ where
         request.corpus,
         request.registered,
         request.limit,
+        request.trained_on,
         &mut progress,
     )?;
     score_one(
@@ -277,6 +291,7 @@ pub fn prepare<P>(
     corpus: &Path,
     registered: Option<&CorpusEntry>,
     limit: Option<u64>,
+    trained_on: Option<&str>,
     mut progress: P,
 ) -> Result<Prepared, ScoreError>
 where
@@ -403,6 +418,26 @@ where
         }
     }
 
+    // A detector scored on what it trained on measures memory rather than
+    // detection, and the number comes out high. Said out loud at the moment
+    // the run happens, because the person typing the command is the only one
+    // who can still decide not to quote it; a reader meeting the document
+    // later can only find the declaration if they go looking.
+    if let Some(trained) = trained_on {
+        let same = registered
+            .map(|e| e.id.as_str())
+            .is_some_and(|id| id == trained);
+        if same {
+            progress(&format!(
+                "WARNING: this detector is declared as trained on {trained},                  which is the corpus it is being scored against. The number                  below measures what it memorised as well as what it detects,                  and it is not a figure to quote for {trained}"
+            ));
+        } else {
+            progress(&format!(
+                "declared as trained on {trained}, which the result records                  so a reader can judge it"
+            ));
+        }
+    }
+
     // A prefix of a tier is not the tier, whatever the whole of it hashes to,
     // and the digest above is taken over the whole corpus rather than over
     // what was scored.
@@ -444,6 +479,7 @@ where
         corpus: corpus.to_path_buf(),
         limit,
         registered: registered.map(|e| (e.name.clone(), e.tier.clone())),
+        trained_on: trained_on.map(str::to_string),
         checks,
         claim_holds,
         labels,
@@ -707,7 +743,7 @@ where
             split_discipline: checks.split,
             pairing: checks.pairing,
             configuration: named,
-            trained_on: None,
+            trained_on: prepared.trained_on.clone(),
             self_reported: false,
         },
     };
@@ -1566,6 +1602,7 @@ mod tests {
         Request {
             corpus: dir,
             registered: None,
+            trained_on: None,
             records: dir.with_extension("records.jsonl"),
             timeout: Duration::from_secs(5),
             limit,
@@ -1713,14 +1750,74 @@ mod tests {
         .0;
 
         // The figure itself is honest and stays: 0.5 is what a set of ties is.
-        assert!((result.metrics.auc - 0.5).abs() < 1e-12, "{:?}", result.metrics);
+        assert!(
+            (result.metrics.auc - 0.5).abs() < 1e-12,
+            "{:?}",
+            result.metrics
+        );
         assert_eq!(result.metrics.n_error, 0, "it answered every image");
 
         let warned = said.iter().any(|m| m.contains("identical"));
-        assert!(warned, "nothing said the answers were all the same: {said:?}");
+        assert!(
+            warned,
+            "nothing said the answers were all the same: {said:?}"
+        );
         assert!(
             said.iter().any(|m| m.contains("by construction")),
             "the warning does not say why the 0.5 is not a measurement: {said:?}"
+        );
+    }
+
+    /// The leaderboard rejects a detector that trained on the corpus it was
+    /// scored against, and the harness had no way to say so: `trained_on` was
+    /// written as `None` whatever the run was. An honest submitter had to
+    /// hand-edit a machine-produced document to declare it, which is the one
+    /// thing the submission rules treat as suspect. The flag exists so the
+    /// honest answer is the easy one.
+    #[cfg(unix)]
+    #[test]
+    fn a_declared_training_corpus_is_recorded_and_the_self_scored_case_is_warned_about() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+        let registered = registered_corpus(None);
+
+        // Declared as trained on something else: recorded, and not a warning.
+        let mut elsewhere = request(&root, None);
+        elsewhere.registered = Some(&registered);
+        elsewhere.trained_on = Some("some-other-corpus");
+        let mut said = Vec::new();
+        let result = score(&entry, &elsewhere, |m: &str| said.push(m.to_string()))
+            .expect("a result")
+            .0;
+        assert_eq!(
+            result.declarations.trained_on.as_deref(),
+            Some("some-other-corpus"),
+            "the declaration did not reach the document"
+        );
+        assert!(
+            !said.iter().any(|m| m.contains("WARNING")),
+            "training on a different corpus is not a warning: {said:?}"
+        );
+
+        // Declared as trained on the corpus being scored: still recorded, and
+        // said out loud, because the person running it is the last one who can
+        // decide not to quote the number.
+        let root2 = tmp.path().join("corpus2");
+        corpus(&root2, 3, 3);
+        let mut itself = request(&root2, None);
+        itself.registered = Some(&registered);
+        itself.trained_on = Some("example");
+        let mut said = Vec::new();
+        let result = score(&entry, &itself, |m: &str| said.push(m.to_string()))
+            .expect("a result")
+            .0;
+        assert_eq!(result.declarations.trained_on.as_deref(), Some("example"));
+        assert!(
+            said.iter()
+                .any(|m| m.contains("WARNING") && m.contains("scored against")),
+            "scoring a detector on what it trained on has to say so: {said:?}"
         );
     }
 
@@ -2438,7 +2535,7 @@ mod tests {
         let entry = registered_corpus(Some(&digest));
 
         let mut lines: Vec<String> = Vec::new();
-        let prepared = prepare(&root, Some(&entry), None, |l: &str| {
+        let prepared = prepare(&root, Some(&entry), None, None, |l: &str| {
             lines.push(l.to_string())
         })
         .expect("prepared");
