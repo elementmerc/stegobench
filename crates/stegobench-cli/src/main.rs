@@ -339,8 +339,15 @@ fn describe_block<T: serde::Serialize + std::fmt::Debug>(
     )
 }
 
-fn cmd_doctor(resolved: &Resolved, fixtures: &Path, no_selftest: bool) -> Output {
+/// `fixtures` is `None` when the self-tests are not being run, which is the
+/// only state in which no fixtures are resolved at all. Carrying the resolved
+/// fixtures rather than just their directory is what lets the report say WHICH
+/// ones answered: a stale `./fixtures` beside a checkout and the copy compiled
+/// into the binary are different bytes, and a self-test result is about the
+/// ones it actually read.
+fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>) -> Output {
     let reg = &resolved.registry;
+    let no_selftest = fixtures.is_none();
 
     let mut rows = Vec::new();
     let (mut missing, mut broken, mut passed, mut skipped, mut answered) = (0, 0, 0, 0, 0);
@@ -360,7 +367,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: &Path, no_selftest: bool) -> Output
         let verdict = if no_selftest || !check.presence.is_present() {
             Verified::Skipped("not attempted".into())
         } else {
-            selftest::run(entry, fixtures)
+            selftest::run(entry, fixtures.expect("present unless no_selftest").dir())
         };
         check.verified = match &verdict {
             Verified::Passed => Some(true),
@@ -415,6 +422,13 @@ fn cmd_doctor(resolved: &Resolved, fixtures: &Path, no_selftest: bool) -> Output
     // looking at a row they did not expect needs to know which one it came
     // from before they start looking for the tool.
     human.push(resolved.source.line());
+    // And the same question about the fixtures, for the same reason: a
+    // self-test verdict is about the bytes it read, and there is more than one
+    // place those can come from.
+    human.push(match fixtures {
+        Some(f) => f.line(),
+        None => "fixtures  not read, because the self-tests were not run".to_string(),
+    });
     human.push(String::new());
     for (_, _, detail, needs) in &rows {
         human.push(detail.clone());
@@ -463,6 +477,10 @@ fn cmd_doctor(resolved: &Resolved, fixtures: &Path, no_selftest: bool) -> Output
 
     let json = serde_json::json!({
         "registry": resolved.to_json(),
+        "fixtures": fixtures.map(|f| serde_json::json!({
+            "source": f.source().tag(),
+            "path": f.dir().display().to_string(),
+        })),
         "checked": rows.len(),
         "needing_action": needing,
         "verified": passed,
@@ -2091,12 +2109,12 @@ fn run(cli: &Cli) -> Output {
                 // Nothing will read the fixtures, so nothing looks for them.
                 // Unpacking the built-in copy here would be work done to
                 // satisfy a parameter rather than a question.
-                return cmd_doctor(r, Path::new("fixtures"), true);
+                return cmd_doctor(r, None);
             }
             match fixtures::resolve(fixtures.as_deref()) {
                 // Held for the whole call: for the built-in copy this owns the
                 // scratch directory the images were unpacked into.
-                Ok(found) => cmd_doctor(r, found.dir(), false),
+                Ok(found) => cmd_doctor(r, Some(&found)),
                 Err(e) => Output::err(exit::PREFLIGHT_REFUSED, e.to_string()),
             }
         }),
@@ -2981,7 +2999,7 @@ mod tests {
             shipped_registry().display().to_string()
         );
 
-        let doctor = cmd_doctor(&resolved, Path::new("fixtures"), true);
+        let doctor = cmd_doctor(&resolved, None);
         assert!(
             doctor.human.starts_with("registry  "),
             "doctor does not open by naming the registry: {}",
@@ -3819,7 +3837,7 @@ mod tests {
     #[test]
     fn doctor_and_describe_both_say_what_a_tool_needs_and_agree() {
         let dir = shipped_registry();
-        let doctor = cmd_doctor(&resolved_at(&dir), Path::new("fixtures"), true);
+        let doctor = cmd_doctor(&resolved_at(&dir), None);
         assert!(
             doctor.json["needing_action"].is_number(),
             "doctor does not report how many tools need something"
