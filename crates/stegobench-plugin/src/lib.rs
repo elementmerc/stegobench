@@ -28,6 +28,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -135,13 +136,30 @@ pub fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
+/// How long a tool gets to say what version it is.
+///
+/// A version probe is the cheapest question there is, so the ceiling is for
+/// the tool that does not answer it rather than for the one that is slow.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Asks a binary plugin what version it is, using the arguments its entry
 /// declares. Returns None when it cannot be asked, rather than guessing.
+///
+/// Bounded through [`exec::captured`] rather than `Command::output()`, which
+/// reads both pipes to end of file with no deadline. Measured 2026-09-29: a
+/// tool that prints its version, exits 0, and leaves one background child
+/// holding the write end of the pipe makes `output()` block forever, because
+/// end of file arrives when the LAST holder closes it rather than when the
+/// process we spawned exits. The tool had already answered. Forking a helper
+/// and returning is ordinary behaviour for a shell wrapper, which is what
+/// several registry entries point at.
 pub fn binary_version(entry: &Entry) -> Option<String> {
     let bin = entry.binary.as_ref()?;
     let program = bin.command.first()?;
     let path = which(program)?;
-    let out = Command::new(&path).args(&bin.version_args).output().ok()?;
+    let mut cmd = Command::new(&path);
+    cmd.args(&bin.version_args);
+    let out = exec::captured(cmd, program, VERSION_TIMEOUT).ok()?;
     let text = String::from_utf8_lossy(if out.stdout.is_empty() {
         &out.stderr
     } else {
@@ -153,6 +171,62 @@ pub fn binary_version(entry: &Entry) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hang this whole module's timeout discipline exists to stop, driven
+    /// rather than described.
+    ///
+    /// A tool that prints its version, exits 0, and leaves one background
+    /// child alive is a shell wrapper doing something ordinary. The write end
+    /// of the pipe is inherited by that child, so end of file never arrives,
+    /// and `Command::output()` waits on it for as long as the machine stays
+    /// up. Measured 2026-09-29 with a five line script: `output()` had not
+    /// returned after 25 seconds although the tool answered immediately.
+    ///
+    /// Written to fail rather than to hang if the bound is ever removed: the
+    /// probe runs on its own thread and the assertion is on a channel with a
+    /// deadline, so a regression reports a failure in seconds instead of
+    /// wedging the suite, which is what a test for a hang has to do.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_probe_returns_even_when_the_tool_leaves_a_child_holding_the_pipe() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let script = dir.path().join("forker.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 120 &\necho 'forker 9.9'\nexit 0\n",
+        )
+        .expect("written");
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        let entry: Entry = toml::from_str(&format!(
+            "name = \"forker\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"{}\"]\nversion_args = [\"--version\"]\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+            script.display()
+        ))
+        .expect("the entry parses");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(binary_version(&entry));
+        });
+
+        // Comfortably above VERSION_TIMEOUT and far below the 120s the
+        // grandchild lives for, so this can only pass because the probe is
+        // bounded.
+        match rx.recv_timeout(Duration::from_secs(VERSION_TIMEOUT.as_secs() + 20)) {
+            Ok(version) => assert_eq!(
+                version.as_deref(),
+                Some("forker 9.9"),
+                "the tool did answer, so its answer should survive the bound"
+            ),
+            Err(_) => panic!(
+                "the version probe never returned: a child holding the pipe                  open is enough to hang it again"
+            ),
+        }
+    }
 
     #[test]
     fn a_record_with_a_score_is_complete() {

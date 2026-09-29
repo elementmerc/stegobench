@@ -17,7 +17,7 @@
 
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,8 +88,8 @@ pub fn captured(mut command: Command, label: &str, timeout: Duration) -> Result<
         thread::sleep(POLL);
     };
 
-    let stdout = out_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
-    let stderr = err_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    let stdout = out_rx.take(DRAIN_GRACE);
+    let stderr = err_rx.take(DRAIN_GRACE);
 
     if timed_out {
         // The hint is worth the words. A tool that never answers is almost
@@ -110,17 +110,69 @@ pub fn captured(mut command: Command, label: &str, timeout: Duration) -> Result<
     })
 }
 
-/// Read a pipe to the end on its own thread, handing back what it read.
-fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = pipe {
-            let _ = p.read_to_end(&mut buf);
+/// A pipe being read on its own thread, and what it has read so far.
+///
+/// WHY THE BYTES ARE SHARED RATHER THAN SENT AT THE END
+/// ----------------------------------------------------
+/// The first version of this read to end of file and sent the whole buffer in
+/// one message, so a reader that had not reached end of file by the deadline
+/// delivered NOTHING. That is the wrong half to lose. End of file arrives when
+/// the last holder of the write end closes it, which is not the same moment as
+/// the process exiting: a tool that answers, exits 0, and leaves one
+/// background child alive holds the pipe open behind itself.
+///
+/// Measured 2026-09-29: a five line script that printed its version, exited 0
+/// and left a `sleep` running had its version dropped entirely, because the
+/// answer was already in the pipe and the reader was still waiting for an end
+/// of file that would not come for two minutes. The tool had done nothing
+/// wrong and the harness reported it as having said nothing.
+///
+/// So the reader appends into a shared buffer as it goes, and a deadline takes
+/// whatever is in it. A partial answer is worth having; a lost one is not.
+struct Drain {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl Drain {
+    /// Whatever the reader has, waiting up to `grace` for it to finish first.
+    fn take(self, grace: Duration) -> Vec<u8> {
+        let _ = self.done.recv_timeout(grace);
+        match self.buf.lock() {
+            Ok(b) => b.clone(),
+            // A reader that panicked mid-read poisons the lock, and the bytes
+            // it had already read are still the best answer available. They
+            // are taken rather than discarded, because the alternative is
+            // reporting that a tool said nothing when it did.
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
-        let _ = tx.send(buf);
+    }
+}
+
+/// Read a pipe on its own thread, into a buffer the caller can take early.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Drain {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let (tx, done) = mpsc::channel();
+    let into = Arc::clone(&buf);
+    thread::spawn(move || {
+        if let Some(mut p) = pipe {
+            // Chunked rather than `read_to_end`, which would keep everything
+            // in the reader's own buffer until end of file and put the caller
+            // back where it started.
+            let mut chunk = [0u8; 8192];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let Ok(mut held) = into.lock() else { break };
+                        held.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+        let _ = tx.send(());
     });
-    rx
+    Drain { buf, done }
 }
 
 /// The last of a tool's complaint, for an error message a person reads.

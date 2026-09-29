@@ -35,6 +35,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use stegobench_core::registry::{Entry, Invoke};
 
@@ -109,14 +110,26 @@ impl Availability {
     }
 }
 
+/// How long the container runtime gets to answer whether an image is here.
+///
+/// Generous, because a daemon that has just started can be slow, and this is a
+/// ceiling for the one that never answers rather than a budget for the one
+/// that is busy.
+const DOCKER_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Is a container image already on this machine?
 ///
 /// Shells out rather than talking to the daemon socket: the socket is a
 /// privileged interface and a benchmark has no business holding one open.
 fn image_present(reference: &str) -> Presence {
-    let out = Command::new("docker")
-        .args(["image", "inspect", "--format", "{{.Id}}", reference])
-        .output();
+    let mut cmd = Command::new("docker");
+    cmd.args(["image", "inspect", "--format", "{{.Id}}", reference]);
+    // Bounded, because a container daemon that has wedged answers nothing and
+    // never closes the pipe either, and `Command::output()` would wait on that
+    // for as long as the machine stays up. This runs inside `list`, `describe`
+    // and `doctor`, so an unbounded wait here is the whole tool hanging on a
+    // question it only asked in passing.
+    let out = crate::exec::captured(cmd, "docker image inspect", DOCKER_TIMEOUT);
     match out {
         Ok(o) if o.status.success() => Presence::Present {
             pin: String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -124,8 +137,13 @@ fn image_present(reference: &str) -> Presence {
         Ok(_) => Presence::Absent {
             reason: format!("not pulled. docker pull {reference}"),
         },
+        // "Unknown" rather than "Absent", and it always was: not being able to
+        // ask whether an image is here is a different answer from its not
+        // being here, and only one of the two is fixed by pulling. The reason
+        // is the runner's own sentence, which distinguishes a runtime that is
+        // not installed from one that stopped answering.
         Err(e) => Presence::Unknown {
-            reason: format!("no container runtime: {e}"),
+            reason: format!("could not ask the container runtime: {e}"),
         },
     }
 }
