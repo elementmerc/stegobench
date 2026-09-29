@@ -14,8 +14,8 @@ the parts that are deliberately not finished.
 ### CLI
 
 - Every command in the tree is built and tested: `list`, `describe`,
-  `doctor`, `schema`, `validate`, `verify`, `plan`, `score`, `report`,
-  `completions` and `help`.
+  `doctor`, `schema`, `validate`, `verify`, `plan`, `score`, `metrics`,
+  `fetch`, `report`, `completions` and `help`.
 - `stegobench report` turns a folder of result documents into a table for an
   evaluation document, as text, Markdown or CSV. Every row carries the corpus
   and its digest, the configuration, the pairing and the split beside the
@@ -47,9 +47,22 @@ the parts that are deliberately not finished.
   the images. A run that could compare nothing says so rather than reading as
   the good case.
 - `stegobench list` names the route each tool takes, container or local, and
-  says once underneath what each costs you. A result records the route beside
-  the digest, because a container digest names bytes anybody can pull and a
-  local binary's hash names bytes on one machine.
+  says once underneath what each costs you. A result records two separate
+  fields beside the digest, `pinned_by` and `isolation`: one says what ties the
+  numbers to particular bytes, the other says whether the tool was sandboxed,
+  ran on the host, or answered over the network. A single `route` word could
+  not say both, and a document still carrying it is refused rather than
+  half-read.
+- `stegobench metrics` turns a file of scores and labels into ROC AUC and
+  detection rates at a false-alarm budget you choose. It's the one
+  implementation of that arithmetic, so anything that can start a process and
+  write JSON gets the same numbers `score` does. An image the detector could
+  not score is refused by name rather than counted as a zero.
+- `stegobench fetch` downloads one tier of a registered corpus and checks what
+  arrives against the URL, the SHA-256 and the exact size the registry declared
+  in advance. A corpus whose terms don't permit redistribution is refused before
+  a connection opens. No registered corpus declares a download route yet, so the
+  command has nothing to fetch today and says so.
 - A registry entry can state the platforms a locally installed tool exists
   for. `stegobench doctor` then says it cannot run here, separately from its
   count of tools you have not installed.
@@ -79,7 +92,8 @@ the parts that are deliberately not finished.
   verification mismatch, 6 schema invalid, 7 licence refusal, 8 environment
   unfit, 130 interrupted.
 - `stegobench help <topic>` carries the conceptual reasoning that doesn't fit
-  on a flag: `pairing`, `splits`, `licences`, `plugins` and `results`.
+  on a flag: `scope`, `pairing`, `splits`, `licences`, `plugins`, `results`
+  and `reports`.
 - `stegobench help results`, and a guide page beside it, say which fields of a
   result to check before believing the number in it, in the order of what it
   costs to be wrong.
@@ -104,9 +118,9 @@ the parts that are deliberately not finished.
   rich-model estimators, StegExpose, zsteg, plus Stegcore and StegaShield as
   subjects rather than references) and six embedders (steghide, outguess,
   openstego, stegosuite, hstego and Stegcore's embed side).
-- Three corpora registered. A licence is recorded as `verified` only when an
-  identifier, a link, a date and a note on what was read are all present; two
-  of the three clear that bar and the third is recorded as granting nothing,
+- Five corpora registered. A licence is recorded as `verified` only when an
+  identifier, a link, a date and a note on what was read are all present; four
+  of the five clear that bar and BOSSbase is recorded as granting nothing,
   which is a finding rather than a gap.
 - Redistribution is recorded as its own field, separate from the licence,
   because a corpus you may use isn't always one you may publish.

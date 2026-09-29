@@ -337,8 +337,10 @@ pub enum Command {
     ///
     /// It does not unpack. It reports the verified file and what it is.
     ///
-    /// EXIT CODES here: 3 there is nothing to fetch; 5 what arrived is not what
-    /// the registry declared; 7 the terms say no; 8 curl is not on PATH.
+    /// EXIT CODES here: 2 the tier is not one this corpus declares, or the
+    /// route is larger than --max-bytes allows; 3 there is nothing to fetch;
+    /// 5 what arrived is not what the registry declared; 7 the terms say no;
+    /// 8 curl is not on PATH.
     ///
     /// Example:
     ///   stegobench fetch pentimento-core --tier nano
