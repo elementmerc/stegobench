@@ -3354,6 +3354,7 @@ mod tests {
 
     /// A PNG header with `padding` bytes after it, so a stego image is the
     /// same shape as its cover and only larger.
+    #[cfg(unix)]
     fn test_png(padding: usize) -> Vec<u8> {
         let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
         v.extend_from_slice(&13u32.to_be_bytes());
@@ -3366,6 +3367,7 @@ mod tests {
         v
     }
 
+    #[cfg(unix)]
     fn scratch_corpus(root: &Path) {
         std::fs::create_dir_all(root).unwrap();
         for i in 0..3 {
@@ -3436,6 +3438,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn several_detectors_aimed_at_a_file_are_refused_before_anything_is_scored() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3473,6 +3476,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn one_missing_detector_does_not_lose_the_others_and_never_exits_zero() {
         let tmp = tempfile::tempdir().unwrap();

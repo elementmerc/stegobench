@@ -1725,6 +1725,7 @@ mod tests {
     }
 
     /// A detector that gives the same answer to every image.
+    #[cfg(unix)]
     fn constant_detector(dir: &Path) -> Entry {
         use std::os::unix::fs::PermissionsExt;
         let script = dir.join("constant.sh");
@@ -2498,6 +2499,7 @@ mod tests {
     }
 
     /// A registry entry for a corpus, with the digest the test chooses.
+    #[cfg(unix)]
     fn registered_corpus(declared: Option<&str>) -> CorpusEntry {
         let integrity = match declared {
             Some(d) => format!("[integrity]\nrecords_sha256 = \"{d}\"\n"),
