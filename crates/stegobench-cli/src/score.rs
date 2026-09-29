@@ -566,10 +566,33 @@ where
             return Err(ScoreError::NoAuc {
                 name: entry.name.clone(),
                 answered: scores.len(),
-                why: why_no_auc(&scores, &labels),
+                why: why_no_auc(&scores, &labels, ""),
             })
         }
     };
+
+    // A detector that gave ONE answer to everything scores exactly 0.5, and so
+    // does a coin flip. The number is correctly computed in both cases and it
+    // means completely different things: one detector could not tell these
+    // images apart, the other ranked them no better than chance.
+    //
+    // Measured 2026-09-29 on the first end to end run this project ever did:
+    // zsteg answered `false` for all 18 images of the starter corpus, 12 of
+    // them stego, and the run reported `AUC 0.5000 ... 0 unanswered` with
+    // nothing saying the answers were identical. `n_error` was correctly zero,
+    // because the tool did answer; it just said the same thing every time.
+    //
+    // Said out loud here rather than recorded in the document, because
+    // `result-v1` has no field for it and inventing one quietly is how a
+    // schema stops meaning what it says. See DEFERRED.md.
+    if scores.len() > 1 && scores.windows(2).all(|w| w[0] == w[1]) {
+        progress(&format!(
+            "every one of the {} answers from {} was identical, so this AUC is 0.5 \
+             by construction and not by measurement: it did not separate these images",
+            scores.len(),
+            entry.name
+        ));
+    }
     let mut tpr_at_fpr = BTreeMap::new();
     for fpr in [0.01, 0.05, 0.10] {
         match stegobench_metrics::tpr_at_fpr(&scores, &labels, fpr) {
@@ -587,11 +610,10 @@ where
                 return Err(ScoreError::NoAuc {
                     name: entry.name.clone(),
                     answered: scores.len(),
-                    why: format!(
-                        "the AUC could be computed but the detection rate at a \
-                         false-alarm budget of {fpr:.2} could not, which should \
-                         not be possible and is a bug in this harness rather \
-                         than in the detector. Please report it."
+                    why: why_no_auc(
+                        &scores,
+                        &labels,
+                        &format!(" at a false-alarm budget of {fpr:.2}"),
                     ),
                 })
             }
@@ -682,51 +704,41 @@ where
     Ok((result, tally))
 }
 
-/// Which of the conditions stopped an AUC being computed, in words.
+/// Which of the conditions stopped a metric being computed, in words.
 ///
-/// `roc_auc` answers `None` and does not say why, which is the right shape for
-/// a metrics crate with no dependencies and the wrong thing to hand a user.
-/// The three conditions call for three different actions, so they are told
-/// apart here rather than collapsed into "could not compute AUC", which sends
-/// somebody to read the source.
-fn why_no_auc(scores: &[f64], labels: &[bool]) -> String {
-    if scores.len() != labels.len() {
-        return format!(
-            "{} score(s) came back against {} label(s). The two are built from \
-             the same records in the same order, so a mismatch is a bug in \
-             this harness rather than anything you did. Please report it with \
-             this message.",
-            scores.len(),
-            labels.len()
-        );
-    }
-    let nan = scores.iter().filter(|s| s.is_nan()).count();
-    if nan > 0 {
-        return format!(
-            "{nan} of the {} answer(s) are not numbers. A value that cannot be \
-             ordered cannot be ranked, and a ranking that quietly skipped it \
-             would be measured on a subset nobody named. This is the \
-             detector's output, so the fix is with the tool or its parser: \
-             `stegobench doctor` runs its self-test.",
-            scores.len()
-        );
-    }
-    let stego = labels.iter().filter(|l| **l).count();
-    let clean = labels.len() - stego;
-    if clean == 0 || stego == 0 {
-        return format!(
-            "the detector answered about {clean} clean and {stego} stego \
-             image(s), and both sides are needed. Whatever the corpus holds, \
-             this tool produced a usable answer for only one of them, so there \
-             is nothing to tell apart."
-        );
-    }
-    format!(
-        "{} answer(s) were usable and the ranking over them still could not be \
-         formed. This is a bug in this harness rather than anything you did; \
-         please report it with this message.",
-        scores.len()
-    )
+/// The sentences are [`crate::metrics::MetricsError`]'s and are not repeated
+/// here: this path and `stegobench metrics` refuse for the same reasons, and
+/// two sets of words for one condition is the copy that drifts. What this adds
+/// is the part that is only true here, where the answers came from a detector
+/// this harness ran rather than from a file somebody wrote, so the next step
+/// differs even though the condition does not.
+///
+/// `at` names the operating point, and is empty for the AUC itself.
+fn why_no_auc(scores: &[f64], labels: &[bool], at: &str) -> String {
+    let refusal = crate::metrics::why_unrankable(scores, labels, at);
+    let here = match refusal.reason() {
+        // Nothing the user did: `score` builds both lists from the same
+        // records in the same order, so they cannot legitimately disagree.
+        "length-mismatch" => {
+            " Both are built from the same records in the same order here, so \
+             this is a bug in stegobench rather than anything you did. Please \
+             report it with this message."
+        }
+        // The numbers came from the detector, so the next step is the detector.
+        "not-a-number" => {
+            " This is the detector's output, so the fix is with the tool or \
+             its parser: `stegobench doctor` runs its self-test."
+        }
+        // The corpus may well hold both sides. What is one-sided is the set of
+        // answers this tool managed to produce, and saying so points at the
+        // tool rather than sending somebody to re-examine their corpus.
+        "one-sided" => {
+            " Whatever the corpus holds, this tool produced a usable answer \
+             for only one of them."
+        }
+        _ => "",
+    };
+    format!("{refusal}{here}")
 }
 
 /// The items to score, one at a time, stopping at `limit` where one is set.
@@ -1635,6 +1647,83 @@ mod tests {
         assert_eq!(first.corpus, second.corpus);
         assert_eq!(first.declarations, second.declarations);
         assert_eq!(first.subject, second.subject);
+    }
+
+    /// A detector that gives the same answer to every image.
+    fn constant_detector(dir: &Path) -> Entry {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("constant.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\necho 0.5\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        toml::from_str(&format!(
+            "name = \"constant\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"\n\
+             [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n",
+            script.display().to_string()
+        ))
+        .expect("parses")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_answer_to_everything_is_named_rather_than_published_as_chance() {
+        // The case this exists for, measured on the first end to end run this
+        // project did: zsteg answered `false` for all 18 images of the starter
+        // corpus, 12 of them stego, and the run said `AUC 0.5000 ... 0
+        // unanswered`. Every number was right. Nothing said the detector had
+        // not separated anything, and AUC 0.5 from one repeated answer reads
+        // identically to AUC 0.5 from a detector ranking at chance.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = constant_detector(tmp.path());
+
+        let mut said = Vec::new();
+        let result = score(&entry, &request(&root, None), |m: &str| {
+            said.push(m.to_string())
+        })
+        .expect("a constant detector still produces a result")
+        .0;
+
+        // The figure itself is honest and stays: 0.5 is what a set of ties is.
+        assert!((result.metrics.auc - 0.5).abs() < 1e-12, "{:?}", result.metrics);
+        assert_eq!(result.metrics.n_error, 0, "it answered every image");
+
+        let warned = said.iter().any(|m| m.contains("identical"));
+        assert!(warned, "nothing said the answers were all the same: {said:?}");
+        assert!(
+            said.iter().any(|m| m.contains("by construction")),
+            "the warning does not say why the 0.5 is not a measurement: {said:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_detector_that_separates_the_images_is_not_warned_about() {
+        // The other half, so the warning cannot be made to pass by always
+        // firing. The sizing detector gives stego and clean different scores.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+
+        let mut said = Vec::new();
+        score(&entry, &request(&root, None), |m: &str| {
+            said.push(m.to_string())
+        })
+        .expect("run");
+        assert!(
+            !said.iter().any(|m| m.contains("identical")),
+            "warned about a detector that did separate the images: {said:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -2586,7 +2675,7 @@ mod tests {
         let err = ScoreError::NoAuc {
             name: "zsteg".into(),
             answered: 12,
-            why: why_no_auc(&[1.0, f64::NAN], &[false, true]),
+            why: why_no_auc(&[1.0, f64::NAN], &[false, true], ""),
         };
         let text = err.to_string();
         assert_eq!(err.exit_code(), stegobench_core::exit::PLUGIN_FAILED);
@@ -2601,14 +2690,14 @@ mod tests {
     /// Three conditions, three actions, so three messages rather than one.
     #[test]
     fn every_reason_an_auc_cannot_be_computed_is_named_separately() {
-        let mismatch = why_no_auc(&[1.0, 2.0], &[true]);
+        let mismatch = why_no_auc(&[1.0, 2.0], &[true], "");
         assert!(mismatch.contains("2 score(s)") && mismatch.contains("1 label(s)"));
         assert!(
-            mismatch.contains("bug in this harness"),
+            mismatch.contains("bug in stegobench"),
             "a length mismatch is not the user's doing: {mismatch}"
         );
 
-        let nan = why_no_auc(&[f64::NAN, 1.0], &[true, false]);
+        let nan = why_no_auc(&[f64::NAN, 1.0], &[true, false], "");
         assert!(
             nan.contains("1 of the 2 answer(s) are not numbers"),
             "{nan}"
@@ -2618,14 +2707,44 @@ mod tests {
             "a NaN from a detector needs a next step: {nan}"
         );
 
-        let one_sided = why_no_auc(&[1.0, 2.0], &[true, true]);
+        let one_sided = why_no_auc(&[1.0, 2.0], &[true, true], "");
         assert!(one_sided.contains("0 clean and 2 stego"), "{one_sided}");
+        assert!(
+            one_sided.contains("this tool produced a usable answer"),
+            "the tool, not the corpus, is what is one-sided here: {one_sided}"
+        );
 
         // And the residual case is not silently dressed up as one of the
         // three. It cannot be reached from `roc_auc`'s own contract, so it
         // says it is a bug rather than inventing a cause.
-        let residual = why_no_auc(&[1.0, 2.0], &[true, false]);
-        assert!(residual.contains("bug in this harness"), "{residual}");
+        let residual = why_no_auc(&[1.0, 2.0], &[true, false], "");
+        assert!(residual.contains("bug in stegobench"), "{residual}");
+
+        // The operating point is carried into the residual message, so a
+        // detection rate that could not be formed says which budget it was.
+        let at_budget = why_no_auc(&[1.0, 2.0], &[true, false], " at a budget of 0.01");
+        assert!(at_budget.contains("at a budget of 0.01"), "{at_budget}");
+    }
+
+    /// The sentences come from `MetricsError` and are not a second copy.
+    ///
+    /// This is the drift guard: the refusal a user reads on the score path
+    /// has to be the refusal `stegobench metrics` gives for the same
+    /// condition, with only the score path's own next step added.
+    #[test]
+    fn the_refusals_are_the_metrics_commands_own_words() {
+        for (scores, labels) in [
+            (vec![1.0, 2.0], vec![true]),
+            (vec![f64::NAN, 1.0], vec![true, false]),
+            (vec![1.0, 2.0], vec![true, true]),
+        ] {
+            let shared = crate::metrics::why_unrankable(&scores, &labels, "").to_string();
+            let here = why_no_auc(&scores, &labels, "");
+            assert!(
+                here.starts_with(&shared),
+                "{here}\ndoes not open with\n{shared}"
+            );
+        }
     }
 
     /// The four conditions above are what `roc_auc` itself answers `None` to,

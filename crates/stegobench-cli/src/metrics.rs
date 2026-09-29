@@ -118,10 +118,9 @@ pub enum MetricsError {
     )]
     Empty,
     #[error(
-        "{count} of the {total} score(s) are null, so the detector produced no \
-         number for them. A value that cannot be ordered cannot be ranked, and \
-         a ranking that quietly skipped it would be measured on a subset \
-         nobody named"
+        "{count} of the {total} answer(s) are not numbers. A score written \
+         `null`, or one that is not a number, cannot be ordered, and a ranking \
+         that quietly skipped it would be measured on a subset nobody named"
     )]
     NotANumber { count: usize, total: usize },
     #[error(
@@ -307,6 +306,52 @@ fn read_input(file: Option<&Path>) -> Result<(String, String), MetricsError> {
     Ok((label, text))
 }
 
+/// Which condition stops a ranking being formed over these scores, if any.
+///
+/// The ladder every caller checks, in one place. `roc_auc` answers `None` and
+/// does not say why, which is the right shape for a metrics crate with no
+/// dependencies and the wrong thing to hand a user, so the conditions are told
+/// apart here. A second copy of these sentences somewhere else is a second copy
+/// that drifts, and one already had.
+fn unrankable(scores: &[f64], labels: &[bool]) -> Option<MetricsError> {
+    if scores.len() != labels.len() {
+        return Some(MetricsError::LengthMismatch {
+            scores: scores.len(),
+            labels: labels.len(),
+        });
+    }
+    if scores.is_empty() {
+        return Some(MetricsError::Empty);
+    }
+    let nan = scores.iter().filter(|s| s.is_nan()).count();
+    if nan > 0 {
+        return Some(MetricsError::NotANumber {
+            count: nan,
+            total: scores.len(),
+        });
+    }
+    let stego = labels.iter().filter(|l| **l).count();
+    let clean = labels.len() - stego;
+    if clean == 0 || stego == 0 {
+        return Some(MetricsError::OneSided { clean, stego });
+    }
+    None
+}
+
+/// Why a ranking could not be formed, for a caller that already knows it could
+/// not be.
+///
+/// [`unrankable`] names the four conditions that can be diagnosed. Anything
+/// else is a case this did not anticipate and is reported as the bug it would
+/// be rather than dressed up as one of the four. `at` names the operating
+/// point, where there is one, and is empty for the AUC itself.
+pub fn why_unrankable(scores: &[f64], labels: &[bool], at: &str) -> MetricsError {
+    unrankable(scores, labels).unwrap_or_else(|| MetricsError::Unrankable {
+        count: scores.len(),
+        at: at.to_string(),
+    })
+}
+
 /// The metrics over one set of scores and labels.
 ///
 /// Every refusal the metrics crate expresses as `None` is raised here as a
@@ -324,53 +369,32 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
             count: input.scores.len(),
         });
     }
-    if input.scores.is_empty() {
-        return Err(MetricsError::Empty);
-    }
-    let absent = input.scores.iter().filter(|s| s.is_none()).count();
-    if absent > 0 {
-        return Err(MetricsError::NotANumber {
-            count: absent,
-            total: input.scores.len(),
-        });
-    }
-    // JSON cannot spell NaN, so `null` is the only way one arrives and it has
-    // already been refused. The guard stays because `compute` is callable
-    // without going through JSON and the crate would answer `None` to it,
-    // which this function's contract says cannot happen.
+    // JSON cannot spell NaN, so `null` is how an absent answer arrives, and it
+    // becomes the NaN the ladder below refuses by count. `compute` is also
+    // callable without going through JSON, where a real NaN arrives instead,
+    // and the two reach the same refusal by the same route.
     let scores: Vec<f64> = input
         .scores
         .into_iter()
         .map(|s| s.unwrap_or(f64::NAN))
         .collect();
-    let nan = scores.iter().filter(|s| s.is_nan()).count();
-    if nan > 0 {
-        return Err(MetricsError::NotANumber {
-            count: nan,
-            total: scores.len(),
-        });
-    }
     let labels = input.labels;
+    if let Some(e) = unrankable(&scores, &labels) {
+        return Err(e);
+    }
     let n_stego = labels.iter().filter(|l| **l).count();
     let n_clean = labels.len() - n_stego;
-    if n_stego == 0 || n_clean == 0 {
-        return Err(MetricsError::OneSided {
-            clean: n_clean,
-            stego: n_stego,
-        });
-    }
 
-    let auc = stegobench_metrics::roc_auc(&scores, &labels).ok_or(MetricsError::Unrankable {
-        count: scores.len(),
-        at: String::new(),
-    })?;
+    let auc = stegobench_metrics::roc_auc(&scores, &labels)
+        .ok_or_else(|| why_unrankable(&scores, &labels, ""))?;
     let mut tpr_at_fpr = BTreeMap::new();
     for (text, value) in budgets {
         let tpr = stegobench_metrics::tpr_at_fpr(&scores, &labels, *value).ok_or_else(|| {
-            MetricsError::Unrankable {
-                count: scores.len(),
-                at: format!(" at a false-alarm budget of {text}"),
-            }
+            why_unrankable(
+                &scores,
+                &labels,
+                &format!(" at a false-alarm budget of {text}"),
+            )
         })?;
         tpr_at_fpr.insert(text.clone(), tpr);
     }
