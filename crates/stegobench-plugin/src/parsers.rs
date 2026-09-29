@@ -323,4 +323,37 @@ mod tests {
         assert!(Reading::Verdict(false).into_record("1").is_complete());
         assert!(Reading::Failed("x".into()).into_record("1").is_complete());
     }
+
+    /// The drift guard for the list a registry entry is validated against.
+    ///
+    /// `stegobench_core::registry::PARSERS` is what refuses a typo in
+    /// `invoke.parser` at load, and it is a second copy of the names this
+    /// file dispatches on, because core is the layer below this one and
+    /// cannot see these functions. A parser added here and not added there
+    /// would be refused by the loader although it works; a name removed here
+    /// and left there would be accepted by the loader and fail per image,
+    /// which is exactly the behaviour the validation was added to stop.
+    #[test]
+    fn every_name_the_registry_accepts_is_a_parser_this_file_dispatches() {
+        for name in stegobench_core::registry::PARSERS {
+            let reading = parse(name, "", "");
+            if let Reading::Failed(why) = &reading {
+                assert!(
+                    !why.contains("no built-in parser named"),
+                    "{name} is accepted by the registry and dispatches to nothing"
+                );
+            }
+        }
+
+        // And the arm that refuses is still reachable, so the loop above is
+        // not passing because everything is accepted.
+        let invented = parse("not-a-parser-xyzzy", "", "");
+        match invented {
+            Reading::Failed(why) => assert!(
+                why.contains("no built-in parser named"),
+                "an unknown parser should say so: {why}"
+            ),
+            other => panic!("an unknown parser was handled: {other:?}"),
+        }
+    }
 }

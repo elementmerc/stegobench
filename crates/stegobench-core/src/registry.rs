@@ -442,6 +442,10 @@ pub struct Invoke {
     /// Which built-in parser reads the output. Named rather than described,
     /// because these formats are quirky enough that a rule in TOML would be a
     /// small programming language nobody wants to debug.
+    ///
+    /// Checked against [`PARSERS`] at load. A name with a typo in it used to
+    /// be accepted here and turn up once per image as "no built-in parser
+    /// named ...", after the tool had already been launched.
     pub parser: String,
 }
 
@@ -922,6 +926,15 @@ impl Entry {
             // one names no program at all. Refused at load rather than
             // discovered as a self-test failure, because `list` and `describe`
             // would otherwise show a tool that can never be run.
+            if !PARSERS.contains(&inv.parser.as_str()) {
+                bad.push(format!(
+                    "invoke.parser is {:?}, which is not a parser this build \
+                     carries. The ones it does are: {}",
+                    inv.parser,
+                    PARSERS.join(", ")
+                ));
+            }
+
             if inv.host && inv.adapter.is_none() {
                 bad.push(
                     "invoke.host is set but no adapter is declared, and a host \
@@ -1058,6 +1071,17 @@ impl Entry {
 /// the corpus loader instead. One registry to a user, two schemas underneath,
 /// because a corpus has no image and a detector has no licence URL.
 pub const CORPORA_DIR: &str = "corpora";
+
+/// Every output parser a registry entry may name in `invoke.parser`.
+///
+/// The implementations live in `stegobench-plugin`, which is the layer above
+/// this one and cannot be named from here. The list is therefore duplicated
+/// on purpose, and held in line by a test beside those implementations that
+/// asserts each of these names is handled and an invented one is not. The
+/// duplication buys the check that matters: a typo is refused when the
+/// registry loads rather than once per image, after the tool has been
+/// launched, halfway through a corpus.
+pub const PARSERS: &[&str] = &["zsteg", "stegexpose", "number", "stegcore"];
 
 /// Everything registered, keyed by name so the order is stable.
 #[derive(Debug, Default)]
