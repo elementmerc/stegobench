@@ -361,7 +361,7 @@ NOT_PROSE = ("attribution",)
 SURVEYS_OTHERS = ("cover-source-licensing",)
 
 
-#: `private/` is gitignored in every repo on this fleet and never published, so
+#: `private/` is not tracked and never published, so
 #: a figure in there is a working note rather than a claim to a reader. Scanning
 #: it makes the check fail over prose nobody will ever see.
 NOT_PUBLISHED = ("node_modules", "private")

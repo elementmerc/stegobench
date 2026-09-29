@@ -366,7 +366,7 @@ class StegcoreEmbedder(Embedder):
     capacity_is_computed = True
 
     #: Where a release build lands when Stegcore is checked out beside us. The
-    #: binary is not installed system-wide on any machine in this fleet, so
+    #: binary is not usually installed system-wide, so
     #: without this the arm silently skips and the corpus quietly loses its
     #: most relevant tool.
     SIBLING_BUILDS = (

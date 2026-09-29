@@ -244,7 +244,7 @@ class FalsePositiveTests(Fixture):
 
 
     def test_a_private_working_note_is_not_scanned(self):
-        """`private/` is gitignored fleet-wide and never published, so a stale
+        """`private/` is not tracked and never published, so a stale
         figure in a working note is not a claim to any reader."""
         self.write("index.md", "200 covers, 55%, 110 need a credit line.")
         (self.docs / "private").mkdir()

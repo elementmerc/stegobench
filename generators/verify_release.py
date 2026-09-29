@@ -300,8 +300,8 @@ def nothing_checked(check: str, count: int, report: Report,
     "0 pairs, containers identical" reads as a pass and means the opposite:
     that nothing was looked at. **Could not look** and **looked and found
     nothing wrong** render as the same clean line, and the clean line is the
-    one people act on. This is the single most common fault found across this
-    fleet today, so it is a helper rather than a habit.
+    one people act on. This is the single most common fault found in this
+    work, so it is a helper rather than a habit.
     """
     if count:
         return False

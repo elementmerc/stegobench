@@ -144,7 +144,7 @@ def pav(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
     first in the sort decides which gets the higher value, so two identical
     measurements would be assigned different likelihood ratios by an accident
     of input order. That is indefensible in a report and it is also
-    non-deterministic, which the fleet's own rules forbid.
+    non-deterministic, which this project's own rules forbid.
 
     :param scores: detector outputs, higher meaning more suspicious.
     :param labels: 1 for a picture carrying a payload, 0 for a clean one.

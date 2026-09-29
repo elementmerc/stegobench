@@ -44,7 +44,7 @@ say() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; 
 # `pgrep -f "$BUILD_PATTERN"` cannot be used here and the reason is the same
 # fault this file was written about. A full command line match searches every
 # process's argv, and the shell wrapping this script carries the pattern in its
-# own, so the query matches itself. Measured on this fleet: `pgrep -f` for a
+# own, so the query matches itself. Measured here: `pgrep -f` for a
 # process that had NEVER EXISTED returned two pids and exit 0.
 #
 # That breaks this watchdog in both directions at once. `while pgrep -f ...`

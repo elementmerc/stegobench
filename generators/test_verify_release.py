@@ -913,7 +913,7 @@ class LinkCheckTests(unittest.TestCase):
 
 
 class CouldNotLookTests(unittest.TestCase):
-    """The fault found eight times across this fleet in one day.
+    """The fault found eight times in one day.
 
     "0 pairs, containers identical" reads as a pass and means the opposite.
     **Could not look** and **looked and found nothing wrong** render as the
