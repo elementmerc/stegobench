@@ -852,7 +852,20 @@ impl CorpusEntry {
 
     /// A one-line summary for `stegobench list corpora`, in the same shape as
     /// [`crate::registry::Entry::summary`].
+    ///
+    /// Aligned against itself alone. A listing of several corpora calls
+    /// [`Self::cells`] and aligns them together, because a column wide enough
+    /// for one entry is not wide enough for the next.
     pub fn summary(&self) -> String {
+        crate::table::align(&[self.cells()]).remove(0)
+    }
+
+    /// The cells of this corpus's listing row, unpadded.
+    ///
+    /// Padding is the listing's business rather than the entry's: the width a
+    /// cell needs depends on the other rows being printed beside it, which an
+    /// entry cannot know about itself.
+    pub fn cells(&self) -> Vec<String> {
         // A trailing `?` on the version, because the listing is where people
         // actually look and a qualification only `describe` shows is one most
         // readers never see. It marks the VERSION as inferred, not the licence
@@ -886,7 +899,7 @@ impl CorpusEntry {
                 None => "size unestablished".into(),
             },
         };
-        format!("{:<16} {:<16} {:<18} {republish}", self.id, licence, size)
+        vec![self.id.clone(), licence, size, republish.to_string()]
     }
 }
 

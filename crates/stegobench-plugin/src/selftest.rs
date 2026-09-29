@@ -307,6 +307,39 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
     let detect_path = fixtures_dir.join(strip_prefix(&test.must_detect));
     let clear_path = fixtures_dir.join(strip_prefix(&test.must_clear));
 
+    // A fixture this harness cannot find is not a fault in the tool, and
+    // saying so in the vocabulary of a tool failure is how `doctor` came to
+    // report six working detectors as BROKEN. Measured 2026-09-29: the same
+    // binary, on the same machine, with the same registry, answered
+    // "6 verified, 0 broken" inside a checkout and "0 verified, 6 broken" one
+    // directory outside it, because the fixture paths resolved against the
+    // directory the command was typed in.
+    //
+    // Could not ask and answered wrongly are different findings, and a reader
+    // who cannot tell them apart will go and debug a detector that is fine.
+    for path in [&detect_path, &clear_path] {
+        if !path.is_file() {
+            return Verified::Skipped(format!(
+                "fixture {} was not found, so this tool was never asked. \
+                 Name the directory with --fixtures <DIR>",
+                path.display()
+            ));
+        }
+    }
+
+    // The same distinction for the adapter script. `Registry::load` makes this
+    // path absolute against the tree the registry sits in, so reaching here
+    // means it genuinely is not on this machine rather than that the command
+    // was typed somewhere unexpected.
+    if let Some(adapter) = entry.invoke.as_ref().and_then(|i| i.adapter.as_deref()) {
+        if !Path::new(adapter).is_file() {
+            return Verified::Skipped(format!(
+                "adapter {adapter} was not found, so this tool was never asked. \
+                 The registry names it relative to the directory holding `plugins/`"
+            ));
+        }
+    }
+
     let threshold = test.threshold;
     let higher = entry.emits.higher_means_stego;
 
@@ -382,10 +415,26 @@ mod tests {
             "[binary]\ncommand = [\"definitely-not-real-xyzzy\"]\nversion_args = [\"-v\"]\n\
              [invoke]\nargv = [\"{file}\"]\nparser = \"stegcore\"",
         );
-        match run(&e, Path::new(".")) {
+        let fx = fixtures_present();
+        match run(&e, fx.path()) {
             Verified::Failed(r) => assert!(r.contains("not on PATH"), "got {r}"),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    /// A directory holding the two images `entry` declares.
+    ///
+    /// The tests below are about resolving the TOOL, so the fixtures have to
+    /// be real: since 2026-09-29 an absent fixture short circuits `run` before
+    /// the tool is reached, which is the point of that change. Passing a
+    /// directory with nothing in it would make these tests pass for the wrong
+    /// reason and stop covering what they are named for.
+    fn fixtures_present() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        for name in ["a.png", "b.png"] {
+            std::fs::write(dir.path().join(name), b"not really a png").expect("fixture written");
+        }
+        dir
     }
 
     #[test]
@@ -396,7 +445,8 @@ mod tests {
             "[image]\nreference = \"x@sha256:a\"\nsize_mb = 10\nbundled = true\n\
              [invoke]\nhost = true\nargv = [\"{adapter}\"]\nparser = \"number\"",
         );
-        match run(&e, Path::new(".")) {
+        let fx = fixtures_present();
+        match run(&e, fx.path()) {
             Verified::Failed(r) => assert!(r.contains("adapter"), "got {r}"),
             other => panic!("expected Failed about the adapter, got {other:?}"),
         }
@@ -409,14 +459,26 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_fixture_is_a_failure_with_the_path() {
+    fn a_missing_fixture_is_skipped_with_the_path_and_never_called_a_failure() {
+        // Renamed and inverted on 2026-09-29. It used to assert `Failed`, and
+        // that assertion was the bug: `doctor` reported "0 verified, 6 broken"
+        // from outside a checkout and "6 verified, 0 broken" inside one, with
+        // the same binary and the same tools, because a fixture this harness
+        // could not find was reported in the vocabulary of a tool failure.
+        //
+        // The distinction is the whole point, so it is asserted both ways:
+        // the path is still named, and the verdict is no longer an accusation.
         let e = entry(
             "[image]\nreference = \"x@sha256:a\"\nsize_mb = 10\nbundled = true\n\
              [invoke]\nargv = [\"true\"]\nparser = \"zsteg\"",
         );
         match run(&e, Path::new("/definitely/not/here")) {
-            Verified::Failed(r) => assert!(r.contains("not found"), "got {r}"),
-            other => panic!("expected Failed, got {other:?}"),
+            Verified::Skipped(r) => {
+                assert!(r.contains("not found"), "got {r}");
+                assert!(r.contains("/definitely/not/here"), "the path is named: {r}");
+                assert!(r.contains("--fixtures"), "the way out is named: {r}");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
         }
     }
 }
@@ -658,7 +720,14 @@ pub mod roundtrip {
         };
         let cover_src = fixtures_dir.join(rt.cover.trim_start_matches("fixtures/"));
         if !cover_src.is_file() {
-            return Verified::Failed(format!("cover {} not found", cover_src.display()));
+            // Skipped, not Failed, for the reason given in `run` above: an
+            // absent fixture is this harness failing to find its own file, and
+            // reporting it as a round trip failure blames the embedder for it.
+            return Verified::Skipped(format!(
+                "cover {} was not found, so no round trip was attempted. \
+                 Name the directory with --fixtures <DIR>",
+                cover_src.display()
+            ));
         }
 
         let Ok(dir) = tempfile::tempdir() else {

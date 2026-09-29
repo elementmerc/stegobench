@@ -316,7 +316,7 @@ pub fn user_data_dir() -> Option<PathBuf> {
 }
 
 /// The system-wide data directories, most specific first.
-fn system_data_dirs() -> Vec<PathBuf> {
+pub(crate) fn system_data_dirs() -> Vec<PathBuf> {
     if cfg!(target_os = "windows") {
         return non_empty("PROGRAMDATA")
             .map(|p| vec![PathBuf::from(p)])
@@ -333,7 +333,7 @@ fn system_data_dirs() -> Vec<PathBuf> {
 /// An empty `HOME` is the case that matters: joining onto it produces a
 /// relative path that silently resolves against the current directory, which
 /// is the "a registry you did not mean" failure this module is trying to avoid.
-fn non_empty(key: &str) -> Option<String> {
+pub(crate) fn non_empty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
@@ -414,8 +414,40 @@ mod tests {
             "the built-in registry names different corpora from plugins/registry"
         );
         for (name, entry) in &disk.entries {
+            // The adapter path is compared separately, and by FILE NAME.
+            //
+            // `Registry::load` makes it absolute against the directory the
+            // registry was read from, which is the fix for `doctor` reporting
+            // two working detectors as broken from outside a checkout. The
+            // built-in copy is parsed from strings compiled into this binary
+            // and has no directory to resolve against, so it keeps what the
+            // TOML said. Comparing the two literally would assert that the
+            // resolution never happened, which is the opposite of what is
+            // wanted; comparing the file names still catches the thing this
+            // test exists for, which is the two registries naming different
+            // adapters.
+            let mut disk_entry = entry.clone();
+            let built = built_in
+                .entries
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is missing from the built-in registry"));
+            let leaf = |e: &stegobench_core::registry::Entry| {
+                e.invoke.as_ref().and_then(|i| {
+                    i.adapter
+                        .as_deref()
+                        .map(|a| Path::new(a).file_name().map(|n| n.to_owned()))
+                })
+            };
             assert_eq!(
-                Some(entry),
+                leaf(&disk_entry),
+                leaf(built),
+                "{name} names a different adapter in the built-in registry"
+            );
+            if let Some(invoke) = disk_entry.invoke.as_mut() {
+                invoke.adapter = built.invoke.as_ref().and_then(|i| i.adapter.clone());
+            }
+            assert_eq!(
+                Some(&disk_entry),
                 built_in.entries.get(name),
                 "{name} differs between the built-in registry and plugins/registry"
             );

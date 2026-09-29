@@ -93,6 +93,12 @@ thiserror.workspace = true
 # corpus it was measured on by digest, and a digest computed by hand is one
 # more implementation of sha256 for somebody to audit.
 sha2.workspace = true
+# Same argument as sha2 above: stegobench-plugin already links it to stage a
+# fixture into a container, so this is a direct use of something already in the
+# graph rather than new attack surface. `doctor` needs it to unpack the
+# fixtures compiled into the binary, and a scratch directory that cleans itself
+# up on drop is the difference between one temporary copy and one per run.
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

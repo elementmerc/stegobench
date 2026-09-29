@@ -23,6 +23,7 @@ pub mod registry;
 pub mod result;
 pub mod run;
 pub mod samples;
+pub mod table;
 
 pub use corpus::{ArchiveFormat, CorpusEntry, DownloadRoute, LicenceStatus, Redistribution};
 pub use fetch::{BlobStore, FetchError, Fetched, FileStore, Limits, Progress, Transport};

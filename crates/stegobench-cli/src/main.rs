@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command, ReportFormat};
 use stegobench_cli::fetch;
+use stegobench_cli::fixtures;
 use stegobench_cli::help_topics;
 use stegobench_cli::metrics;
 use stegobench_cli::needs;
@@ -137,12 +138,11 @@ fn corpora_block(reg: &Registry, where_from: &str) -> String {
     if reg.corpora.is_empty() {
         return format!("no corpora registered in {where_from}");
     }
-    let mut text = reg
-        .corpora
-        .values()
-        .map(|c| c.summary())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Aligned over the rows actually being printed. A fixed pad here silently
+    // stopped lining up the day a corpus with a longer id than the literal was
+    // registered, and nothing failed to say so.
+    let rows = reg.corpora.values().map(|c| c.cells()).collect::<Vec<_>>();
+    let mut text = stegobench_core::table::align(&rows).join("\n");
     let publishable = reg
         .corpora
         .values()
@@ -198,11 +198,10 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
             )
         }
     };
-    let mut human = wanted
-        .iter()
-        .map(|e| e.summary())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Same alignment rule as `corpora_block`, and for the same reason: the
+    // widest name in the listing sets the column, not a literal in the source.
+    let rows = wanted.iter().map(|e| e.cells()).collect::<Vec<_>>();
+    let mut human = stegobench_core::table::align(&rows).join("\n");
     if human.is_empty() {
         // Same standard as `corpora_block`: a bare line under an exit code of
         // zero reads as "checked, all fine". Say where it looked, and say
@@ -1979,7 +1978,20 @@ fn run(cli: &Cli) -> Output {
         Command::Doctor {
             fixtures,
             no_selftest,
-        } => with_registry(cli, |r| cmd_doctor(r, fixtures, *no_selftest)),
+        } => with_registry(cli, |r| {
+            if *no_selftest {
+                // Nothing will read the fixtures, so nothing looks for them.
+                // Unpacking the built-in copy here would be work done to
+                // satisfy a parameter rather than a question.
+                return cmd_doctor(r, Path::new("fixtures"), true);
+            }
+            match fixtures::resolve(fixtures.as_deref()) {
+                // Held for the whole call: for the built-in copy this owns the
+                // scratch directory the images were unpacked into.
+                Ok(found) => cmd_doctor(r, found.dir(), false),
+                Err(e) => Output::err(exit::PREFLIGHT_REFUSED, e.to_string()),
+            }
+        }),
         Command::Score {
             corpus,
             detector,
@@ -2407,6 +2419,56 @@ mod tests {
         let missing = cmd_describe(&resolved_at(&dir), "not-registered");
         assert_eq!(missing.code, exit::USAGE);
         assert!(missing.human.contains("reveal") && missing.human.contains("steghide"));
+    }
+
+    /// Every listed row's columns start in the same place, including the
+    /// longest name's.
+    ///
+    /// This is the regression the fixed `{:<16}` pad could not survive:
+    /// `stegobench-starter` is eighteen characters, so its row overflowed the
+    /// column and every cell after it on that line sat two places right of
+    /// everybody else's. A test that only looked for the text somewhere in the
+    /// output passed throughout.
+    #[test]
+    fn a_listing_lines_its_columns_up_however_long_the_longest_name_is() {
+        let dir = shipped_registry();
+        for kind in ["corpora", "detectors", "embedders"] {
+            let out = cmd_list(&resolved_at(&dir), kind);
+            assert_eq!(out.code, exit::OK, "{kind}");
+            // The rows, which are the lines before the first blank one: the
+            // legend and the footnotes below it are prose, not table.
+            let rows: Vec<&str> = out
+                .human
+                .lines()
+                .take_while(|l| !l.trim().is_empty())
+                .collect();
+            assert!(rows.len() > 1, "{kind}: nothing to align");
+            // Byte offsets throughout, which is the same as character offsets
+            // here because every registered name is ASCII. `table::align` is
+            // the place that has to care about the difference.
+            let longest = rows
+                .iter()
+                .map(|r| r.split_whitespace().next().unwrap_or("").len())
+                .max()
+                .expect("rows");
+            for row in &rows {
+                let name = row.split_whitespace().next().expect("a name");
+                // Where the second column begins: past the name, past its
+                // padding, at the first character that is not a space.
+                let second = row[name.len()..]
+                    .find(|c: char| c != ' ')
+                    .map(|i| i + name.len());
+                assert_eq!(
+                    second,
+                    Some(longest + 1),
+                    "{kind}: {row:?} does not start its second column where the others do"
+                );
+            }
+            assert!(
+                rows.iter().any(|r| r.len() > longest + 1),
+                "{kind}: every row is a bare name, so this proved nothing"
+            );
+        }
     }
 
     /// `list all` is the whole registry, so leaving corpora out of it would

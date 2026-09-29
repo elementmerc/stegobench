@@ -192,9 +192,11 @@ pub enum Command {
     /// Example:
     ///   stegobench doctor
     Doctor {
-        /// Where the self-test fixtures live.
-        #[arg(long, value_name = "DIR", default_value = "fixtures")]
-        fixtures: std::path::PathBuf,
+        /// Where the self-test fixtures live. Defaults to the checkout, then
+        /// beside the executable, then your data directories, then the copy
+        /// compiled into this binary.
+        #[arg(long, value_name = "DIR", env = "STEGOBENCH_FIXTURES")]
+        fixtures: Option<std::path::PathBuf>,
         /// Report what is installed without running the self-tests. Faster,
         /// and cannot tell a working tool from a broken one.
         #[arg(long)]

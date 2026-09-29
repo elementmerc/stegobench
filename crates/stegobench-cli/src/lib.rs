@@ -9,6 +9,7 @@
 
 pub mod cli;
 pub mod fetch;
+pub mod fixtures;
 pub mod help_topics;
 pub mod metrics;
 pub mod needs;
