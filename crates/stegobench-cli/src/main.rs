@@ -1365,7 +1365,6 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
             timeout,
             out,
             out_dir.as_deref(),
-            many,
             say,
         );
         outcomes.push((entry.name.clone(), outcome));
@@ -1386,6 +1385,43 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
 /// detector, created here so a failure to create it is a usage error rather
 /// than something discovered after the first hour of scoring.
 fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<PathBuf>, Output> {
+    // `--out` USED TO MEAN DIFFERENT THINGS ON DIFFERENT DAYS
+    //
+    // It was read as a directory when several detectors were named and as a
+    // file when one was, so the same path worked and then did not depending on
+    // how many detectors the caller asked for. Measured 2026-09-29: one run
+    // wrote /tmp/multi/zsteg.json and /tmp/multi/stegexpose.json happily, and
+    // the next, differing only in naming a single detector, scored the whole
+    // corpus and then died with
+    //
+    //     could not write the result to /tmp/multi: Is a directory (os error 21)
+    //
+    // Three faults in one line: a raw operating system error in front of a
+    // user, a generic exit code where the contract has a specific one, and all
+    // of it discovered AFTER the work rather than before it.
+    //
+    // A path that is already a directory is now treated as one whatever the
+    // detector count, which is the reading that never surprises, and the check
+    // happens here, before a single image is scored.
+    if let Some(p) = out {
+        match std::fs::metadata(p) {
+            Ok(meta) if meta.is_dir() => return Ok(Some(p.to_path_buf())),
+            Ok(_) if many => {
+                return Err(Output::err(
+                    exit::USAGE,
+                    format!(
+                        "--out {} is a file, and more than one detector was \
+                         asked for.\n\
+                         Several detectors each write their own document, so --out \
+                         needs to be a directory. Name one that does not exist yet \
+                         and it will be created.",
+                        p.display()
+                    ),
+                ))
+            }
+            _ => {}
+        }
+    }
     if !many {
         return Ok(None);
     }
@@ -1436,6 +1472,12 @@ fn records_for(
             Some(dir) => dir.join(file),
             None => corpus.with_file_name(file),
         },
+        // One detector writing into a directory keeps its records beside its
+        // document rather than beside the corpus, so everything one run
+        // produced is in the place the caller named.
+        (None, false) if out_dir.is_some() => {
+            out_dir.as_ref().expect("just checked").join(file)
+        }
         (None, false) => {
             let mut name = corpus.file_name().unwrap_or_default().to_os_string();
             name.push(format!(".{file}"));
@@ -1452,7 +1494,6 @@ fn run_one<P>(
     timeout: u64,
     out: Option<&Path>,
     out_dir: Option<&Path>,
-    many: bool,
     say: P,
 ) -> Outcome
 where
@@ -1512,9 +1553,11 @@ where
     // Written as this detector completes rather than at the end of the
     // command, so an interrupted seven-detector run keeps what it already
     // measured. That is the whole reason the loop is shaped this way.
-    let destination = match (many, out_dir, out) {
-        (true, Some(dir), _) => Some(dir.join(format!("{}.json", entry.name))),
-        (false, _, Some(path)) => Some(path.to_path_buf()),
+    // A directory wins over the detector count: `resolve_out` has already
+    // decided, once, before anything ran, so this is not the place that guesses.
+    let destination = match (out_dir, out) {
+        (Some(dir), _) => Some(dir.join(format!("{}.json", entry.name))),
+        (None, Some(path)) => Some(path.to_path_buf()),
         _ => None,
     };
     if let Some(path) = &destination {
@@ -3162,6 +3205,82 @@ mod tests {
     /// measured" and a script will read it that way forever. The other
     /// detector's work still has to survive.
     #[cfg(unix)]
+    #[test]
+    fn one_detector_writing_into_a_directory_puts_its_document_inside_it() {
+        // `--out` used to mean a directory when several detectors were named
+        // and a file when one was, so the same path worked and then did not
+        // depending on how many detectors were asked for. Measured 2026-09-29:
+        // a run wrote /tmp/multi/zsteg.json and /tmp/multi/stegexpose.json,
+        // and the next run, differing only in naming one detector, scored the
+        // whole corpus and then died with "Is a directory (os error 21)".
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
+        );
+
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        let written = out_dir.join("sizer.json");
+        assert!(
+            written.exists(),
+            "one detector did not write into the directory it was given: {}",
+            out.human
+        );
+        assert_eq!(cmd_validate(&written).code, exit::OK);
+        // The per-item answers keep it company rather than landing beside the
+        // corpus, so one run's output is in one place.
+        assert!(
+            out_dir.join("sizer.records.jsonl").exists(),
+            "the records did not follow the document into the directory"
+        );
+    }
+
+    #[test]
+    fn several_detectors_aimed_at_a_file_are_refused_before_anything_is_scored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let target = tmp.path().join("one-file.json");
+        std::fs::write(&target, "{}").unwrap();
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["ghost".to_string(), "sizer".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&target),
+                timeout: 5,
+                limit: None,
+            },
+        );
+
+        assert_eq!(out.code, exit::USAGE, "{}", out.human);
+        assert!(out.human.contains("directory"), "{}", out.human);
+        // Refused BEFORE the work: the file it was pointed at is untouched.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{}",
+            "the run wrote over the file it should have refused"
+        );
+    }
+
     #[test]
     fn one_missing_detector_does_not_lose_the_others_and_never_exits_zero() {
         let tmp = tempfile::tempdir().unwrap();
