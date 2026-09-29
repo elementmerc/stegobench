@@ -909,10 +909,10 @@ fn render_text(report: &Report) -> String {
         // would force it into an abbreviation the reader has to decode from
         // a legend, which is the thing this whole command exists to avoid.
         //
-        // Only the rows that have something to say appear here: twenty-four
-        // lines of "nothing flagged" would bury the three lines that matter,
-        // and the count below says how many rows had nothing rather than
-        // leaving the reader to subtract.
+        // Only the rows that have something to say appear here: a page of
+        // "nothing flagged" would bury the handful of lines that matter, and
+        // the count below says how many rows had nothing rather than leaving
+        // the reader to subtract.
         let flagged: Vec<&Row> = group.rows.iter().filter(|r| !r.flags.is_empty()).collect();
         out.push('\n');
         if flagged.is_empty() {
@@ -1422,23 +1422,43 @@ mod tests {
         }
     }
 
+    /// How many documents `results/v1` actually holds.
+    ///
+    /// Counted rather than written down. This used to be the literal 24, and
+    /// when three results were withdrawn the test failed with an arithmetic
+    /// complaint rather than saying anything about rendering, which is what it
+    /// is for. The shipped set is a fixture that changes as measurements are
+    /// added and retired, and a test over it should only assert the things
+    /// that are true whatever it holds.
+    fn shipped_count() -> usize {
+        std::fs::read_dir(shipped_results())
+            .expect("results/v1 is in the repository")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count()
+    }
+
     #[test]
     fn the_shipped_results_produce_a_report_in_every_format() {
         let paths = vec![shipped_results()];
         let report = build(&paths).expect("the shipped results build a report");
-        assert_eq!(report.read, 24, "the repository publishes twenty-four");
+        assert_eq!(report.read, shipped_count());
+        assert!(report.read > 0, "results/v1 is empty");
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
-        // Two corpora, both custom, so two tables and no cross-table reading.
-        assert_eq!(report.groups.len(), 2);
-        assert!(!report.any_cross_group_comparison_is_valid());
         assert_eq!(report.exit_code(), exit::OK);
+        // Every shipped document names the same corpus today, so this says
+        // nothing about how several tables render. That property is covered
+        // against built fixtures instead, where the shape can be chosen:
+        // see the tests around one name with two digests below.
+        for group in &report.groups {
+            assert!(!group.rows.is_empty());
+        }
         for format in [
             ReportFormat::Text,
             ReportFormat::Markdown,
             ReportFormat::Csv,
         ] {
             let text = render(&report, format);
-            assert!(text.contains("rich-suniward"), "{format:?}");
             assert!(text.contains("round3-q95"), "{format:?}");
             assert!(!text.is_empty());
         }
@@ -1455,7 +1475,7 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("| ") && !l.contains("detector") && !l.starts_with("|---"))
             .collect();
-        assert_eq!(rows.len(), 24, "expected one row per result");
+        assert_eq!(rows.len(), report.read, "expected one row per result");
         for row in rows {
             assert!(row.contains(" @ sha256:"), "no corpus digest in: {row}");
             assert!(row.contains("custom"), "no configuration in: {row}");
@@ -1951,10 +1971,10 @@ mod tests {
         assert!(render(&report, ReportFormat::Markdown).contains("| nothing flagged |"));
     }
 
-    /// Twenty-four lines of "nothing flagged" would bury the three that
-    /// matter, so the quiet rows are counted rather than listed. The count
-    /// has to be there: a reader must not have to subtract to learn that
-    /// every other row was looked at.
+    /// A page of "nothing flagged" would bury the handful of lines that
+    /// matter, so the quiet rows are counted rather than listed. The count has
+    /// to be there: a reader must not have to subtract to learn that every
+    /// other row was looked at.
     #[test]
     fn the_text_conditions_list_only_the_rows_with_something_to_say() {
         let report = build(&[shipped_results()]).unwrap();
@@ -1970,13 +1990,38 @@ mod tests {
             text.contains(&format!("the other {quiet} row(s) in this table")),
             "{text}"
         );
-        // The spatial table has nothing flagged at all, so it says so.
-        let spatial = group_named(&report, "rich-suniward");
-        assert!(spatial.rows.iter().all(|r| r.flags.is_empty()));
-        assert!(text.contains(&format!(
-            "Nothing was flagged on any of the {} row(s)",
-            spatial.rows.len()
-        )));
+    }
+
+    /// The other half of the same rule: a table where nothing was flagged says
+    /// so, rather than printing an empty conditions block a reader has to
+    /// interpret.
+    ///
+    /// Built here rather than taken from `results/v1`, which used to hold a
+    /// second corpus with nothing flagged on any row. That corpus was
+    /// withdrawn, and a test that depends on the shipped set happening to
+    /// contain a clean table is a test that breaks for a reason unrelated to
+    /// what it checks.
+    #[test]
+    fn a_table_with_nothing_flagged_says_so_rather_than_printing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, detector) in ["detector-a", "detector-b"].iter().enumerate() {
+            Doc {
+                detector: (*detector).into(),
+                ..Doc::default()
+            }
+            .write(dir.path(), &format!("{i}.json"));
+        }
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let group = group_named(&report, "corpus-a");
+        assert!(group.rows.iter().all(|r| r.flags.is_empty()));
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(
+            text.contains(&format!(
+                "Nothing was flagged on any of the {} row(s)",
+                group.rows.len()
+            )),
+            "{text}"
+        );
     }
 
     #[test]

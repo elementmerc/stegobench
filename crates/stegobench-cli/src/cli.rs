@@ -268,6 +268,50 @@ pub enum Command {
         limit: Option<u64>,
     },
 
+    /// Turn scores and labels into detection metrics
+    ///
+    /// The one implementation of these numbers in this project. `score` uses
+    /// it, and so can anything else that can start a process and write JSON,
+    /// which is what keeps a second copy of the arithmetic from growing
+    /// somewhere else and quietly disagreeing.
+    ///
+    /// The input is a JSON object of scores and labels, read from a file or
+    /// from standard input, so a few hundred thousand answers never have to
+    /// fit on a command line:
+    ///
+    ///   {"scores": [0.91, 0.02], "labels": [true, false]}
+    ///
+    /// A score higher means more like stego. A label of true means the image
+    /// really does hide something. An image the detector could not score is
+    /// written null, and is refused by name rather than counted as a zero.
+    ///
+    /// EXIT CODES here: 2 the input is not scores and labels, or a budget is
+    /// not a rate; 3 the numbers are well formed and cannot be ranked, which
+    /// is a refusal and will refuse again.
+    ///
+    /// Example:
+    ///   stegobench metrics scores.json --at 0.01 --at 0.10 --json
+    Metrics {
+        /// A JSON file of scores and labels. Left out, or given as `-`, reads
+        /// standard input.
+        #[arg(value_name = "FILE")]
+        file: Option<std::path::PathBuf>,
+        /// A false-alarm budget to report the detection rate at, as a fraction
+        /// between 0 and 1. Repeatable; 0.01 is one clean image in a hundred
+        /// wrongly flagged.
+        // `allow_hyphen_values` so a negative reaches this command's own
+        // refusal rather than clap's "unexpected argument". A budget of -0.1
+        // is a caller's mistake and deserves the message that says what a
+        // budget is, not the message for a misspelled flag.
+        #[arg(
+            long = "at",
+            value_name = "RATE",
+            allow_hyphen_values = true,
+            default_values = ["0.01", "0.05", "0.10"]
+        )]
+        at: Vec<String>,
+    },
+
     /// Download one tier of a registered corpus, and check what arrives
     ///
     /// The registry declares the URL, the SHA-256 and the exact size before

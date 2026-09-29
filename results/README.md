@@ -3,7 +3,7 @@
 Measurements this project has actually produced. Two shapes, and the
 difference matters.
 
-## `v1/` — twenty-four `result-v1` documents
+## `v1/` — twenty-one `result-v1` documents
 
 The published format, one document per arm and detector pair. Each names the
 corpus digest it was measured on, what was embedded, and the claims the harness
@@ -13,10 +13,10 @@ Every one of them validates, and there's a test that fails if that stops being
 true:
 
 ```sh
-stegobench validate results/v1/rich-suniward-suniward-0400-stegexpose.json
+stegobench validate results/v1/round3-q95-steghide-0500-stegexpose.json
 ```
 
-To see what's here without opening twenty-four files:
+To see what's here without opening twenty-one files:
 
 ```sh
 for f in results/v1/*.json; do
@@ -33,8 +33,26 @@ advance, so each number is comparable with itself rather than with somebody
 else's.
 
 **The file name is not the schema.** `round3-q95-*` means the third
-measurement round, at JPEG quality 95; `rich-suniward-*` is the spatial arm the
-rich-model work ran against. Both are in the same format.
+measurement round, at JPEG quality 95. Every document here is in the same
+format whatever it is called.
+
+## Three results were withdrawn
+
+The three `rich-suniward-suniward-0400-*` documents are gone. Their detection
+rates were computed by an older piece of code that read the false-alarm budget
+differently from the way `stegobench metrics` reads it now, and the scores they
+were measured from are not in this repository, so there is no way to work out
+here what the corrected figures would be.
+
+A number nobody can recompute is a number nobody can check, which is the thing
+this project exists to stop. So they are withdrawn rather than quietly
+corrected. They can come back when their scores are on a machine that can
+recompute them.
+
+The twenty-one `round3-q95-*` documents were recomputed rather than withdrawn,
+because the scores behind them are available. Twenty-six of their detection
+rates moved, every one of them upward, by between half a point and three. None
+of their AUC figures moved.
 
 ## The two loose files — an older shape, kept on purpose
 

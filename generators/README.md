@@ -1,6 +1,6 @@
 # Corpus generators
 
-Forty-five programs that fetch covers, build arms, check licences, pack a
+Forty-six programs that fetch covers, build arms, check licences, pack a
 release and verify it before it leaves the machine.
 
 This file used to describe three of them and claim to describe all of them,
@@ -107,6 +107,7 @@ because a measurement was once wrong in exactly the way it detects.
 
 | Module | | What it does |
 |---|---|---|
+| `metrics.py` | lib | AUC and detection rate at a false-alarm budget, computed by the `stegobench` binary so there is only one implementation of them |
 | `score_arms.py` | CLI | Score a built corpus with the detector under test and a reference detector |
 | `panel_scores.py` | CLI | Score a corpus with the established detector panel, and report per arm |
 | `aletheia_scores.py` | CLI | Run inside the Aletheia container and emit the numbers its CLI throws away |

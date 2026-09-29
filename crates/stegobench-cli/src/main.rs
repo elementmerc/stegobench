@@ -28,6 +28,7 @@ use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command, ReportFormat};
 use stegobench_cli::fetch;
 use stegobench_cli::help_topics;
+use stegobench_cli::metrics;
 use stegobench_cli::needs;
 use stegobench_cli::registry;
 use stegobench_cli::registry::Resolved;
@@ -686,6 +687,31 @@ fn cmd_verify(file: &Path, corpus: &Path) -> Output {
     }
 }
 
+/// The metrics over one set of scores and labels.
+///
+/// The refusal carries a stable `reason` word beside the message. A caller
+/// driving this from another language has to tell "one class only", which is a
+/// fact about its corpus, from "that file is not JSON", which is its own bug,
+/// and matching on English prose to do it is how a caller stops noticing the
+/// difference the first time the wording improves.
+fn cmd_metrics(file: Option<&Path>, at: &[String]) -> Output {
+    // `-` is the conventional spelling for standard input, and a file actually
+    // called `-` is not worth the ambiguity.
+    let file = file.filter(|p| p.as_os_str() != "-");
+    match metrics::run(file, at) {
+        Ok(report) => Output::ok(report.to_json(), report.human()),
+        Err(e) => {
+            let mut out = Output::err(e.exit_code(), e.to_string());
+            out.json = serde_json::json!({
+                "ok": false,
+                "reason": e.reason(),
+                "error": e.to_string(),
+            });
+            out
+        }
+    }
+}
+
 fn cmd_completions(shell: clap_complete::Shell) -> Output {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
@@ -1148,16 +1174,32 @@ fn unlabelled_corpus(corpus: &Path) -> Option<String> {
     ))
 }
 
-fn cmd_score(
-    resolved: &Resolved,
-    corpus: &Path,
-    detectors: &[String],
-    corpus_id: Option<&str>,
-    records: Option<&Path>,
-    out: Option<&Path>,
+/// Everything `score` was asked for, past the registry it resolves against.
+///
+/// Bundled rather than passed one at a time because the list outgrew what a
+/// reader can hold in order: `records` and `out` are both `Option<&Path>` and
+/// sit next to each other, so a transposition at a call site would have written
+/// the per-image scores where the result documents go and compiled cleanly.
+struct ScoreRequest<'a> {
+    corpus: &'a Path,
+    detectors: &'a [String],
+    corpus_id: Option<&'a str>,
+    records: Option<&'a Path>,
+    out: Option<&'a Path>,
     timeout: u64,
     limit: Option<u64>,
-) -> Output {
+}
+
+fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
+    let ScoreRequest {
+        corpus,
+        detectors,
+        corpus_id,
+        records,
+        out,
+        timeout,
+        limit,
+    } = req;
     let reg = &resolved.registry;
     let entries = match resolve_detectors(reg, detectors) {
         Ok(e) => e,
@@ -1949,13 +1991,15 @@ fn run(cli: &Cli) -> Output {
         } => with_registry(cli, |r| {
             cmd_score(
                 r,
-                corpus,
-                detector.as_slice(),
-                corpus_id.as_deref(),
-                records.as_deref(),
-                out.as_deref(),
-                *timeout,
-                *limit,
+                ScoreRequest {
+                    corpus,
+                    detectors: detector.as_slice(),
+                    corpus_id: corpus_id.as_deref(),
+                    records: records.as_deref(),
+                    out: out.as_deref(),
+                    timeout: *timeout,
+                    limit: *limit,
+                },
             )
         }),
         Command::Fetch {
@@ -1974,6 +2018,7 @@ fn run(cli: &Cli) -> Output {
                 *budget_minutes,
             )
         }),
+        Command::Metrics { file, at } => cmd_metrics(file.as_deref(), at),
         Command::Report { paths, format, out } => cmd_report(paths, *format, out.as_deref()),
         Command::Completions { shell } => cmd_completions(*shell),
         Command::Help { topic } => cmd_help(topic.as_deref()),
@@ -2294,8 +2339,8 @@ mod tests {
     /// repository's own validator.
     ///
     /// It did not, and nothing noticed. Two fields were added to `result-v1`
-    /// in earlier work and the twenty-four documents under `results/` were
-    /// left behind, so a reader following the README's own instruction to
+    /// in earlier work and every document under `results/` was left
+    /// behind, so a reader following the README's own instruction to
     /// validate a document would have been told the project's own published
     /// measurements are not valid documents. A benchmark whose sample output
     /// its own tool refuses has undermined the point of publishing it.
@@ -2636,13 +2681,15 @@ mod tests {
         std::fs::write(corpus.join("a.png"), b"x").unwrap();
         let out = cmd_score(
             &resolved_at(shipped_registry()),
-            &corpus,
-            &["all".to_string()],
-            None,
-            None,
-            None,
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["all".to_string()],
+                corpus_id: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(out.code, exit::PREFLIGHT_REFUSED);
         assert!(out.human.contains("help scope"), "got: {}", out.human);
@@ -2890,7 +2937,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../results/v1/rich-suniward-suniward-0400-aletheia-rs.json"),
+                .join("../../results/v1/round3-q95-structural-0000-aletheia-rs.json"),
             dir.path().join("good.json"),
         )
         .unwrap();
@@ -2901,7 +2948,7 @@ mod tests {
         assert!(out.payload_on_stdout, "the table was diverted to stderr");
         assert!(out.human.contains("THIS REPORT IS INCOMPLETE"));
         assert!(out.human.contains("bad.json"));
-        assert!(out.human.contains("rich-suniward"));
+        assert!(out.human.contains("round3-q95"));
         assert_eq!(out.json["complete"], serde_json::json!(false));
     }
 
@@ -2912,7 +2959,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../results/v1/rich-suniward-suniward-0400-aletheia-rs.json"),
+                .join("../../results/v1/round3-q95-structural-0000-aletheia-rs.json"),
             dir.path().join("good.json"),
         )
         .unwrap();
@@ -2929,7 +2976,7 @@ mod tests {
         assert!(out.human.contains("Every file found was readable"));
         let written = std::fs::read_to_string(&target).unwrap();
         assert!(written.starts_with("# Steganalysis results"));
-        assert!(written.contains("rich-suniward"));
+        assert!(written.contains("round3-q95"));
 
         // And the short case says so in the confirmation, so a person
         // watching stderr does not have to open the file to find out.
@@ -2956,7 +3003,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../results/v1/rich-suniward-suniward-0400-aletheia-rs.json"),
+                .join("../../results/v1/round3-q95-structural-0000-aletheia-rs.json"),
             dir.path().join("good.json"),
         )
         .unwrap();
@@ -3063,13 +3110,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["ghost".to_string(), "sizer".to_string()],
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["ghost".to_string(), "sizer".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
 
         assert_eq!(
@@ -3119,13 +3168,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["ghost".to_string(), "sizer".to_string()],
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["ghost".to_string(), "sizer".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
         assert!(
             out.human.contains("are from an earlier run"),
@@ -3155,13 +3206,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["sizer".to_string(), "ghost".to_string()],
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string(), "ghost".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
         assert!(
             out.human.contains("somebody-elses-tool.json"),
@@ -3187,13 +3240,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["sizer".to_string(), "sizer2".to_string()],
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string(), "sizer2".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(out.code, exit::OK, "{}", out.human);
         assert!(
@@ -3223,13 +3278,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["sizer".to_string(), "sizer2".to_string()],
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string(), "sizer2".to_string()],
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(out.code, exit::OK, "{}", out.human);
 
@@ -3262,25 +3319,29 @@ mod tests {
 
         let first = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &args,
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &args,
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(first.code, exit::OK, "{}", first.human);
 
         let second = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &args,
-            None,
-            None,
-            Some(&out_dir),
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &args,
+                corpus_id: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(second.code, exit::OK, "{}", second.human);
         assert!(
@@ -3303,13 +3364,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["sizer".to_string(), "ghost".to_string()],
-            None,
-            None,
-            None,
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string(), "ghost".to_string()],
+                corpus_id: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+            },
         );
         let expected = tmp.path().join("corpus.results");
         assert!(expected.join("sizer.json").exists(), "{}", out.human);
@@ -3333,13 +3396,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["sizer".to_string()],
-            None,
-            None,
-            None,
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string()],
+                corpus_id: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(out.code, exit::OK, "{}", out.human);
         assert_eq!(
@@ -3372,13 +3437,15 @@ mod tests {
 
         let out = cmd_score(
             &resolved_at(&reg),
-            &corpus,
-            &["all".to_string()],
-            None,
-            None,
-            None,
-            5,
-            None,
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["all".to_string()],
+                corpus_id: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+            },
         );
         assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
         assert!(out.human.contains("nothing was measured"), "{}", out.human);
@@ -3530,13 +3597,15 @@ mod tests {
             .unwrap();
             let out = cmd_score(
                 &resolved_at(dir.path()),
-                &dir.path().join("no-such-corpus"),
-                &["ghost".to_string()],
-                None,
-                None,
-                None,
-                5,
-                None,
+                ScoreRequest {
+                    corpus: &dir.path().join("no-such-corpus"),
+                    detectors: &["ghost".to_string()],
+                    corpus_id: None,
+                    records: None,
+                    out: None,
+                    timeout: 5,
+                    limit: None,
+                },
             );
             assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
             // Proof it refused on the tool rather than on the missing corpus.

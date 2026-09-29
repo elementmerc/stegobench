@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod fetch;
 pub mod help_topics;
+pub mod metrics;
 pub mod needs;
 pub mod registry;
 pub mod report;

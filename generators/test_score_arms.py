@@ -10,11 +10,19 @@
 WHY THIS EXISTS
 ---------------
 `roc_auc` and `tpr_at_fpr` live in `score_arms.py` and are imported by
-`panel_scores.py`, so every figure the panel prints comes out of them, and
-nothing tested them. What they answer when the input is not what the caller
-thinks it is matters more here than the happy path: a metric that quietly
-returns a number over half the images, or over scores it could not order, is
-indistinguishable in a report from one that measured what it says it did.
+`panel_scores.py`, `rich_model_baseline.py` and `null_control.py`, so every
+figure those print comes out of them. What they answer when the input is not
+what the caller thinks it is matters more here than the happy path: a metric
+that quietly returns a number over half the images, or over scores it could not
+order, is indistinguishable in a report from one that measured what it says it
+did.
+
+They no longer do the arithmetic. It moved to `stegobench metrics`, reached
+through `metrics.py`, because there were two implementations of it and they
+disagreed. What these tests now hold is the CONTRACT those four callers depend
+on and the command does not have: None where a ranking cannot be formed, and a
+raise where the caller made a mistake. `test_metrics.py` covers the seam
+itself. A test needing the binary skips with a message naming what to build.
 """
 from __future__ import annotations
 
@@ -28,7 +36,9 @@ from contextlib import redirect_stdout
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from score_arms import report, roc_auc, tpr_at_fpr  # noqa: E402
+from metrics import metrics  # noqa: E402
+from score_arms import arm_metrics, report, roc_auc, tpr_at_fpr  # noqa: E402
+from test_metrics import binary_or_skip  # noqa: E402
 
 
 def naive_tpr_at_fpr(scores, labels, max_fpr):
@@ -48,6 +58,9 @@ def naive_tpr_at_fpr(scores, labels, max_fpr):
 
 
 class TprAtFprTests(unittest.TestCase):
+    def setUp(self):
+        binary_or_skip()
+
     def test_known_cases(self):
         # 2 stego (0.9, 0.4), 2 clean (0.5, 0.1). Catching the 0.4 stego means
         # first admitting the 0.5 clean, so a zero budget buys half.
@@ -57,8 +70,12 @@ class TprAtFprTests(unittest.TestCase):
         self.assertEqual(tpr_at_fpr(scores, labels, 0.5), 1.0)
 
     def test_agrees_with_the_quadratic_version_it_replaced(self):
+        # Every budget in one call. The arithmetic is a subprocess away now, so
+        # a thousand separate calls would make this the slowest test here for
+        # no extra coverage.
+        budgets = [0.0, 0.01, 0.1, 0.5, 1.0]
         rng = random.Random(20260928)
-        for trial in range(200):
+        for trial in range(100):
             n = rng.randrange(2, 40)
             # Deliberately few distinct values on some trials, so tie groups
             # are common: ties are where a sweep and a per-threshold scan are
@@ -68,9 +85,10 @@ class TprAtFprTests(unittest.TestCase):
             labels = [rng.random() < 0.5 for _ in range(n)]
             if not any(labels) or all(labels):
                 continue
-            for budget in (0.0, 0.01, 0.1, 0.5, 1.0):
+            answer = metrics(scores, labels, budgets=budgets)["tpr_at_fpr"]
+            for budget in budgets:
                 self.assertEqual(
-                    tpr_at_fpr(scores, labels, budget),
+                    answer[budget],
                     naive_tpr_at_fpr(scores, labels, budget),
                     f"trial {trial}, budget {budget}: {scores} {labels}",
                 )
@@ -85,7 +103,32 @@ class TprAtFprTests(unittest.TestCase):
         self.assertIsNone(tpr_at_fpr([0.1, 0.2], [True, True], 0.01))
 
 
+class ArmMetricsTests(unittest.TestCase):
+    """The batched call the report uses, against the one-at-a-time functions."""
+
+    def setUp(self):
+        binary_or_skip()
+
+    def test_it_agrees_with_asking_for_each_figure_separately(self):
+        scores = [0.9, 0.4, 0.55, 0.5, 0.1, 0.8]
+        labels = [True, True, False, True, False, False]
+        self.assertEqual(
+            arm_metrics(scores, labels),
+            (
+                roc_auc(scores, labels),
+                tpr_at_fpr(scores, labels, 0.01),
+                tpr_at_fpr(scores, labels, 0.10),
+            ),
+        )
+
+    def test_an_arm_with_no_ranking_is_three_nones_rather_than_a_crash(self):
+        self.assertEqual(arm_metrics([0.1, 0.2], [True, True]), (None, None, None))
+
+
 class RocAucTests(unittest.TestCase):
+    def setUp(self):
+        binary_or_skip()
+
     def test_known_cases(self):
         self.assertEqual(roc_auc([0.1, 0.2, 0.8, 0.9], [False, False, True, True]), 1.0)
         self.assertEqual(roc_auc([0.9, 0.8, 0.2, 0.1], [False, False, True, True]), 0.0)
@@ -99,6 +142,9 @@ class RocAucTests(unittest.TestCase):
 
 class UnrankableInputTests(unittest.TestCase):
     """Two ways the input can be something no ranking should be built on."""
+
+    def setUp(self):
+        binary_or_skip()
 
     def test_a_length_mismatch_is_refused_rather_than_truncated(self):
         # `zip` would walk the shorter list and answer over a subset nobody
@@ -121,6 +167,9 @@ class UnrankableInputTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def setUp(self):
+        binary_or_skip()
+
     def test_an_arm_with_no_computable_auc_prints_a_dash_rather_than_failing(self):
         # The report formats the AUC with a width, and `format(None, ">6")`
         # raises. It reaches the printer whenever a detector's scores cannot be

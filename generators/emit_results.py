@@ -37,6 +37,8 @@ import pathlib
 import re
 import sys
 
+from metrics import MetricsRefused, metrics
+
 #: Detector name in panel.jsonl -> (subject name, image tag we built it from).
 DETECTORS = {
     "aletheia_spa": ("aletheia-spa", "stegobench/aletheia"),
@@ -79,37 +81,23 @@ def best_records(path: pathlib.Path) -> list[dict]:
     return list(best.values())
 
 
-def auc(pos: list[float], neg: list[float]) -> float:
-    """Tie-aware ROC AUC, via the rank sum with average ranks.
+def arm_metrics(pos: list[float], neg: list[float]) -> dict:
+    """Every reported figure for one arm, from `stegobench metrics`.
 
-    Ties are not a corner case here. Several of these detectors return the same
-    score for many images, and the naive rank sum counts each tie as half a win
-    in a way that reads as signal.
+    The arithmetic used to live here, in a second implementation that disagreed
+    with the Rust one at the operating point sitting exactly on the budget.
+    This module keeps the per-arm logic that decides WHICH scores belong to a
+    measurement, which is the part that is specific to a corpus; the numbers
+    over them come from the one place that computes numbers.
+
+    Takes the two sides separately, as the pairing logic above produces them,
+    and hands them over as scores and labels, which is what a ranking needs.
     """
-    data = sorted([(v, 1) for v in pos] + [(v, 0) for v in neg])
-    total = 0.0
-    i = 0
-    while i < len(data):
-        j = i
-        while j + 1 < len(data) and data[j + 1][0] == data[i][0]:
-            j += 1
-        rank = (i + j) / 2.0 + 1
-        total += sum(rank for k in range(i, j + 1) if data[k][1] == 1)
-        i = j + 1
-    n1, n0 = len(pos), len(neg)
-    return (total - n1 * (n1 + 1) / 2.0) / (n1 * n0)
-
-
-def tpr_at_fpr(pos: list[float], neg: list[float], target: float) -> float:
-    """Detection rate at a false-alarm budget, ties counted against us.
-
-    The threshold is the score that lets no more than `target` of the clean
-    images through. A detector returning one constant for everything scores
-    zero here rather than appearing to work, which is the point.
-    """
-    allowed = int(len(neg) * target)
-    cut = sorted(neg, reverse=True)[allowed - 1] if allowed >= 1 else max(neg)
-    return sum(1 for v in pos if v > cut) / len(pos)
+    return metrics(
+        [*pos, *neg],
+        [True] * len(pos) + [False] * len(neg),
+        budgets=FPRS,
+    )
 
 
 def digest_of(path: pathlib.Path) -> str:
@@ -136,6 +124,10 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written = 0
+    # A measurement the metrics refused is named and counted rather than
+    # skipped. A short run of documents under an exit code of zero reads as
+    # "these are all the arms there were".
+    refused: list[str] = []
     for arm_key, rows in sorted(arms.items()):
         parts = arm_key.split("/")
         embedder = parts[0]
@@ -164,6 +156,12 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                        + sum(1 for i in ids
                              if i in clean and clean[i].get(field) is None))
 
+            try:
+                figures = arm_metrics(pos, neg)
+            except MetricsRefused as e:
+                refused.append(f"{arm_key} / {subject}: {e.reason}: {e}")
+                continue
+
             doc = {
                 "schema": "stegobench/result-v1",
                 "subject": {"name": subject,
@@ -177,8 +175,8 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                 "arm": {"embedder": embedder, "domain": domain, "format": fmt,
                         **({"rate": rate} if rate is not None else {})},
                 "metrics": {
-                    "auc": round(auc(pos, neg), 4),
-                    "tpr_at_fpr": {f"{f}": round(tpr_at_fpr(pos, neg, f), 4)
+                    "auc": round(figures["auc"], 4),
+                    "tpr_at_fpr": {f"{f}": round(figures["tpr_at_fpr"][f], 4)
                                    for f in FPRS},
                     "n_clean": len(neg),
                     "n_stego": len(pos),
@@ -215,6 +213,11 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
             (out_dir / name).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             written += 1
     print(f"{corpus_name}: {written} result-v1 document(s) in {out_dir}")
+    if refused:
+        print(f"\n{len(refused)} measurement(s) produced no document because "
+              f"the metrics refused them:\n  " + "\n  ".join(refused),
+              file=sys.stderr)
+        return 1
     return 0
 
 

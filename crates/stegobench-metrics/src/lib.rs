@@ -280,6 +280,17 @@ pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
 /// caller's mistake rather than a strict budget, and answering 0.0 to it would
 /// read as a detector that caught nothing.
 ///
+/// ONE SWEEP, NOT ONE PASS PER THRESHOLD
+///
+/// The obvious shape of this is a loop over every distinct score that counts
+/// the hits above it, and a copy of this metric elsewhere in the project was
+/// written that way. It is quadratic, and the scores are floats a detector
+/// produced, so "distinct" means nearly all of them: an arm of 344,357 images
+/// made it around a hundred billion comparisons, which is not slow, it is a
+/// run that never ends. [`roc_curve`] walks the scores once in descending
+/// order and accumulates counts, which gives the same answer, ties included,
+/// for the cost of the sort.
+///
 /// This is the headline number for an external evaluation and accuracy is not.
 /// A detector facing a corpus that is mostly clean can score 95% accuracy by
 /// answering "clean" every time, and a false-positive rate chosen after seeing

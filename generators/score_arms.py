@@ -48,6 +48,8 @@ import sys
 import time
 import urllib.request
 
+from metrics import MetricsRefused, metrics
+
 #: No default endpoint. A benchmark that ships one lab's network address as a
 #: default produces results whose provenance nobody can check, and silently
 #: scores against whatever happens to answer on that address. The caller says
@@ -92,104 +94,69 @@ def stegcore_score(binary: str, path: pathlib.Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _rankable(scores: list[float], labels: list[bool], what: str) -> bool:
-    """Whether these two lists can be ranked against each other at all.
+#: Refusals that mean "these numbers carry no ranking", as opposed to "you
+#: called this wrongly". The first group is a fact about the images and the
+#: functions below answer None to it, which is what every caller in this
+#: directory already expects; the second group raises.
+_NO_RANKING = frozenset({"one-sided", "not-a-number", "empty"})
 
-    Different lengths mean the caller built the scores and the labels from
-    different record sets, so it raises: `zip` would walk the shorter of the two
-    and answer with a figure measured on a subset nobody named. A score that is
-    not a number is the detector's answer rather than the caller's mistake, so
-    it returns False and the metric above answers None: NaN compares false
-    against everything, so it lands wherever the sort leaves it and every rank
-    built on top of it is arbitrary.
-    """
-    if len(scores) != len(labels):
-        raise ValueError(
-            f"{what}: {len(scores)} score(s) against {len(labels)} label(s). "
-            f"They describe the same images, so a mismatch means they were "
-            f"built from different record sets and the number would be "
-            f"measured on whichever is shorter."
-        )
-    return not any(s != s for s in scores)
+
+def _one(scores: list[float], labels: list[bool], budget: float, key: str):
+    """One metric from the binary, with this module's None-or-raise contract."""
+    try:
+        answer = metrics(scores, labels, budgets=[budget])
+    except MetricsRefused as e:
+        if e.reason in _NO_RANKING:
+            return None
+        raise
+    return answer["auc"] if key == "auc" else answer["tpr_at_fpr"][budget]
 
 
 def roc_auc(scores: list[float], labels: list[bool]) -> float | None:
-    """Tie-aware AUC by the rank-sum identity.
+    """Tie-aware AUC by the rank-sum identity, computed by `stegobench metrics`.
 
     Ties get the average of the ranks they span, which is what makes a detector
     returning one constant score land at exactly 0.5 rather than at whatever the
     sort order happened to produce.
 
-    None when one class is absent or any score is not a number.
+    None when one class is absent or any score is not a number. Raises when the
+    scores and the labels are of different lengths: they describe the same
+    images, so a mismatch means they were built from different record sets and
+    the number would be measured on whichever is shorter.
     """
-    if not _rankable(scores, labels, "roc_auc"):
-        return None
-    positives = sum(labels)
-    negatives = len(labels) - positives
-    if not positives or not negatives:
-        return None
-    order = sorted(range(len(scores)), key=lambda i: scores[i])
-    ranks = [0.0] * len(scores)
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and scores[order[j + 1]] == scores[order[i]]:
-            j += 1
-        shared = (i + j) / 2 + 1
-        for k in range(i, j + 1):
-            ranks[order[k]] = shared
-        i = j + 1
-    rank_sum = sum(r for r, l in zip(ranks, labels) if l)
-    return (rank_sum - positives * (positives + 1) / 2) / (positives * negatives)
+    # The budget is irrelevant to an AUC and one has to be named, so 0.01 is
+    # asked for and its answer thrown away.
+    return _one(scores, labels, 0.01, "auc")
 
 
 def tpr_at_fpr(scores: list[float], labels: list[bool], max_fpr: float) -> float | None:
     """The best true-positive rate reachable without exceeding `max_fpr`.
 
+    Computed by `stegobench metrics`, which is the only implementation of it.
+
     None when one class is absent or any score is not a number. Raises when
     `max_fpr` is not a false-alarm budget: a negative or a figure above 1 is a
     caller's mistake, and answering 0.0 to it would read as a detector that
     caught nothing.
-
-    ONE SWEEP, NOT ONE PASS PER THRESHOLD
-    -------------------------------------
-    The obvious shape of this is a loop over every distinct score that counts
-    the hits above it, and that is what this was. It is quadratic, and the
-    scores are floats a detector produced, so "distinct" means nearly all of
-    them: a Core arm of 344,357 images made it around a hundred billion
-    comparisons, which is not slow, it is a run that never ends. Walking the
-    scores once in descending order and accumulating counts gives the same
-    answer, ties included, for the cost of the sort.
     """
-    if not 0.0 <= max_fpr <= 1.0:
-        raise ValueError(
-            f"tpr_at_fpr: a false-alarm budget of {max_fpr} is not a rate. "
-            f"Give a fraction between 0 and 1, such as 0.01 for one per cent."
-        )
-    if not _rankable(scores, labels, "tpr_at_fpr"):
-        return None
-    positives = sum(labels)
-    negatives = len(labels) - positives
-    if not positives or not negatives:
-        return None
-    best = 0.0
-    tp = fp = 0
-    # Descending, so each step admits everything at or above the threshold. The
-    # point is recorded only once a whole tie group is in, because a threshold
-    # cannot separate two images that scored the same.
-    ordered = sorted(zip(scores, labels), key=lambda p: p[0], reverse=True)
-    i = 0
-    while i < len(ordered):
-        threshold = ordered[i][0]
-        while i < len(ordered) and ordered[i][0] == threshold:
-            if ordered[i][1]:
-                tp += 1
-            else:
-                fp += 1
-            i += 1
-        if fp / negatives <= max_fpr:
-            best = max(best, tp / positives)
-    return best
+    return _one(scores, labels, max_fpr, "tpr")
+
+
+def arm_metrics(scores: list[float], labels: list[bool]):
+    """The three reported figures for one arm, in ONE call to the binary.
+
+    Asking for the AUC and each detection rate separately would serialise the
+    same few hundred thousand scores three times over. Returns a triple of
+    Nones when the arm carries no ranking at all, for the same reasons
+    `roc_auc` answers None.
+    """
+    try:
+        answer = metrics(scores, labels, budgets=[0.01, 0.10])
+    except MetricsRefused as e:
+        if e.reason in _NO_RANKING:
+            return None, None, None
+        raise
+    return answer["auc"], answer["tpr_at_fpr"][0.01], answer["tpr_at_fpr"][0.10]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -341,9 +308,7 @@ def report(rows: list[dict], scored: dict[str, dict], with_stegcore: bool) -> No
                 labels.append(False)
         if not counted:
             continue
-        auc = roc_auc(scores, labels)
-        t1 = tpr_at_fpr(scores, labels, 0.01)
-        t10 = tpr_at_fpr(scores, labels, 0.10)
+        auc, t1, t10 = arm_metrics(scores, labels)
         flagged = sum(
             1 for row in pairs
             if scored.get(row["stego"], {}).get("stegashield", {}).get("label")
