@@ -366,10 +366,9 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>) -> Out
         // Only ask a tool to prove itself if its code is actually here. Running
         // a self-test against a missing image produces a failure that says
         // "broken" when the truth is "absent", and those need different fixes.
-        let verdict = if no_selftest || !check.presence.is_present() {
-            Verified::Skipped("not attempted".into())
-        } else {
-            selftest::run(entry, fixtures.expect("present unless no_selftest").dir())
+        let verdict = match fixtures {
+            Some(f) if check.presence.is_present() => selftest::run(entry, f.dir()),
+            _ => Verified::Skipped("not attempted".into()),
         };
         check.verified = match &verdict {
             Verified::Passed => Some(true),
@@ -1126,23 +1125,6 @@ const LOOKS_LIKE_AN_IMAGE: &[&str] = &[
 /// larger, which then meets the ordinary corpus errors as before.
 const SHAPE_CHECK_ENTRIES: usize = 4096;
 
-/// Whether this looks like a folder of unlabelled images rather than a corpus.
-///
-/// WHY THE REFUSAL TEACHES RATHER THAN REPORTS
-/// -------------------------------------------
-/// Most people who reach for a steganalysis tool want to know whether THEIR
-/// images are hiding something. That is the opposite direction from what this
-/// measures, and the moment somebody points `score` at a folder of their own
-/// files is the moment that distinction is worth the most: they have already
-/// installed the thing and typed a real command, so a message that only says
-/// "no records found" costs them another twenty minutes before they work out
-/// they are in the wrong place.
-///
-/// Returns `None` whenever it cannot be sure, which includes an empty
-/// directory, a directory it could not read, and a tree wider than the bound.
-/// Those cases meet the ordinary corpus errors, which is the safe direction to
-/// be wrong in: a corpus wrongly accused of being a photo album would be a
-/// refusal nobody could work around.
 /// Why this path cannot be a corpus, in the words a user can act on.
 ///
 /// `None` means the path is a directory this process can list, which is all
@@ -1193,6 +1175,23 @@ fn plain(e: &std::io::Error) -> String {
     }
 }
 
+/// Whether this looks like a folder of unlabelled images rather than a corpus.
+///
+/// WHY THE REFUSAL TEACHES RATHER THAN REPORTS
+/// -------------------------------------------
+/// Most people who reach for a steganalysis tool want to know whether THEIR
+/// images are hiding something. That is the opposite direction from what this
+/// measures, and the moment somebody points `score` at a folder of their own
+/// files is the moment that distinction is worth the most: they have already
+/// installed the thing and typed a real command, so a message that only says
+/// "no records found" costs them another twenty minutes before they work out
+/// they are in the wrong place.
+///
+/// Returns `None` whenever it cannot be sure, which includes an empty
+/// directory, a directory it could not read, and a tree wider than the bound.
+/// Those cases meet the ordinary corpus errors, which is the safe direction to
+/// be wrong in: a corpus wrongly accused of being a photo album would be a
+/// refusal nobody could work around.
 fn unlabelled_corpus(corpus: &Path) -> Option<String> {
     let mut images = 0usize;
     let mut seen = 0usize;
@@ -1487,25 +1486,12 @@ fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<P
     //
     // A path that is already a directory is now treated as one whatever the
     // detector count, which is the reading that never surprises, and the check
-    // happens here, before a single image is scored.
-    if let Some(p) = out {
-        match std::fs::metadata(p) {
-            Ok(meta) if meta.is_dir() => return Ok(Some(p.to_path_buf())),
-            Ok(_) if many => {
-                return Err(Output::err(
-                    exit::USAGE,
-                    format!(
-                        "--out {} is a file, and more than one detector was \
-                         asked for.\n\
-                         Several detectors each write their own document, so --out \
-                         needs to be a directory. Name one that does not exist yet \
-                         and it will be created.",
-                        p.display()
-                    ),
-                ))
-            }
-            _ => {}
-        }
+    // happens here, before a single image is scored. The other half of the
+    // question, several detectors aimed at an existing FILE, is refused by
+    // `cmd_score` before any detector is even probed for, which is earlier
+    // than this and therefore where it belongs.
+    if let Some(dir) = out.filter(|p| p.is_dir()) {
+        return Ok(Some(dir.to_path_buf()));
     }
     if !many {
         return Ok(None);
@@ -1547,23 +1533,17 @@ fn records_for(
     many: bool,
 ) -> PathBuf {
     let file = format!("{detector}.records.jsonl");
-    match (records, many) {
+    match (records, many, out_dir) {
         // One detector and an explicit path: exactly what the caller asked
         // for, because they named one run's file and there is one run.
-        (Some(p), false) => p.to_path_buf(),
+        (Some(p), false, _) => p.to_path_buf(),
         // Several detectors: the caller named a directory to keep them in.
-        (Some(p), true) => p.join(file),
-        (None, true) => match out_dir {
-            Some(dir) => dir.join(file),
-            None => corpus.with_file_name(file),
-        },
-        // One detector writing into a directory keeps its records beside its
-        // document rather than beside the corpus, so everything one run
-        // produced is in the place the caller named.
-        (None, false) if out_dir.is_some() => {
-            out_dir.as_ref().expect("just checked").join(file)
-        }
-        (None, false) => {
+        (Some(p), true, _) => p.join(file),
+        // Whatever the detector count, records go where the documents go, so
+        // everything one run produced is in the place the caller named.
+        (None, _, Some(dir)) => dir.join(file),
+        (None, true, None) => corpus.with_file_name(file),
+        (None, false, None) => {
             let mut name = corpus.file_name().unwrap_or_default().to_os_string();
             name.push(format!(".{file}"));
             corpus.with_file_name(name)
@@ -3436,7 +3416,11 @@ mod tests {
         );
 
         assert_eq!(out.code, exit::USAGE, "{}", out.human);
-        assert!(out.human.contains("directory"), "{}", out.human);
+        // The exact refusal, so this cannot pass on some other message that
+        // happens to carry the word "directory".
+        let expected = "is a file. Scoring 2 detectors writes one result \
+                        document each, so --out has to name a directory.";
+        assert!(out.human.contains(expected), "{}", out.human);
         // Refused BEFORE the work: the file it was pointed at is untouched.
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),

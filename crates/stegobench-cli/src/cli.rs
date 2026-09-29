@@ -111,9 +111,13 @@ pub struct Cli {
     /// Left out, stegobench searches: see WHERE THE REGISTRY COMES FROM under
     /// `--help`. Named here, the path is used as given, and a path that is not
     /// there is an error rather than a fall back.
-    /// STEGOBENCH_REGISTRY is read by the resolver rather than declared here,
-    /// so a variable that is set but empty is treated as unset instead of
-    /// making clap refuse every command for a missing value.
+    ///
+    /// Setting STEGOBENCH_REGISTRY does the same thing for every command. An
+    /// empty value counts as not set.
+    // Deliberately not clap's `env`: clap reads the variable before any of our
+    // code does, and treats one that is set but empty as a flag supplied
+    // without its value, so `STEGOBENCH_REGISTRY=` in a shell profile refused
+    // every command including `--help`. The resolver reads it instead.
     #[arg(long, global = true, value_name = "DIR")]
     pub registry: Option<std::path::PathBuf>,
 
@@ -199,8 +203,9 @@ pub enum Command {
         /// beside the executable, then your data directories, then the copy
         /// compiled into this binary.
         ///
-        /// STEGOBENCH_FIXTURES is read by the resolver, not declared here, so
-        /// an empty variable is ignored rather than fatal.
+        /// Setting STEGOBENCH_FIXTURES does the same thing. An empty value
+        /// counts as not set.
+        // Not clap's `env`, for the reason given on `--registry`.
         #[arg(long, value_name = "DIR")]
         fixtures: Option<std::path::PathBuf>,
         /// Report what is installed without running the self-tests. Faster,
@@ -367,8 +372,9 @@ pub enum Command {
         /// Defaults to a directory under your user data directory, so the same
         /// tier fetched from two working directories is downloaded once.
         ///
-        /// STEGOBENCH_CORPUS_DIR sets it for good, and is read when the
-        /// destination is chosen so an empty variable is ignored.
+        /// Setting STEGOBENCH_CORPUS_DIR does the same thing for every fetch.
+        /// An empty value counts as not set.
+        // Not clap's `env`, for the reason given on `--registry`.
         #[arg(long, value_name = "DIR")]
         dest: Option<std::path::PathBuf>,
         /// Refuse a route that declares more bytes than this.

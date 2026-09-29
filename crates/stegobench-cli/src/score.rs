@@ -429,11 +429,15 @@ where
             .is_some_and(|id| id == trained);
         if same {
             progress(&format!(
-                "WARNING: this detector is declared as trained on {trained},                  which is the corpus it is being scored against. The number                  below measures what it memorised as well as what it detects,                  and it is not a figure to quote for {trained}"
+                "WARNING: this detector is declared as trained on {trained}, \
+                 which is the corpus it is being scored against. The number \
+                 below measures what it memorised as well as what it detects, \
+                 and it is not a figure to quote for {trained}"
             ));
         } else {
             progress(&format!(
-                "declared as trained on {trained}, which the result records                  so a reader can judge it"
+                "declared as trained on {trained}, which the result records so \
+                 a reader can judge it"
             ));
         }
     }

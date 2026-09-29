@@ -104,7 +104,8 @@ impl Fixtures {
         &self.source
     }
 
-    /// One line naming the fixtures that answered, for `doctor --json`.
+    /// One line naming the fixtures that answered, for `doctor` to print above
+    /// its table. The JSON block carries the tag and the path separately.
     pub fn line(&self) -> String {
         match &self.source {
             Source::BuiltIn => "fixtures  built in".to_string(),

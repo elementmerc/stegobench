@@ -408,12 +408,16 @@ fn embedded() -> Result<Registry, Error> {
 /// --------------------------------------------------------
 /// A `host = true` entry names its adapter the way the repository holds it,
 /// `plugins/adapters/aletheia_one.py`, and that path is resolved against the
-/// directory the user runs from. A registry read from disk can be fixed by
-/// measuring from the directory it was read from, and is. The built-in copy
-/// has no directory to measure from and exists for the machine that has no
-/// checkout, so the three entries that declare an adapter would name a file
-/// that is not there and fail with advice ("run from the root of the clone")
-/// that a reader who installed a package cannot act on.
+/// directory the user runs from. Inside a checkout that is correct. The
+/// built-in copy exists for the machine that has NO checkout, so its three
+/// entries that declare an adapter would name a file that is not there and
+/// fail with advice ("run from the root of the clone") that a reader who
+/// installed a package cannot act on.
+///
+/// This closes the built-in case only. A registry found beside the executable
+/// or in a data directory still resolves its adapter paths against the working
+/// directory, because nothing rebases them against the directory the registry
+/// was read from. That gap is open.
 ///
 /// The bytes are therefore carried in the binary beside the TOML and written
 /// to a temporary directory held for the life of the command, which is the
@@ -496,9 +500,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry")
     }
 
-    /// The whole point of embedding. A binary with a built-in copy that has
-    /// drifted from the repository answers `list detectors` with a world that
-    /// no longer exists, and nothing on the machine would say so.
     /// The built-in registry is for the machine with no checkout, and until
     /// this landed its three host entries named an adapter by a path relative
     /// to wherever the user happened to be standing. Measured from a scratch
@@ -531,8 +532,10 @@ mod tests {
 
     /// The temporary directory lives on the `Resolved`, so a caller that keeps
     /// only the registry would be holding paths whose files had been deleted.
+    /// Both halves are asserted here: the files are there while the resolution
+    /// is, and gone once it is dropped.
     #[test]
-    fn the_unpacked_adapters_survive_as_long_as_the_resolution_does() {
+    fn the_unpacked_adapters_live_exactly_as_long_as_the_resolution() {
         let resolved = Resolved::built_in().expect("the built-in registry loads");
         let first = resolved
             .registry
@@ -540,6 +543,10 @@ mod tests {
             .values()
             .find_map(|e| e.invoke.as_ref().and_then(|i| i.adapter.clone()))
             .expect("at least one entry declares an adapter");
+        assert!(
+            Path::new(&first).is_file(),
+            "{first} is not there while the resolution that named it is alive"
+        );
         drop(resolved);
         assert!(
             !Path::new(&first).exists(),
@@ -547,6 +554,9 @@ mod tests {
         );
     }
 
+    /// The whole point of embedding. A binary with a built-in copy that has
+    /// drifted from the repository answers `list detectors` with a world that
+    /// no longer exists, and nothing on the machine would say so.
     #[test]
     fn the_built_in_registry_is_the_registry_on_disk() {
         let disk = Registry::load(&shipped()).expect("the shipped registry loads");

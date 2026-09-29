@@ -170,6 +170,12 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                 # Supplied, not fetched: this corpus was built here by the
                 # generators beside this file. Nothing downloaded it, and
                 # saying otherwise would vouch for bytes nobody saw arrive.
+                # PAIRS, which is the stego side: one cover and its twin is one
+                # pair, so 6 covers and 12 stego images is 12 and not 18. The
+                # Rust scorer wrote items here for as long as both writers
+                # existed, and one published field meaning two things is worse
+                # than a missing one. See CorpusRef::pairs in
+                # crates/stegobench-core/src/result.rs.
                 "corpus": {"name": corpus_name, "digest": corpus_digest,
                            "source": "supplied", "pairs": len(rows)},
                 "arm": {"embedder": embedder, "domain": domain, "format": fmt,

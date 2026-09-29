@@ -88,8 +88,9 @@ fn main() {
             // would otherwise sit here until somebody deleted target/, and be
             // packaged and installed from a directory nobody re-reads. That is
             // how `stegobench-check.1` and `stegobench-scan.1` survived being
-            // hidden. Only pages this build did not just write are removed, so
-            // a file somebody put here on purpose under another name stays.
+            // hidden. Only `.1` files are considered, and only those this build
+            // did not just write, so anything else in the directory is left
+            // alone.
             if let Ok(existing) = fs::read_dir(&workspace_man) {
                 for item in existing.flatten() {
                     let path = item.path();
@@ -173,17 +174,6 @@ fn write_embedded_registry(out_dir: &std::path::Path) {
         .unwrap_or_else(|e| panic!("stegobench: could not write {}: {e}", dest.display()));
 }
 
-/// Compiles `fixtures/` into the binary, for the same reason the registry is.
-///
-/// A self-test fixture is named by a registry entry as `fixtures/clean.png`,
-/// and that path used to be resolved against the directory the command was
-/// typed in. Measured on 2026-09-29, from a directory that was not a checkout:
-/// `doctor` reported six tools BROKEN that the identical binary reported
-/// VERIFIED one directory later. The tools were fine. The harness could not
-/// find its own fixtures and said so in the vocabulary of a tool failure.
-///
-/// Reporting somebody's working installation as broken is worse than refusing
-/// to check it, so the files travel with the binary. Six images, 344 KB.
 /// Compiles `plugins/adapters` into the binary, for the reason the fixtures are.
 ///
 /// An entry with `invoke.host = true` names its adapter as a path relative to
@@ -251,6 +241,17 @@ fn write_embedded_adapters(out_dir: &std::path::Path) {
         .unwrap_or_else(|e| panic!("stegobench: could not write {}: {e}", dest.display()));
 }
 
+/// Compiles `fixtures/` into the binary, for the same reason the registry is.
+///
+/// A self-test fixture is named by a registry entry as `fixtures/clean.png`,
+/// and that path used to be resolved against the directory the command was
+/// typed in. Measured on 2026-09-29, from a directory that was not a checkout:
+/// `doctor` reported six tools BROKEN that the identical binary reported
+/// VERIFIED one directory later. The tools were fine. The harness could not
+/// find its own fixtures and said so in the vocabulary of a tool failure.
+///
+/// Reporting somebody's working installation as broken is worse than refusing
+/// to check it, so the files travel with the binary. Six images, 344 KB.
 fn write_embedded_fixtures(out_dir: &std::path::Path) {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"),

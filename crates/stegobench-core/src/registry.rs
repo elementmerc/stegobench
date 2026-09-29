@@ -921,11 +921,8 @@ impl Entry {
                 );
             }
 
-            // A host entry runs the adapter and nothing else: there is no
-            // command inside the image to fall back to, so an entry without
-            // one names no program at all. Refused at load rather than
-            // discovered as a self-test failure, because `list` and `describe`
-            // would otherwise show a tool that can never be run.
+            // Refused at load rather than once per image, after the tool has
+            // already been launched and a corpus is half walked.
             if !PARSERS.contains(&inv.parser.as_str()) {
                 bad.push(format!(
                     "invoke.parser is {:?}, which is not a parser this build \
@@ -935,6 +932,11 @@ impl Entry {
                 ));
             }
 
+            // A host entry runs the adapter and nothing else: there is no
+            // command inside the image to fall back to, so an entry without
+            // one names no program at all. Refused at load rather than
+            // discovered as a self-test failure, because `list` and `describe`
+            // would otherwise show a tool that can never be run.
             if inv.host && inv.adapter.is_none() {
                 bad.push(
                     "invoke.host is set but no adapter is declared, and a host \
@@ -1452,6 +1454,40 @@ version_args = ["-v"]"#,
                 .iter()
                 .any(|p| p.contains("no adapter is declared")),
             "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    /// A typo here used to load happily and turn up once per image as "no
+    /// built-in parser named ...", after the tool had been launched and a
+    /// corpus was half walked.
+    #[test]
+    fn a_parser_no_build_carries_is_refused_at_load() {
+        let e = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zstegg\"",
+        );
+        let problems = e.validate().expect_err("a parser nothing can read");
+        assert!(
+            problems.iter().any(|p| p.contains("invoke.parser is")),
+            "refused for the wrong reason: {problems:?}"
+        );
+        // And it names the ones that would have worked, so the fix is in the
+        // message rather than in the source.
+        assert!(
+            problems.iter().any(|p| p.contains("zsteg")),
+            "the refusal does not say what is available: {problems:?}"
+        );
+
+        // The same entry with a real parser name is refused for nothing, so
+        // the arm above cannot be passing because every entry is refused.
+        let good = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        let remaining = good.validate().err().unwrap_or_default();
+        assert!(
+            !remaining.iter().any(|m| m.contains("invoke.parser is")),
+            "a parser this build carries was refused: {remaining:?}"
         );
     }
 
@@ -2044,13 +2080,11 @@ must_clear = "b.png"
         let whole = r.footprint();
         assert_eq!((whole.tools, whole.bundled_mb), (3, 700));
 
-        let two = Registry::footprint_of(
-            r.entries.values().filter(|e| e.name != "c"),
-        );
+        let two = Registry::footprint_of(r.entries.values().filter(|e| e.name != "c"));
         assert_eq!(
             (two.tools, two.bundled_mb, two.unique_images),
             (2, 300, 2),
-            "a subset that reports the whole registry's cost is the bug this              guards"
+            "a subset that reports the whole registry's cost is the bug this guards"
         );
     }
 
