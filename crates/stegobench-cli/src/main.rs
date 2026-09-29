@@ -282,7 +282,11 @@ fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
     // a container, a binary, a service and a corpus all answer here, so a
     // reader never has to know which of the four they are holding.
     if let Some(e) = reg.entries.get(name) {
-        let needs = needs::of_tool(e, &availability::check(e));
+        let needs = needs::of_tool(
+            e,
+            &availability::check(e, resolved.adapter_roots()),
+            resolved.adapter_roots(),
+        );
         let mut json = serde_json::to_value(e).unwrap_or(serde_json::Value::Null);
         if let Some(map) = json.as_object_mut() {
             map.insert("needs".into(), needs.to_json());
@@ -362,12 +366,14 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>) -> Out
     let mut undetermined = 0;
 
     for entry in reg.entries.values() {
-        let mut check = availability::check(entry);
+        let mut check = availability::check(entry, resolved.adapter_roots());
         // Only ask a tool to prove itself if its code is actually here. Running
         // a self-test against a missing image produces a failure that says
         // "broken" when the truth is "absent", and those need different fixes.
         let verdict = match fixtures {
-            Some(f) if check.presence.is_present() => selftest::run(entry, f.dir()),
+            Some(f) if check.presence.is_present() => {
+                selftest::run(entry, f.dir(), resolved.adapter_roots())
+            }
             _ => Verified::Skipped("not attempted".into()),
         };
         check.verified = match &verdict {
@@ -408,7 +414,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>) -> Out
         };
         // Computed from the availability answer already paid for, so nothing
         // here asks the container runtime a second time.
-        let needs = needs::of_tool(entry, &check);
+        let needs = needs::of_tool(entry, &check, resolved.adapter_roots());
         rows.push((check, verdict, detail, needs));
     }
 
@@ -1354,7 +1360,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     let mut runnable = Vec::new();
     let mut outcomes: Vec<(String, Outcome)> = Vec::new();
     for entry in &entries {
-        match availability::check(entry).presence {
+        match availability::check(entry, resolved.adapter_roots()).presence {
             Presence::Present { .. } => runnable.push(*entry),
             Presence::Unsupported { reason } => outcomes.push((
                 entry.name.clone(),
@@ -1449,6 +1455,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
             timeout,
             out,
             out_dir.as_deref(),
+            resolved.adapter_roots(),
             say,
         );
         outcomes.push((entry.name.clone(), outcome));
@@ -1559,6 +1566,7 @@ fn run_one<P>(
     timeout: u64,
     out: Option<&Path>,
     out_dir: Option<&Path>,
+    adapter_roots: &[PathBuf],
     say: P,
 ) -> Outcome
 where
@@ -1580,6 +1588,7 @@ where
         prepared,
         records,
         std::time::Duration::from_secs(timeout),
+        adapter_roots,
         |line: &str| say(line),
     ) {
         Ok(pair) => pair,
@@ -1926,6 +1935,19 @@ fn cmd_report(paths: &[PathBuf], format: ReportFormat, out: Option<&Path>) -> Ou
     output
 }
 
+/// Where a fetch lands: the flag, then the environment, then the default.
+///
+/// Split out from `cmd_fetch` with the environment's answer handed in so the
+/// precedence, and the treatment of an empty variable, are testable without
+/// `set_var`. Setting a variable is process-global and this suite runs its
+/// tests on several threads at once.
+fn fetch_dest(named: Option<&Path>, from_env: Option<&str>) -> PathBuf {
+    named
+        .map(Path::to_path_buf)
+        .or_else(|| from_env.filter(|v| !v.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(fetch::default_dest)
+}
+
 /// Download one tier of one corpus.
 ///
 /// THE ORDER HERE IS THE POINT.
@@ -1968,10 +1990,10 @@ fn cmd_fetch(
     }
 
     let limits = fetch::limits(max_bytes, budget_minutes);
-    let dest = dest
-        .map(Path::to_path_buf)
-        .or_else(|| registry::non_empty("STEGOBENCH_CORPUS_DIR").map(std::path::PathBuf::from))
-        .unwrap_or_else(fetch::default_dest);
+    let dest = fetch_dest(
+        dest,
+        registry::non_empty("STEGOBENCH_CORPUS_DIR").as_deref(),
+    );
     // A pre-flight rather than a discovery an hour in: an unwritable
     // destination is the same failure whether it is found now or after 48 GB.
     if let Err(e) = std::fs::create_dir_all(&dest) {
@@ -2390,6 +2412,28 @@ mod tests {
     /// read by the resolver that wants it, through `non_empty`, which treats
     /// empty as unset. This walks the real tree so a later argument cannot
     /// reintroduce the binding quietly.
+    /// The third of the three variables, and the only one whose resolver is
+    /// here rather than in a module of its own. Asserted through the seam,
+    /// because setting a variable is process-global and this suite runs its
+    /// tests on several threads at once.
+    #[test]
+    fn the_corpus_directory_comes_from_the_flag_then_the_environment_then_the_default() {
+        let named = Path::new("/tmp/named-by-the-flag");
+        assert_eq!(
+            fetch_dest(Some(named), Some("/tmp/named-by-the-variable")),
+            named,
+            "the environment overrode an explicit --dest"
+        );
+        assert_eq!(
+            fetch_dest(None, Some("/tmp/named-by-the-variable")),
+            Path::new("/tmp/named-by-the-variable"),
+            "the variable was not read"
+        );
+        // An empty value is not an answer, so the default answers instead.
+        assert_eq!(fetch_dest(None, Some("")), fetch::default_dest());
+        assert_eq!(fetch_dest(None, None), fetch::default_dest());
+    }
+
     #[test]
     fn no_argument_reads_its_environment_variable_through_clap() {
         fn walk(cmd: &clap::Command, found: &mut Vec<String>) {

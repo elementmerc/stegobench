@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stegobench_core::registry::Entry;
 
+pub mod adapter;
 pub mod availability;
 pub mod exec;
 pub mod parsers;

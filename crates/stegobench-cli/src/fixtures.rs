@@ -195,9 +195,19 @@ fn beside_executable() -> Vec<PathBuf> {
 
 /// Finds the fixtures, unpacking the built-in copy only if nothing is on disk.
 pub fn resolve(explicit: Option<&Path>) -> Result<Fixtures, Error> {
+    resolve_with(explicit, non_empty("STEGOBENCH_FIXTURES").as_deref())
+}
+
+/// [`resolve`], with the environment's answer handed in rather than read.
+///
+/// The seam exists so the precedence between `--fixtures` and
+/// `STEGOBENCH_FIXTURES`, and the treatment of an empty variable, are testable
+/// without `set_var`, which is process-global and would reach into every test
+/// running beside it.
+pub fn resolve_with(explicit: Option<&Path>, from_env: Option<&str>) -> Result<Fixtures, Error> {
     let named = explicit
         .map(PathBuf::from)
-        .or_else(|| non_empty("STEGOBENCH_FIXTURES").map(PathBuf::from));
+        .or_else(|| from_env.filter(|v| !v.is_empty()).map(PathBuf::from));
     if let Some(p) = named {
         if p.is_dir() {
             return Ok(Fixtures {
@@ -321,6 +331,45 @@ mod tests {
             path.len() > 1,
             "nothing but the working directory was searched"
         );
+    }
+
+    /// `STEGOBENCH_FIXTURES` used to be bound with clap's `env`, where a
+    /// variable that is set but empty refused every command. It is read by
+    /// this resolver now, and the behaviour is asserted through the seam
+    /// rather than by setting a process-global variable in a suite that runs
+    /// its tests on several threads at once.
+    #[test]
+    fn the_environment_names_a_fixture_directory_only_when_it_has_something_in_it() {
+        let tmp = tempfile::tempdir().expect("scratch");
+        let from_env = tmp.path().join("from-env");
+        let from_flag = tmp.path().join("from-flag");
+        for dir in [&from_env, &from_flag] {
+            std::fs::create_dir_all(dir).expect("dirs");
+        }
+
+        let f = resolve_with(None, Some(&from_env.display().to_string())).expect("resolves");
+        assert_eq!(f.dir(), from_env);
+        assert_eq!(f.source().tag(), "explicit");
+
+        let f = resolve_with(Some(&from_flag), Some(&from_env.display().to_string()))
+            .expect("resolves");
+        assert_eq!(
+            f.dir(),
+            from_flag,
+            "the environment overrode an explicit --fixtures"
+        );
+
+        // A named directory that is not there is an ERROR, never a quiet
+        // fall-through to a different set of images.
+        let missing = resolve_with(None, Some(&tmp.path().join("nope").display().to_string()));
+        assert!(
+            matches!(missing, Err(Error::NamedButMissing(_))),
+            "a named fixture directory that is absent fell through"
+        );
+
+        // An empty value is not an answer, so this falls through to the
+        // search and finds something rather than refusing on a path of "".
+        resolve_with(None, Some("")).expect("an empty variable is ignored");
     }
 
     #[test]

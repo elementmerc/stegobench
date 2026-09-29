@@ -35,7 +35,7 @@
 //! could detect.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use stegobench_core::registry::Entry;
@@ -213,12 +213,17 @@ impl Prior {
 /// `progress` is called at most once per [`HEARTBEAT`] with the tally so far,
 /// so a caller can print a line without this module deciding what a line looks
 /// like.
+///
+/// `adapter_roots` are the trees a relative `invoke.adapter` is resolved
+/// against, and are passed straight through to [`crate::selftest::read_one`]
+/// so a scoring run asks the same question the self-test asked.
 pub fn score<I, S, P>(
     entry: &Entry,
     items: I,
     already: &Path,
     sink: &mut S,
     timeout: Duration,
+    adapter_roots: &[PathBuf],
     mut progress: P,
 ) -> Result<Tally, RunError>
 where
@@ -252,8 +257,8 @@ where
             continue;
         }
 
-        let record =
-            crate::selftest::read_one(entry, &item.path, timeout).into_record(item.id.as_str());
+        let record = crate::selftest::read_one(entry, &item.path, timeout, adapter_roots)
+            .into_record(item.id.as_str());
         if record.error.is_some() {
             tally.errored += 1;
         }
@@ -335,6 +340,7 @@ mod tests {
             &dir.path().join("none.jsonl"),
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect("ran");
@@ -367,6 +373,7 @@ mod tests {
             &record_path,
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect("ran");
@@ -396,6 +403,7 @@ mod tests {
             &record_path,
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect_err("it should refuse");
@@ -422,6 +430,7 @@ mod tests {
             &record_path,
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect("ran");
@@ -451,6 +460,7 @@ mod tests {
             &record_path,
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect("ran");
@@ -476,6 +486,7 @@ mod tests {
             &dir.path().join("none.jsonl"),
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect("ran");
@@ -499,6 +510,7 @@ mod tests {
             &dir.path().join("none.jsonl"),
             &mut sink,
             Duration::from_millis(200),
+            &[],
             |_| {},
         )
         .expect("ran");
@@ -531,6 +543,7 @@ mod tests {
             &dir.path().join("none.jsonl"),
             &mut sink,
             Duration::from_secs(10),
+            &[],
             |_| {},
         )
         .expect("ran");

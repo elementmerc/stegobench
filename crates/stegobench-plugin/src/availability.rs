@@ -33,7 +33,7 @@
 //! listening at that address is the self-test's question, and nothing in this
 //! file goes and asks it.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use stegobench_core::registry::{Entry, Invoke};
@@ -160,10 +160,14 @@ fn binary_present(entry: &Entry, program: &str) -> Presence {
 /// reads a secret's value, and no value reaches the returned structure, which
 /// is what keeps a token out of `doctor --json` output that somebody will paste
 /// into a bug report.
-pub fn check(entry: &Entry) -> Availability {
+///
+/// `adapter_roots` are the trees a relative `invoke.adapter` is resolved
+/// against, and are empty for a caller that has no registry directory to name.
+/// See [`crate::adapter`] for why the entry does not carry the answer itself.
+pub fn check(entry: &Entry, adapter_roots: &[PathBuf]) -> Availability {
     let presence = match unsupported_here(entry) {
         Some(p) => p,
-        None => present_here(entry),
+        None => present_here(entry, adapter_roots),
     };
 
     let missing_secrets = entry
@@ -242,7 +246,7 @@ fn unsupported_here(entry: &Entry) -> Option<Presence> {
 /// two columns that already exist: an unset endpoint is a presence answer, and
 /// a service that is down is a self-test failure carrying the adapter's own
 /// message about the address it could not reach.
-fn host_adapter_present(invoke: &Invoke) -> Presence {
+fn host_adapter_present(invoke: &Invoke, adapter_roots: &[PathBuf]) -> Presence {
     // Refused by `Entry::validate`, so this is only reachable for an entry
     // built in memory. It is still an entry fault rather than a missing
     // install, which is why it is Unknown and not Absent.
@@ -254,19 +258,15 @@ fn host_adapter_present(invoke: &Invoke) -> Presence {
         };
     };
 
-    // Resolved exactly as `run_host_adapter` resolves it, against the working
-    // directory, so presence cannot say yes to a path a run would then fail to
-    // open. The hint is the whole of the difference between a two second fix
-    // and a bug report.
-    let adapter = match Path::new(rel).canonicalize() {
+    // Resolved exactly as `run_host_adapter` resolves it, against the same
+    // roots, so presence cannot say yes to a path a run would then fail to
+    // open. The message names where it looked, which is the whole of the
+    // difference between a two second fix and a bug report.
+    let adapter = match crate::adapter::resolve(rel, adapter_roots) {
         Ok(p) => p,
-        Err(e) => {
+        Err(why) => {
             return Presence::Absent {
-                reason: format!(
-                    "adapter {rel} could not be opened: {e}. A relative path is \
-                     resolved against the directory you run from, so run from \
-                     the root of the clone or give the entry an absolute path"
-                ),
+                reason: why.to_string(),
             }
         }
     };
@@ -324,13 +324,13 @@ fn host_adapter_present(invoke: &Invoke) -> Presence {
     }
 }
 
-fn present_here(entry: &Entry) -> Presence {
+fn present_here(entry: &Entry, adapter_roots: &[PathBuf]) -> Presence {
     // A host adapter wins over both routes, and it has to win in exactly the
     // order `read_one` dispatches: presence is only worth anything if it asks
     // about the program a run would actually launch.
     if let Some(invoke) = &entry.invoke {
         if invoke.host {
-            return host_adapter_present(invoke);
+            return host_adapter_present(invoke, adapter_roots);
         }
     }
     match (&entry.image, &entry.binary) {
@@ -350,6 +350,15 @@ fn present_here(entry: &Entry) -> Presence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These tests are about PRESENCE, not about where an adapter lives, so
+    /// they ask with no roots. That falls back to the directory the test runs
+    /// in, which is exactly what the signature without roots used to do, so
+    /// every expectation below still means what it meant. Adapter resolution
+    /// has its own tests in `crate::adapter`.
+    fn check(entry: &Entry) -> Availability {
+        super::check(entry, &[])
+    }
 
     fn entry(toml_text: &str) -> Entry {
         toml::from_str(toml_text).expect("parses")
@@ -729,20 +738,52 @@ mod tests {
         );
     }
 
+    /// The message a stranger meets. It used to end "run from the root of the
+    /// clone", which is no advice at all to somebody who installed a package,
+    /// and that reader is exactly who the built-in registry exists for.
     #[test]
-    fn a_service_whose_adapter_is_missing_says_where_it_looked() {
+    fn a_service_whose_adapter_is_missing_says_where_it_looked_and_not_which_clone() {
+        let root = tempfile::tempdir().expect("tmp");
         let svc = Service::new();
         let mut e = svc.entry("", "");
         e.invoke.as_mut().unwrap().adapter = Some("plugins/adapters/not-here-xyzzy.py".into());
-        match check(&e).presence {
+        match super::check(&e, &[root.path().to_path_buf()]).presence {
             Presence::Absent { reason } => {
                 assert!(reason.contains("not-here-xyzzy.py"), "{reason}");
                 assert!(
-                    reason.contains("directory you run from"),
-                    "the usual cause is the working directory: {reason}"
+                    reason.contains(&root.path().display().to_string()),
+                    "it does not say where it looked: {reason}"
+                );
+                assert!(
+                    !reason.contains("clone"),
+                    "a packaged install is still being sent to a clone: {reason}"
                 );
             }
             other => panic!("expected Absent, got {other:?}"),
+        }
+    }
+
+    /// The other half: an adapter that IS under the root is found, so the
+    /// refusal above is a real finding rather than this path never working.
+    #[test]
+    fn a_service_whose_adapter_is_under_the_root_is_present() {
+        let root = tempfile::tempdir().expect("tmp");
+        let adapter = root.path().join("plugins").join("adapters").join("one.py");
+        std::fs::create_dir_all(adapter.parent().expect("parent")).expect("dirs");
+        std::fs::write(&adapter, b"#!/usr/bin/env python3\n").expect("written");
+
+        let svc = Service::new();
+        let mut e = svc.entry("", "");
+        e.invoke.as_mut().unwrap().adapter = Some("plugins/adapters/one.py".into());
+        // Nothing found it from the working directory, which is what the old
+        // resolution had to rely on.
+        assert!(matches!(
+            check(&e).presence,
+            Presence::Absent { .. } | Presence::Unknown { .. }
+        ));
+        match super::check(&e, &[root.path().to_path_buf()]).presence {
+            Presence::Present { pin } => assert!(pin.starts_with("adapter "), "{pin}"),
+            other => panic!("expected Present, got {other:?}"),
         }
     }
 

@@ -135,6 +135,12 @@ pub struct Resolved {
     /// `None` for every registry read from disk, which has its adapters beside
     /// it already.
     _adapters: Option<tempfile::TempDir>,
+    /// The trees a relative `invoke.adapter` is resolved against.
+    ///
+    /// Carried here rather than written into the entries, because an entry is
+    /// a reflection of the TOML a human wrote and `describe` publishes it. See
+    /// `stegobench_plugin::adapter`.
+    adapter_roots: Vec<PathBuf>,
 }
 
 impl Resolved {
@@ -148,18 +154,32 @@ impl Resolved {
             registry: load(dir)?,
             source: Source::Explicit(dir.to_path_buf()),
             _adapters: None,
+            adapter_roots: stegobench_plugin::adapter::roots_for_registry(dir),
         })
     }
 
     /// The copy compiled into this binary.
     pub fn built_in() -> Result<Self, Error> {
-        let mut registry = embedded()?;
-        let adapters = unpack_built_in_adapters(&mut registry)?;
+        let registry = embedded()?;
+        let adapters = unpack_built_in_adapters(&registry)?;
+        // The scratch directory itself, because the adapters are unpacked into
+        // it side by side under their plain names rather than under the
+        // `plugins/adapters/` the entries declare.
+        let adapter_roots = adapters
+            .as_ref()
+            .map(|d| vec![d.path().to_path_buf()])
+            .unwrap_or_default();
         Ok(Resolved {
             registry,
             source: Source::BuiltIn,
             _adapters: adapters,
+            adapter_roots,
         })
+    }
+
+    /// The trees a relative `invoke.adapter` is resolved against.
+    pub fn adapter_roots(&self) -> &[PathBuf] {
+        &self.adapter_roots
     }
 
     /// The JSON block every command that reads a registry reports.
@@ -220,9 +240,23 @@ fn load(dir: &Path) -> Result<Registry, Error> {
 /// Works out which registry answers, in the order the module docstring sets
 /// out, and loads it.
 pub fn resolve(explicit: Option<&Path>) -> Result<Resolved, Error> {
+    resolve_with(explicit, non_empty("STEGOBENCH_REGISTRY").as_deref())
+}
+
+/// [`resolve`], with the environment's answer handed in rather than read.
+///
+/// The seam exists so the precedence between `--registry` and
+/// `STEGOBENCH_REGISTRY`, and the treatment of an empty variable, are testable
+/// without `set_var`. Setting a variable is process-global, and this suite runs
+/// its tests on several threads at once, so a test that set one would be
+/// reaching into every other test running beside it.
+pub fn resolve_with(explicit: Option<&Path>, from_env: Option<&str>) -> Result<Resolved, Error> {
+    // `--registry` wins, and an empty variable is not an answer: `non_empty`
+    // has already discarded one, and a caller handing in `Some("")` means the
+    // same thing and is treated the same way.
     let named = explicit
         .map(Path::to_path_buf)
-        .or_else(|| non_empty("STEGOBENCH_REGISTRY").map(PathBuf::from));
+        .or_else(|| from_env.filter(|v| !v.is_empty()).map(PathBuf::from));
     if let Some(dir) = named {
         return Resolved::from_dir(&dir);
     }
@@ -240,6 +274,7 @@ pub fn resolve(explicit: Option<&Path>) -> Result<Resolved, Error> {
                 registry,
                 source: make(dir.clone()),
                 _adapters: None,
+                adapter_roots: stegobench_plugin::adapter::roots_for_registry(dir),
             });
         }
     }
@@ -402,22 +437,17 @@ fn embedded() -> Result<Registry, Error> {
     Ok(reg)
 }
 
-/// Writes the built-in adapters out and repoints the entries at them.
+/// Writes the built-in adapters into a scratch directory for this run.
 ///
-/// WHY THE BUILT-IN REGISTRY CANNOT LEAVE THESE PATHS ALONE
-/// --------------------------------------------------------
+/// WHY THE BUILT-IN REGISTRY NEEDS THIS AT ALL
+/// -------------------------------------------
 /// A `host = true` entry names its adapter the way the repository holds it,
-/// `plugins/adapters/aletheia_one.py`, and that path is resolved against the
-/// directory the user runs from. Inside a checkout that is correct. The
-/// built-in copy exists for the machine that has NO checkout, so its three
-/// entries that declare an adapter would name a file that is not there and
-/// fail with advice ("run from the root of the clone") that a reader who
-/// installed a package cannot act on.
-///
-/// This closes the built-in case only. A registry found beside the executable
-/// or in a data directory still resolves its adapter paths against the working
-/// directory, because nothing rebases them against the directory the registry
-/// was read from. That gap is open.
+/// `plugins/adapters/aletheia_one.py`, which is relative to the tree the
+/// registry sits in. The built-in copy has no tree: it exists for the machine
+/// with NO checkout and no installed registry, so its three entries that
+/// declare an adapter would name a file that is not there and fail with advice
+/// ("run from the root of the clone") that a reader who installed a package
+/// cannot act on.
 ///
 /// The bytes are therefore carried in the binary beside the TOML and written
 /// to a temporary directory held for the life of the command, which is the
@@ -425,9 +455,15 @@ fn embedded() -> Result<Registry, Error> {
 /// cache has to be invalidated when an adapter changes, because the copy is
 /// only ever as old as the binary.
 ///
+/// The ENTRIES ARE NOT TOUCHED. The directory becomes this resolution's only
+/// adapter root, and `stegobench_plugin::adapter` matches the declared path
+/// against it by file name. Rewriting the entries is what this used to do, and
+/// it put a scratch path that changed every run, and was deleted before the
+/// reader saw it, into `describe` and `list --json`.
+///
 /// Returns `None` when no entry declares an adapter, so a registry that needs
 /// no adapters writes nothing at all.
-fn unpack_built_in_adapters(registry: &mut Registry) -> Result<Option<tempfile::TempDir>, Error> {
+fn unpack_built_in_adapters(registry: &Registry) -> Result<Option<tempfile::TempDir>, Error> {
     let wanted: Vec<String> = registry
         .entries
         .values()
@@ -442,7 +478,7 @@ fn unpack_built_in_adapters(registry: &mut Registry) -> Result<Option<tempfile::
         .tempdir()
         .map_err(|e| Error::BuiltInBroken(format!("could not unpack the adapters: {e}")))?;
 
-    let mut written: std::collections::HashMap<&str, PathBuf> = std::collections::HashMap::new();
+    let mut written: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (name, bytes) in EMBEDDED_ADAPTERS {
         // The names come from a directory listing at build time, so they carry
         // no separators. Checked anyway, because this writes files.
@@ -455,7 +491,7 @@ fn unpack_built_in_adapters(registry: &mut Registry) -> Result<Option<tempfile::
         std::fs::write(&dest, bytes).map_err(|e| {
             Error::BuiltInBroken(format!("could not write the built-in adapter {name}: {e}"))
         })?;
-        written.insert(name, dest);
+        written.insert(*name);
     }
 
     // An entry naming an adapter this binary does not carry is a broken build
@@ -466,26 +502,10 @@ fn unpack_built_in_adapters(registry: &mut Registry) -> Result<Option<tempfile::
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if !written.contains_key(base) {
+        if !written.contains(base) {
             return Err(Error::BuiltInBroken(format!(
                 "an entry names the adapter {rel}, which is not compiled into this binary"
             )));
-        }
-    }
-
-    for entry in registry.entries.values_mut() {
-        let Some(invoke) = entry.invoke.as_mut() else {
-            continue;
-        };
-        let Some(rel) = invoke.adapter.as_ref() else {
-            continue;
-        };
-        let base = Path::new(rel)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if let Some(dest) = written.get(base) {
-            invoke.adapter = Some(dest.display().to_string());
         }
     }
 
@@ -506,7 +526,7 @@ mod tests {
     /// directory, all three reported BROKEN with advice to run from the root
     /// of a clone the reader does not have.
     #[test]
-    fn every_built_in_adapter_is_a_file_that_is_actually_there() {
+    fn every_built_in_adapter_resolves_against_the_roots_this_resolution_carries() {
         let resolved = Resolved::built_in().expect("the built-in registry loads");
         let declared: Vec<&str> = resolved
             .registry
@@ -520,37 +540,46 @@ mod tests {
              is now true, delete it rather than leaving it passing vacuously"
         );
         for path in declared {
-            let p = Path::new(path);
+            // The ENTRY is untouched: still the relative path the TOML wrote.
+            // Rewriting it is what put a scratch directory into `describe`.
             assert!(
-                p.is_absolute(),
-                "{path} is relative, so it resolves against whatever directory \
-                 the user ran from"
+                Path::new(path).is_relative(),
+                "{path} was rewritten into the entry, which is what makes \
+                 `describe --json` differ between two runs of one binary"
             );
-            assert!(p.is_file(), "{path} is not there");
+            let found = stegobench_plugin::adapter::resolve(path, resolved.adapter_roots())
+                .unwrap_or_else(|why| panic!("{why}"));
+            assert!(found.is_file(), "{} is not there", found.display());
         }
     }
 
     /// The temporary directory lives on the `Resolved`, so a caller that keeps
-    /// only the registry would be holding paths whose files had been deleted.
-    /// Both halves are asserted here: the files are there while the resolution
-    /// is, and gone once it is dropped.
+    /// only the roots would be holding a directory whose files had been
+    /// deleted. Both halves are asserted: the adapters are there while the
+    /// resolution is, and gone once it is dropped.
     #[test]
     fn the_unpacked_adapters_live_exactly_as_long_as_the_resolution() {
         let resolved = Resolved::built_in().expect("the built-in registry loads");
-        let first = resolved
+        let declared = resolved
             .registry
             .entries
             .values()
             .find_map(|e| e.invoke.as_ref().and_then(|i| i.adapter.clone()))
             .expect("at least one entry declares an adapter");
-        assert!(
-            Path::new(&first).is_file(),
-            "{first} is not there while the resolution that named it is alive"
-        );
+        let found = stegobench_plugin::adapter::resolve(&declared, resolved.adapter_roots())
+            .expect("it resolves while the resolution is alive");
+        assert!(found.is_file());
+
+        let roots: Vec<PathBuf> = resolved.adapter_roots().to_vec();
         drop(resolved);
         assert!(
-            !Path::new(&first).exists(),
-            "{first} outlived its resolution, so the scratch directory is leaking"
+            !found.exists(),
+            "{} outlived its resolution, so the scratch directory is leaking",
+            found.display()
+        );
+        assert!(
+            stegobench_plugin::adapter::resolve(&declared, &roots).is_err(),
+            "the adapter still resolves after the resolution was dropped"
         );
     }
 
@@ -571,41 +600,15 @@ mod tests {
             built_in.corpora.keys().collect::<Vec<_>>(),
             "the built-in registry names different corpora from plugins/registry"
         );
+        // Compared LITERALLY, adapter path included. This used to need a
+        // carve-out, because `Registry::load` rewrote `invoke.adapter` to an
+        // absolute path and the built-in copy, parsed from strings compiled
+        // into the binary, had no directory to rewrite against. Nothing
+        // rewrites an entry any more, so the two are the same bytes and the
+        // carve-out that hid a whole field from this comparison is gone.
         for (name, entry) in &disk.entries {
-            // The adapter path is compared separately, and by FILE NAME.
-            //
-            // `Registry::load` makes it absolute against the directory the
-            // registry was read from, which is the fix for `doctor` reporting
-            // two working detectors as broken from outside a checkout. The
-            // built-in copy is parsed from strings compiled into this binary
-            // and has no directory to resolve against, so it keeps what the
-            // TOML said. Comparing the two literally would assert that the
-            // resolution never happened, which is the opposite of what is
-            // wanted; comparing the file names still catches the thing this
-            // test exists for, which is the two registries naming different
-            // adapters.
-            let mut disk_entry = entry.clone();
-            let built = built_in
-                .entries
-                .get(name)
-                .unwrap_or_else(|| panic!("{name} is missing from the built-in registry"));
-            let leaf = |e: &stegobench_core::registry::Entry| {
-                e.invoke.as_ref().and_then(|i| {
-                    i.adapter
-                        .as_deref()
-                        .map(|a| Path::new(a).file_name().map(|n| n.to_owned()))
-                })
-            };
             assert_eq!(
-                leaf(&disk_entry),
-                leaf(built),
-                "{name} names a different adapter in the built-in registry"
-            );
-            if let Some(invoke) = disk_entry.invoke.as_mut() {
-                invoke.adapter = built.invoke.as_ref().and_then(|i| i.adapter.clone());
-            }
-            assert_eq!(
-                Some(&disk_entry),
+                Some(entry),
                 built_in.entries.get(name),
                 "{name} differs between the built-in registry and plugins/registry"
             );
@@ -617,6 +620,73 @@ mod tests {
                 "{id} differs between the built-in registry and plugins/registry"
             );
         }
+    }
+
+    /// `STEGOBENCH_REGISTRY` used to be bound with clap's `env`, which reads
+    /// a variable that is set but empty as a flag supplied without its value
+    /// and so refused EVERY command, `--help` included. It is read by this
+    /// resolver now, and the whole of that behaviour is asserted here through
+    /// the seam rather than by setting a process-global variable in a suite
+    /// that runs its tests on several threads at once.
+    #[test]
+    fn the_environment_names_a_registry_only_when_it_has_something_in_it() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let from_env = tmp.path().join("from-env");
+        let from_flag = tmp.path().join("from-flag");
+        for dir in [&from_env, &from_flag] {
+            std::fs::create_dir_all(dir).expect("dirs");
+        }
+
+        // The variable is read.
+        let r = resolve_with(None, Some(&from_env.display().to_string())).expect("loads");
+        assert_eq!(r.source.path(), Some(from_env.as_path()));
+
+        // The flag beats it.
+        let r =
+            resolve_with(Some(&from_flag), Some(&from_env.display().to_string())).expect("loads");
+        assert_eq!(
+            r.source.path(),
+            Some(from_flag.as_path()),
+            "the environment overrode an explicit --registry"
+        );
+
+        // An empty value is not an answer. If it were read as one, this would
+        // try to load "" and fail rather than falling through to the search.
+        let empty = resolve_with(None, Some(""));
+        assert!(
+            empty.is_err() || empty.expect("ok").source.path() != Some(Path::new("")),
+            "an empty variable was read as a registry path"
+        );
+
+        // A path that IS named and is not there is an error, never a quiet
+        // fall back to some other registry.
+        let missing = resolve_with(None, Some(&tmp.path().join("nope").display().to_string()));
+        assert!(
+            missing.is_err(),
+            "a named registry that is absent fell back"
+        );
+    }
+
+    /// The roots a registry hands its adapters, for both layouts that exist.
+    #[test]
+    fn a_resolved_registry_carries_the_roots_its_adapters_need() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let registry = tmp
+            .path()
+            .join("prefix")
+            .join("stegobench")
+            .join("registry");
+        std::fs::create_dir_all(&registry).expect("dirs");
+        let resolved = Resolved::from_dir(&registry).expect("an empty registry loads");
+        let roots = resolved.adapter_roots();
+        assert!(
+            roots.contains(&tmp.path().join("prefix")),
+            "the checkout layout root is missing: {roots:?}"
+        );
+        assert!(
+            roots.contains(&tmp.path().join("prefix").join("stegobench")),
+            "the install layout root is missing: {roots:?}"
+        );
     }
 
     /// A check on the build script rather than on the loader: a walk that

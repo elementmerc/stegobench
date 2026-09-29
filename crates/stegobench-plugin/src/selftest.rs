@@ -12,7 +12,7 @@
 //!
 //! This is the module that turns `doctor`'s "not verified" into an answer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -48,7 +48,13 @@ pub enum Verified {
 /// The container is locked down the way every run in this project is: no
 /// network, no capabilities, no new privileges, read-only root, and a memory
 /// cap. A self-test is still running somebody else's code on our machine.
-fn run_one(entry: &Entry, image: &str, fixture: &Path, timeout: Duration) -> Reading {
+fn run_one(
+    entry: &Entry,
+    image: &str,
+    fixture: &Path,
+    timeout: Duration,
+    adapter_roots: &[PathBuf],
+) -> Reading {
     let Some(invoke) = &entry.invoke else {
         return Reading::Failed("entry declares no invoke block".into());
     };
@@ -97,8 +103,9 @@ fn run_one(entry: &Entry, image: &str, fixture: &Path, timeout: Duration) -> Rea
     // An adapter is mounted read-only beside the image it reads.
     let mut adapter_inner = String::new();
     if let Some(rel) = &invoke.adapter {
-        let Ok(abs) = Path::new(rel).canonicalize() else {
-            return Reading::Failed(format!("adapter {rel} not found"));
+        let abs = match crate::adapter::resolve(rel, adapter_roots) {
+            Ok(p) => p,
+            Err(why) => return Reading::Failed(why.to_string()),
         };
         let Some(base) = abs.file_name().and_then(|n| n.to_str()) else {
             return Reading::Failed("adapter has no usable filename".into());
@@ -215,20 +222,31 @@ fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
     }
 }
 
-/// Dispatches to whichever kind of plugin this entry is.
-/// Ask this tool about one file.
+/// Ask this tool about one file, dispatching on whichever kind of plugin the
+/// entry is.
 ///
 /// Public because it is what a run does, once per item: `doctor` asks about
 /// two fixtures and `score` asks about a corpus, and they must ask the same
 /// way or the self-test stops predicting anything about the run.
-pub fn read_one(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
+pub fn read_one(
+    entry: &Entry,
+    fixture: &Path,
+    timeout: Duration,
+    adapter_roots: &[PathBuf],
+) -> Reading {
     // A host adapter wins over the image: the entry names an image to identify
     // the subject, but the thing to run is here, not in it.
     if entry.invoke.as_ref().is_some_and(|i| i.host) {
-        return run_host_adapter(entry, fixture, timeout);
+        return run_host_adapter(entry, fixture, timeout, adapter_roots);
     }
     match (&entry.image, &entry.binary) {
-        (Some(img), _) => run_one(entry, &img.reference.clone(), fixture, timeout),
+        (Some(img), _) => run_one(
+            entry,
+            &img.reference.clone(),
+            fixture,
+            timeout,
+            adapter_roots,
+        ),
         (_, Some(_)) => run_binary(entry, fixture, timeout),
         _ => Reading::Failed("entry declares neither an image nor a binary".into()),
     }
@@ -240,7 +258,12 @@ pub fn read_one(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
 /// where the service lives. Secrets are NOT handled here: a service consumes
 /// its credentials when it starts, which is the operator's business, and this
 /// only asks it a question.
-fn run_host_adapter(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
+fn run_host_adapter(
+    entry: &Entry,
+    fixture: &Path,
+    timeout: Duration,
+    adapter_roots: &[PathBuf],
+) -> Reading {
     let Some(invoke) = &entry.invoke else {
         return Reading::Failed("entry declares no invoke block".into());
     };
@@ -250,9 +273,9 @@ fn run_host_adapter(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading
     if !fixture.is_file() {
         return Reading::Failed(format!("fixture {} not found", fixture.display()));
     }
-    let adapter = match Path::new(rel).canonicalize() {
+    let adapter = match crate::adapter::resolve(rel, adapter_roots) {
         Ok(p) => p.display().to_string(),
-        Err(e) => return Reading::Failed(format!("adapter {rel} not found: {e}")),
+        Err(why) => return Reading::Failed(why.to_string()),
     };
     let file = fixture.display().to_string();
     let program = invoke
@@ -288,8 +311,9 @@ fn run_host_adapter(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading
 
 /// Asks a tool both questions.
 ///
-/// `fixtures_dir` holds the files the entry's selftest block names.
-pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
+/// `fixtures_dir` holds the files the entry's selftest block names, and
+/// `adapter_roots` the trees a relative `invoke.adapter` is resolved against.
+pub fn run(entry: &Entry, fixtures_dir: &Path, adapter_roots: &[PathBuf]) -> Verified {
     // An embedder cannot be asked to tell two images apart. The honest check
     // is whether what goes in comes back out.
     if entry.kind == stegobench_core::registry::Kind::Embedder {
@@ -327,16 +351,12 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         }
     }
 
-    // The same distinction for the adapter script. `Registry::load` makes this
-    // path absolute against the tree the registry sits in, so reaching here
-    // means it genuinely is not on this machine rather than that the command
-    // was typed somewhere unexpected.
-    if let Some(adapter) = entry.invoke.as_ref().and_then(|i| i.adapter.as_deref()) {
-        if !Path::new(adapter).is_file() {
-            return Verified::Skipped(format!(
-                "adapter {adapter} was not found, so this tool was never asked. \
-                 The registry names it relative to the directory holding `plugins/`"
-            ));
+    // The same distinction for the adapter script. Resolved against the roots
+    // the registry was read from, so reaching here means it genuinely is not on
+    // this machine rather than that the command was typed somewhere unexpected.
+    if let Some(declared) = entry.invoke.as_ref().and_then(|i| i.adapter.as_deref()) {
+        if let Err(why) = crate::adapter::resolve(declared, adapter_roots) {
+            return Verified::Skipped(format!("{why}, so this tool was never asked"));
         }
     }
 
@@ -345,8 +365,13 @@ pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
 
     // A self-test asks the same question a run asks, with the same deadline,
     // so that passing here predicts something about scoring a corpus.
-    let on_stego = read_one(entry, &detect_path, crate::exec::ITEM_TIMEOUT);
-    let on_clean = read_one(entry, &clear_path, crate::exec::ITEM_TIMEOUT);
+    let on_stego = read_one(
+        entry,
+        &detect_path,
+        crate::exec::ITEM_TIMEOUT,
+        adapter_roots,
+    );
+    let on_clean = read_one(entry, &clear_path, crate::exec::ITEM_TIMEOUT, adapter_roots);
 
     let subject = entry.maintainer == stegobench_core::registry::Maintainer::Subject;
 
@@ -388,6 +413,13 @@ fn strip_prefix(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As in `availability`: these tests are about the verdict, not about
+    /// where an adapter lives, so they ask with no roots and get the same
+    /// working-directory fallback the signature without roots had.
+    fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
+        super::run(entry, fixtures_dir, &[])
+    }
 
     fn entry(extra: &str) -> Entry {
         toml::from_str(&format!(

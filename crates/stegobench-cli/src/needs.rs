@@ -161,7 +161,11 @@ fn runs_in_container(entry: &Entry) -> bool {
 /// Takes the availability answer rather than recomputing it, because
 /// `doctor` has already paid for it and asking the container runtime twice per
 /// tool would double the slowest part of that command.
-pub fn of_tool(entry: &Entry, availability: &Availability) -> Needs {
+pub fn of_tool(
+    entry: &Entry,
+    availability: &Availability,
+    adapter_roots: &[std::path::PathBuf],
+) -> Needs {
     if let Presence::Unsupported { reason } = &availability.presence {
         return Needs {
             readiness: Readiness::CannotRunHere,
@@ -177,7 +181,7 @@ pub fn of_tool(entry: &Entry, availability: &Availability) -> Needs {
     // presence reason's prose. A check that parses its own error messages
     // breaks silently the day somebody improves the wording.
     if !availability.presence.is_present() {
-        steps.extend(route_steps(entry, &availability.presence));
+        steps.extend(route_steps(entry, &availability.presence, adapter_roots));
     }
 
     // Asked whatever the presence answer was. A service can be perfectly
@@ -203,7 +207,11 @@ pub fn of_tool(entry: &Entry, availability: &Availability) -> Needs {
 }
 
 /// The steps particular to how this entry is run.
-fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
+fn route_steps(
+    entry: &Entry,
+    presence: &Presence,
+    adapter_roots: &[std::path::PathBuf],
+) -> Vec<Step> {
     let mut steps = Vec::new();
 
     if runs_in_container(entry) {
@@ -234,13 +242,12 @@ fn route_steps(entry: &Entry, presence: &Presence) -> Vec<Step> {
     // somewhere else entirely.
     if let Some(invoke) = &entry.invoke {
         if invoke.host {
-            if let Some(adapter) = &invoke.adapter {
-                if !std::path::Path::new(adapter).exists() {
-                    steps.push(Step::just(format!(
-                        "{adapter} could not be found. The path is relative \
-                         to where you run from, so run stegobench from the \
-                         root of the clone."
-                    )));
+            if let Some(declared) = &invoke.adapter {
+                // The refusal names where it looked. Telling a reader to run
+                // from the root of a clone, which is what this used to say, is
+                // no advice at all to the one who installed a package.
+                if let Err(why) = stegobench_plugin::adapter::resolve(declared, adapter_roots) {
+                    steps.push(Step::just(why.to_string()));
                 }
             }
             let program = invoke
@@ -379,7 +386,15 @@ mod tests {
     const SELFTEST: &str = "\n[selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n";
 
     fn availability(entry: &Entry) -> Availability {
-        stegobench_plugin::availability::check(entry)
+        stegobench_plugin::availability::check(entry, &[])
+    }
+
+    /// These tests are about the SHAPE of the needs block, not about where an
+    /// adapter lives, so they ask with no roots. That falls back to the
+    /// directory the test runs in, exactly as the signature without roots did.
+    /// Adapter resolution has its own tests in `stegobench_plugin::adapter`.
+    fn of_tool(entry: &Entry, availability: &Availability) -> Needs {
+        super::of_tool(entry, availability, &[])
     }
 
     /// The headline claim of this module, asserted rather than described: a

@@ -1102,54 +1102,13 @@ impl Registry {
     /// person who added the file is the last to find out. Corpora load the
     /// same way, deliberately, so the behaviour a reader predicts from one
     /// half holds for the other.
-    /// Makes `invoke.adapter` absolute, against the tree the registry sits in.
     ///
-    /// An entry names its adapter as `plugins/adapters/x.py`, and that is
-    /// relative to the directory CONTAINING `plugins/`, never to wherever the
-    /// command happened to be typed. Left relative it resolved against the
-    /// current directory, which is the same defect the registry search and the
-    /// fixture search were built to close, one layer further in.
-    ///
-    /// Measured 2026-09-29: from a directory that was not a checkout, `doctor`
-    /// reported aletheia-rs and aletheia-spa BROKEN with "adapter
-    /// plugins/adapters/aletheia_one.py not found". Both work. A scoring run
-    /// would have failed the same way, which is the half that matters more:
-    /// a self-test that cannot run is visible, and a detector that cannot be
-    /// driven halfway through a corpus is an afternoon.
-    ///
-    /// A path that resolves nowhere is left exactly as written, so the refusal
-    /// still quotes what the registry asked for rather than a path this
-    /// function invented.
-    fn absolutise_adapter(entry: &mut Entry, registry_dir: &Path) {
-        let Some(invoke) = entry.invoke.as_mut() else {
-            return;
-        };
-        let Some(rel) = invoke.adapter.as_deref() else {
-            return;
-        };
-        let named = Path::new(rel);
-        if named.is_absolute() {
-            return;
-        }
-        // `<root>/plugins/registry` is the layout every shipped registry uses,
-        // so `<root>` is two levels up. The current directory is tried second
-        // rather than not at all, because a contributor running from the
-        // checkout has always had it work and should not have to stop.
-        let mut candidates = Vec::new();
-        if let Some(root) = registry_dir.parent().and_then(Path::parent) {
-            candidates.push(root.join(named));
-        }
-        candidates.push(named.to_path_buf());
-        for candidate in candidates {
-            if candidate.is_file() {
-                if let Ok(abs) = candidate.canonicalize() {
-                    invoke.adapter = Some(abs.display().to_string());
-                }
-                return;
-            }
-        }
-    }
-
+    /// `invoke.adapter` is left EXACTLY as the TOML declares it. An entry is a
+    /// reflection of the file a human wrote and `describe` publishes it, so
+    /// rewriting a path here made the published document disagree with its
+    /// source. Where the adapter actually lives is answered at the point of
+    /// use, by `stegobench_plugin::adapter`, against roots the loader's caller
+    /// carries.
     pub fn load(dir: &Path) -> Result<Self, RegistryError> {
         let mut reg = Registry {
             corpora: crate::corpus::load_dir(&dir.join(CORPORA_DIR))?,
@@ -1173,12 +1132,10 @@ impl Registry {
                         path: p.display().to_string(),
                         source: e,
                     })?;
-                    let mut entry: Entry =
-                        toml::from_str(&text).map_err(|e| RegistryError::Parse {
-                            path: p.display().to_string(),
-                            source: e,
-                        })?;
-                    Self::absolutise_adapter(&mut entry, dir);
+                    let entry: Entry = toml::from_str(&text).map_err(|e| RegistryError::Parse {
+                        path: p.display().to_string(),
+                        source: e,
+                    })?;
                     entry
                         .validate()
                         .map_err(|problems| RegistryError::Invalid {

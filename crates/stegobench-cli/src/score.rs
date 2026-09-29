@@ -75,6 +75,12 @@ pub struct Request<'a> {
     /// produces a number that measures memory rather than detection, and a
     /// reader has no way to tell from the document unless the document says.
     pub trained_on: Option<&'a str>,
+    /// The trees a relative `invoke.adapter` is resolved against.
+    ///
+    /// Empty for a caller with no registry directory to name, which then falls
+    /// back to the directory the command was typed in. See
+    /// [`stegobench_plugin::adapter`].
+    pub adapter_roots: &'a [PathBuf],
 }
 
 /// Why a run could not produce a result.
@@ -269,6 +275,7 @@ where
         &prepared,
         &request.records,
         request.timeout,
+        request.adapter_roots,
         &mut progress,
     )
 }
@@ -502,6 +509,7 @@ pub fn score_one<P>(
     prepared: &Prepared,
     records: &Path,
     timeout: Duration,
+    adapter_roots: &[PathBuf],
     mut progress: P,
 ) -> Result<(Result1, Tally), ScoreError>
 where
@@ -526,9 +534,15 @@ where
     // specifically not to hold it.
     let mut feed = Feed::open(&prepared.corpus, prepared.limit)?;
     let own_started = Instant::now();
-    let tally = runner::score(entry, &mut feed, records, &mut sink, timeout, |t| {
-        progress(&format!("{} scored, {} errored", t.scored, t.errored))
-    })?;
+    let tally = runner::score(
+        entry,
+        &mut feed,
+        records,
+        &mut sink,
+        timeout,
+        adapter_roots,
+        |t| progress(&format!("{} scored, {} errored", t.scored, t.errored)),
+    )?;
     // A corpus defect part way through is a failure, not a short run. Checked
     // after the loop because the iterator cannot return one.
     if let Some(e) = feed.fault {
@@ -1607,6 +1621,7 @@ mod tests {
             corpus: dir,
             registered: None,
             trained_on: None,
+            adapter_roots: &[],
             records: dir.with_extension("records.jsonl"),
             timeout: Duration::from_secs(5),
             limit,
@@ -2567,6 +2582,7 @@ mod tests {
                 &prepared,
                 &records,
                 Duration::from_secs(5),
+                &[],
                 |l: &str| lines.push(l.to_string()),
             )
             .unwrap_or_else(|e| panic!("{name} failed: {e}"));
@@ -2585,6 +2601,7 @@ mod tests {
             &prepared,
             &tmp.path().join("third.jsonl"),
             Duration::from_secs(5),
+            &[],
             |_| {},
         )
         .expect("third")
