@@ -1123,6 +1123,56 @@ const SHAPE_CHECK_ENTRIES: usize = 4096;
 /// Those cases meet the ordinary corpus errors, which is the safe direction to
 /// be wrong in: a corpus wrongly accused of being a photo album would be a
 /// refusal nobody could work around.
+/// Why this path cannot be a corpus, in the words a user can act on.
+///
+/// `None` means the path is a directory this process can list, which is all
+/// that is checked here: whether what is inside it is a corpus is the loader's
+/// question and it answers it far better than a pre-flight could.
+fn corpus_path_problem(corpus: &Path) -> Option<String> {
+    let shown = corpus.display();
+    match std::fs::metadata(corpus) {
+        Ok(meta) if meta.is_dir() => match std::fs::read_dir(corpus) {
+            Ok(_) => None,
+            Err(e) => Some(format!(
+                "{shown} cannot be listed: {}.\n\
+                 Check the permissions on it, or point at a copy you can read.",
+                plain(&e)
+            )),
+        },
+        Ok(_) => Some(format!(
+            "{shown} is a file, and a corpus is a directory.\n\
+             Point at an unpacked corpus rather than at a shard or a file \
+             beside one. `stegobench help scope` says what a corpus has to \
+             hold."
+        )),
+        Err(e) => Some(format!(
+            "there is no corpus at {shown}: {}.\n\
+             Check the path. `stegobench list corpora` names the ones this \
+             registry knows, and `stegobench help scope` says what a corpus \
+             has to hold.",
+            plain(&e)
+        )),
+    }
+}
+
+/// An IO error as a sentence, without the operating system's error number.
+///
+/// `os error 2` names nothing a reader can act on and reads as a crash rather
+/// than an answer, which is the whole of why it never reaches a user here.
+fn plain(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "nothing is there".to_string(),
+        std::io::ErrorKind::PermissionDenied => "permission was refused".to_string(),
+        _ => {
+            let text = e.to_string();
+            match text.split_once(" (os error") {
+                Some((head, _)) => head.to_string(),
+                None => text,
+            }
+        }
+    }
+}
+
 fn unlabelled_corpus(corpus: &Path) -> Option<String> {
     let mut images = 0usize;
     let mut seen = 0usize;
@@ -1205,6 +1255,18 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         Err(o) => return o,
     };
     let many = entries.len() > 1;
+
+    // Asked before the shape check, because that check reads the directory and
+    // answers "nothing to say" for a path it cannot open, so a corpus that is
+    // not there fell through to the loader and arrived as
+    // "cannot read /nope: No such file or directory (os error 2)" under exit 1.
+    // Three faults: a raw operating system error in front of a user, FAILURE
+    // where the contract has a refusal, and a message that does not say what to
+    // do. A path that is not a readable directory is a refusal, and it is the
+    // cheapest one there is.
+    if let Some(why) = corpus_path_problem(corpus) {
+        return Output::err(exit::PREFLIGHT_REFUSED, why);
+    }
 
     // Asked BEFORE availability, because it is the more useful refusal and
     // because it does not depend on any detector. Somebody who points `score`
@@ -2278,6 +2340,41 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "rejected: {args:?}");
         }
+    }
+
+    /// Measured 2026-09-29, before the pre-flight existed: `score --corpus
+    /// /nope/not-here` walked past the shape check, reached the loader, and
+    /// printed "cannot read /nope/not-here: No such file or directory (os
+    /// error 2)" with exit 1. A mistyped path is the commonest mistake there
+    /// is and it deserves a sentence, not an errno under the code that means
+    /// "something went wrong, try again".
+    #[test]
+    fn a_corpus_path_that_is_not_a_readable_directory_is_refused_in_plain_words() {
+        let missing = corpus_path_problem(Path::new("/nope/not-here-either"))
+            .expect("a path that is not there is a problem");
+        assert!(
+            missing.contains("no corpus at"),
+            "says what is wrong: {missing}"
+        );
+        assert!(
+            !missing.contains("os error"),
+            "an operating system error number reached the user: {missing}"
+        );
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let file = tmp.path().join("one.png");
+        std::fs::write(&file, b"not really a png").expect("written");
+        let is_file = corpus_path_problem(&file).expect("a file is a problem");
+        assert!(
+            is_file.contains("is a file"),
+            "says what is wrong: {is_file}"
+        );
+
+        assert!(
+            corpus_path_problem(tmp.path()).is_none(),
+            "a readable directory is not a problem, and if it were this test \
+             would be passing for the wrong reason"
+        );
     }
 
     /// An environment variable bound with clap's `env` is read before any of
@@ -3800,9 +3897,11 @@ mod tests {
         assert_eq!(cmd_schema("not-a-real-schema").code, exit::USAGE);
         assert_eq!(cmd_help(Some("not-a-real-topic")).code, exit::USAGE);
 
-        // 3: pre-flight refusal. Reachable: `score` asks whether the detector
-        // is on this machine before it walks the corpus, and refuses rather
-        // than spending the walk to find out.
+        // 3: pre-flight refusal, which `score` reaches two ways. A corpus
+        // path that is not a readable directory is answered first, because a
+        // stat costs nothing and a detector probe can pull a container. Then,
+        // for a corpus that is there, whether the detector is on this machine,
+        // refused rather than discovered after the walk.
         {
             let dir = tempfile::tempdir().unwrap();
             let reg = dir.path().join("detectors");
@@ -3815,21 +3914,40 @@ mod tests {
                  [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
             )
             .unwrap();
-            let out = cmd_score(
-                &resolved_at(dir.path()),
-                ScoreRequest {
-                    corpus: &dir.path().join("no-such-corpus"),
-                    detectors: &["ghost".to_string()],
-                    corpus_id: None,
-                    records: None,
-                    out: None,
-                    timeout: 5,
-                    limit: None,
-                },
+            let ask = |corpus: &Path| {
+                cmd_score(
+                    &resolved_at(dir.path()),
+                    ScoreRequest {
+                        corpus,
+                        detectors: &["ghost".to_string()],
+                        corpus_id: None,
+                        records: None,
+                        out: None,
+                        timeout: 5,
+                        limit: None,
+                    },
+                )
+            };
+
+            let missing = ask(&dir.path().join("no-such-corpus"));
+            assert_eq!(missing.code, exit::PREFLIGHT_REFUSED, "{}", missing.human);
+            assert!(
+                missing.human.contains("no corpus at"),
+                "a path that is not there should be answered as itself: {}",
+                missing.human
             );
-            assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
-            // Proof it refused on the tool rather than on the missing corpus.
-            assert!(out.human.contains("not on this machine"), "{}", out.human);
+
+            // The same request over a corpus that IS there, so the tool check
+            // is what answers and this arm cannot pass on the path alone.
+            let empty = dir.path().join("empty-corpus");
+            std::fs::create_dir_all(&empty).unwrap();
+            let absent = ask(&empty);
+            assert_eq!(absent.code, exit::PREFLIGHT_REFUSED, "{}", absent.human);
+            assert!(
+                absent.human.contains("not on this machine"),
+                "{}",
+                absent.human
+            );
         }
 
         // 4: plugin failure. Reachable now that `score` runs: an embedder
