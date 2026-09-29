@@ -80,6 +80,10 @@ reports: putting a number on a page without leaving its conditions behind
   stegobench report results/v1
   stegobench report results/v1 --format markdown --out results.md
 
+AUC is area under the curve: one number from 0.5 to 1 for how well a \
+detector's scores separate stego images from clean ones. 0.5 is guessing \
+and 1 is perfect.\n\
+\n\
 An AUC on its own is not a measurement. It is a measurement once you also \
 know which corpus it came from, whether that corpus was the registered tier \
 or a directory somebody assembled, whether the clean and stego images \
@@ -192,7 +196,10 @@ looks right, so that one refuses.
 const RESULTS: &str = "\
 results: how to judge a number somebody else produced
 
-Somebody sends you a result-v1 document with an AUC of 0.94 in it. Every field \
+Somebody sends you a result-v1 document with an AUC of 0.94 in it. AUC is \
+area under the curve: one number from 0.5 to 1 for how well the detector's \
+scores separate stego images from clean ones, where 0.5 is guessing and 1 \
+is perfect. Every field \
 below was written by this harness from what actually happened rather than by \
 the person who ran it, so none of it has to be taken on trust. Check them in \
 this order, which is the order of what it costs to be wrong.

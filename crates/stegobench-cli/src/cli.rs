@@ -181,8 +181,11 @@ pub enum Command {
 
     /// Estimate what a run would cost, without running anything
     ///
+    /// The command is typed exactly as you would run it, flags and all, so
+    /// anything `score` requires is required here too.
+    ///
     /// Example:
-    ///   stegobench plan score --corpus pentimento-core
+    ///   stegobench plan score --corpus corpora/starter --detector stegexpose
     Plan {
         /// The command that would be run, as it would be typed.
         #[arg(value_name = "COMMAND", trailing_var_arg = true, num_args = 0..)]
@@ -356,8 +359,14 @@ pub enum Command {
     /// 5 what arrived is not what the registry declared; 7 the terms say no;
     /// 8 curl is not on PATH.
     ///
+    /// Whether an id can be fetched at all is a property of the registry
+    /// rather than of this command. `stegobench describe <id>` says how that
+    /// corpus is obtained, and this refuses with exit 3 for one that names no
+    /// download route. At the time of writing none of the registered corpora
+    /// declares one, so expect that refusal and follow what `describe` says.
+    ///
     /// Example:
-    ///   stegobench fetch pentimento-core --tier nano
+    ///   stegobench fetch <corpus> --tier nano
     Fetch {
         /// A corpus id as `stegobench list corpora` prints it.
         #[arg(value_name = "CORPUS")]

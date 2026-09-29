@@ -64,8 +64,17 @@ class SharedBudgetTests(unittest.TestCase):
         for _ in range(40):
             budget.reserve(1000)
         elapsed = time.monotonic() - started
-        self.assertGreater(elapsed, 0.8)
-        self.assertLess(elapsed, 2.0)
+        self.assertGreater(
+            elapsed, 0.8,
+            "the sender finished faster than the rate allows, so the budget "
+            "is not limiting anything")
+        # Generous for the same reason as the four sender case below: this
+        # measures wall clock on a machine shared with other jobs, and a
+        # runner that stalls for a second says nothing about the limiter. The
+        # load bearing assertion is the one above; this one is here to catch a
+        # limiter that is slow by a multiple rather than by a moment. Measured
+        # at 2.08 seconds on a macOS runner against an earlier bound of 2.0.
+        self.assertLess(elapsed, 8.0)
 
     def test_four_senders_share_one_rate_rather_than_taking_four(self):
         """The whole point. Four processes, one line, one rate.
