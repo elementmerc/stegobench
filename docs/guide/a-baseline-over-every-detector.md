@@ -32,7 +32,8 @@ on disk.
                                      └─ score with detector 7 ┘
 ```
 
-On the Core tier that is 344,357 images hashed once instead of seven times. On
+On the Core tier that is every image behind 344,357 pairs hashed once instead
+of seven times. On
 a Nano tier it hardly matters. On a Core tier it is the difference between an
 afternoon and a day and a half.
 

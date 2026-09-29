@@ -18,8 +18,9 @@
 //! WHY RESUME IS POSITIONAL RATHER THAN A SET
 //!
 //! The obvious resume is a set of finished ids, skipping any item already in
-//! it. That set grows with the corpus, and a Core tier is 344,357 items, which
-//! is exactly the unbounded collection baseline Section 12 forbids. It also
+//! it. That set grows with the corpus, and a Core tier is 344,357 pairs, so
+//! the set runs to hundreds of thousands of ids: exactly the unbounded
+//! collection baseline Section 12 forbids. It also
 //! reads the whole record file before the first item is scored.
 //!
 //! So records are appended IN ITEM ORDER, and a resumed run walks the existing
@@ -485,8 +486,8 @@ mod tests {
 
     #[test]
     fn a_stuck_item_is_recorded_as_an_error_rather_than_holding_the_run() {
-        // One item out of 344,357 that never answers must not be
-        // indistinguishable from a slow run.
+        // One item out of a Core tier's hundreds of thousands that never
+        // answers must not be indistinguishable from a slow run.
         let dir = tempfile::tempdir().expect("tmp");
         let e = scripted(&tool(dir.path(), "sleep 30"));
         let mut out = Cursor::new(Vec::new());
