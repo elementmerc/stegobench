@@ -643,7 +643,7 @@ mod local_roundtrip_tests {
         let mut sleeper = std::process::Command::new("sh");
         sleeper.args(["-c", "sleep 30"]);
         let started = std::time::Instant::now();
-        let outcome = roundtrip::bounded(sleeper, "sh", Duration::from_millis(200));
+        let outcome = crate::embed::bounded(sleeper, "sh", Duration::from_millis(200));
         assert!(started.elapsed() < Duration::from_secs(10), "it waited");
         match outcome {
             Err(why) => assert!(why.contains("no answer in"), "got {why}"),
@@ -673,8 +673,6 @@ mod local_roundtrip_tests {
 /// Proving an embedder: what goes in must come back out.
 pub mod roundtrip {
     use std::path::Path;
-    use std::process::Command;
-    use std::time::Duration;
 
     use stegobench_core::registry::Entry;
 
@@ -685,200 +683,53 @@ pub mod roundtrip {
     pub const PAYLOAD: &[u8] =
         b"stegobench roundtrip fixture 2026: if you can read this, it survived.";
 
-    /// How the tool is reached, which decides both the argv and the paths.
-    ///
-    /// A container sees the scratch directory at `/work`; a local program sees
-    /// it where it actually is. Substituting the wrong one produces a tool
-    /// that exits cleanly having written nothing, which is the failure this
-    /// check exists to catch and would be blamed on the tool.
-    enum Reach {
-        Container(String),
-        Local(Vec<String>),
-    }
-
-    /// How long either phase is given before it is killed.
-    ///
-    /// A self-test is a smoke test on one small fixture, so anything past this
-    /// is a tool waiting on something that is never coming: a passphrase
-    /// prompt on a terminal nobody is watching is the usual one, and it is
-    /// exactly what a round trip driven from a registry entry can provoke.
-    /// Without a bound, `doctor` hangs for ever and reports nothing at all.
-    pub(crate) const PHASE_TIMEOUT: Duration = Duration::from_secs(300);
-
-    /// Run one phase and wait for it, but not for ever.
-    ///
-    /// The waiting is shared with every other plugin invocation (see
-    /// `crate::exec`), because it is the part that goes wrong and it goes
-    /// wrong identically wherever it is written. What is local here is only
-    /// what a failed PHASE means: a non-zero exit is this phase failing,
-    /// rather than an answer for a parser to interpret.
-    pub(crate) fn bounded(command: Command, label: &str, timeout: Duration) -> Result<(), String> {
-        let out = crate::exec::captured(command, label, timeout)?;
-        if out.status.success() {
-            return Ok(());
-        }
-        let tail = String::from_utf8_lossy(&out.stderr)
-            .trim()
-            .chars()
-            .take(160)
-            .collect::<String>();
-        Err(format!("exit {}: {tail}", out.status.code().unwrap_or(-1)))
-    }
-
     /// Hides the payload, recovers it, and compares the bytes.
     ///
     /// Byte comparison rather than a size check or a substring: a tool that
     /// returns a truncated or padded payload has not worked, and every weaker
     /// comparison has a way of passing when it should not.
+    ///
+    /// The running itself is [`crate::embed`], which is also what
+    /// `stegobench embed` drives, so this check exercises the same code path
+    /// a user does. A self-test passing against a sandbox the real command
+    /// does not use is a self-test measuring the wrong thing.
     pub fn run(entry: &Entry, fixtures_dir: &Path) -> Verified {
         let Some(rt) = &entry.roundtrip else {
             return Verified::Skipped("no roundtrip declared".into());
         };
-        // A binary entry is a program the operator installed themselves, which
-        // is a different statement from pulling a stranger's image, and it gets
-        // the different level of isolation the registry already describes: it
-        // runs as the user, unsandboxed. Refusing to check it would not make
-        // that safer, it would only mean nobody knows whether it works.
-        let reach = match (entry.image.as_ref(), entry.binary.as_ref()) {
-            (Some(image), _) => Reach::Container(image.reference.clone()),
-            (None, Some(binary)) if !binary.command.is_empty() => {
-                Reach::Local(binary.command.clone())
-            }
-            _ => {
-                return Verified::Skipped(
-                    "no image and no binary command to run the round trip with".into(),
-                )
-            }
-        };
         let cover_src = fixtures_dir.join(rt.cover.trim_start_matches("fixtures/"));
         if !cover_src.is_file() {
-            // Skipped, not Failed, for the reason given in `run` above: an
-            // absent fixture is this harness failing to find its own file, and
-            // reporting it as a round trip failure blames the embedder for it.
+            // Skipped, not Failed: an absent fixture is this harness failing
+            // to find its own file, and reporting it as a round trip failure
+            // blames the embedder for it.
             return Verified::Skipped(format!(
                 "cover {} was not found, so no round trip was attempted. \
                  Name the directory with --fixtures <DIR>",
                 cover_src.display()
             ));
         }
-
         let Ok(dir) = tempfile::tempdir() else {
             return Verified::Failed("no scratch directory".into());
         };
-        let work = dir.path();
-        let cover_name = cover_src
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("cover");
-        if std::fs::copy(&cover_src, work.join(cover_name)).is_err() {
-            return Verified::Failed("could not stage the cover".into());
-        }
-        if std::fs::write(work.join("payload.bin"), PAYLOAD).is_err() {
+        let payload = dir.path().join("payload.bin");
+        if std::fs::write(&payload, PAYLOAD).is_err() {
             return Verified::Failed("could not stage the payload".into());
         }
-
-        // The stego file inherits the cover's extension. Several of these
-        // tools infer the format from the name and refuse anything else:
-        // outguess answers "Unknown data type" to a file called .out and
-        // exits 1, which looks like a broken tool rather than a bad filename.
-        let ext = Path::new(cover_name)
+        let ext = cover_src
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("bin");
-        let base = match &reach {
-            Reach::Container(_) => "/work".to_string(),
-            Reach::Local(_) => work.display().to_string(),
-        };
-        let stego_name = format!("{base}/stego.{ext}");
+        let out = dir.path().join(format!("stego.{ext}"));
 
-        let subst = |a: &String| {
-            a.replace("{cover}", &format!("{base}/{cover_name}"))
-                .replace("{payload}", &format!("{base}/payload.bin"))
-                .replace("{stego}", &stego_name)
-                .replace("{recovered}", &format!("{base}/recovered.bin"))
-                .replace("{passphrase}", &rt.passphrase)
-        };
-
-        let uid_gid = std::fs::metadata(work)
-            .ok()
-            .map(|m| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    format!("{}:{}", m.uid(), m.gid())
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = m;
-                    String::new()
-                }
-            })
-            .unwrap_or_default();
-
-        let local_phase = |command: &Vec<String>, argv: &Vec<String>| -> Result<(), String> {
-            let mut run = Command::new(&command[0]);
-            run.args(command[1..].iter().map(&subst));
-            run.args(argv.iter().map(&subst));
-            // The scratch directory, so a tool that writes a stray file beside
-            // its output leaves it there rather than in the user's cwd.
-            run.current_dir(work);
-            bounded(run, &command[0], PHASE_TIMEOUT)
-        };
-
-        let container_phase = |image: &String, argv: &Vec<String>| -> Result<(), String> {
-            let mut args: Vec<String> = vec![
-                "run".into(),
-                "--rm".into(),
-                "--network=none".into(),
-                "--cap-drop=ALL".into(),
-                "--security-opt".into(),
-                "no-new-privileges".into(),
-                "--memory=2g".into(),
-            ];
-            if !uid_gid.is_empty() {
-                args.push("--user".into());
-                args.push(uid_gid.clone());
-            }
-            args.push("-v".into());
-            args.push(format!("{}:/work", work.display()));
-            if let Some(ep) = &rt.entrypoint {
-                args.push("--entrypoint".into());
-                args.push(ep.clone());
-            }
-            args.push(image.clone());
-            args.extend(argv.iter().map(&subst));
-            let mut run = Command::new("docker");
-            run.args(&args);
-            bounded(run, "the container", PHASE_TIMEOUT)
-        };
-
-        let phase = |argv: &Vec<String>| -> Result<(), String> {
-            match &reach {
-                Reach::Container(image) => container_phase(image, argv),
-                Reach::Local(command) => local_phase(command, argv),
-            }
-        };
-
-        if let Err(e) = phase(&rt.embed_argv) {
-            return Verified::Failed(format!("embed failed: {e}"));
-        }
-        // A tool can exit zero having written nothing, which is the silent
-        // failure this whole check exists to catch.
-        match std::fs::metadata(work.join(format!("stego.{ext}"))) {
-            Ok(m) if m.len() > 0 => {}
-            _ => return Verified::Failed("embed exited cleanly but wrote no stego file".into()),
-        }
-        if let Err(e) = phase(&rt.extract_argv) {
-            return Verified::Failed(format!("extract failed: {e}"));
-        }
-        match std::fs::read(work.join("recovered.bin")) {
-            Ok(got) if got == PAYLOAD => Verified::Passed,
-            Ok(got) => Verified::Failed(format!(
-                "recovered {} bytes, expected {}: what went in did not come back",
-                got.len(),
-                PAYLOAD.len()
-            )),
-            Err(e) => Verified::Failed(format!("extract wrote no payload: {e}")),
+        match crate::embed::run(entry, &cover_src, &payload, &out, None, true) {
+            // A tool with no image and no binary is not a failing tool.
+            Err(e) if e.starts_with("no image and no binary") => Verified::Skipped(e),
+            Err(e) => Verified::Failed(e),
+            Ok(done) => match done.recovered {
+                Some(Ok(())) => Verified::Passed,
+                Some(Err(e)) => Verified::Failed(e),
+                None => Verified::Skipped("no extract argv to check the embed with".into()),
+            },
         }
     }
 }
