@@ -82,6 +82,15 @@ pub enum CorpusSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CorpusRef {
     pub name: String,
+    /// The registry id, where the run resolved one.
+    ///
+    /// Recorded beside the display name because the two differ and a reader
+    /// checking a contamination claim needs the id: `--trained-on` is written
+    /// with the id a person read out of `list corpora`, and comparing it with
+    /// the display name clears exactly the person who used the right one.
+    /// Absent for a directory that resolved to no registry entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     /// Fetched by us, or supplied by the user. See [`CorpusSource`].
@@ -543,6 +552,7 @@ mod tests {
             },
             corpus: CorpusRef {
                 name: "pentimento-core".into(),
+                id: Some("pentimento-core".into()),
                 tier: Some("core".into()),
                 source: CorpusSource::Fetched,
                 digest: "sha256:b633b019".into(),

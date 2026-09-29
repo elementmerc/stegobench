@@ -179,6 +179,63 @@ pub enum Command {
         name: String,
     },
 
+    /// Hide a payload in one image, with a registered embedder
+    ///
+    /// The other half of the registry. `list embedders` has always shown six
+    /// tools and, until this existed, offered no way to run one: they could
+    /// be read about and self-tested and not used.
+    ///
+    /// This is for making one stego image: a demonstration, a test case, a
+    /// fixture to poke a detector with. It is NOT how a corpus is built. A
+    /// corpus needs a cover and its stego twin written from the same source
+    /// through the same code path, and that is what `generators/` does; doing
+    /// it a file at a time is how the pairing rule gets broken.
+    ///
+    /// The tool runs the way every other plugin here runs: a container with
+    /// no network and no capabilities, or a local program you installed
+    /// yourself, whichever the registry declares.
+    ///
+    /// By default the payload is extracted again and compared byte for byte,
+    /// because an embedder that exits cleanly having written an image the
+    /// payload is not in is the failure that produces covers labelled stego.
+    ///
+    /// EXIT CODES here: 2 the name is not a registered embedder, or it is not
+    /// an embedder at all; 3 the cover or the payload is unreadable, or the
+    /// entry declares no way to embed; 4 the tool failed or wrote nothing;
+    /// 5 the payload did not survive the round trip.
+    ///
+    /// Example:
+    ///   stegobench embed --embedder steghide --cover in.jpg --payload secret.txt --out hidden.jpg
+    Embed {
+        /// Which registered embedder to use. See `stegobench list embedders`.
+        #[arg(long, value_name = "NAME")]
+        embedder: String,
+        /// The image to hide the payload in. Left untouched.
+        #[arg(long, value_name = "FILE")]
+        cover: std::path::PathBuf,
+        /// The file to hide.
+        #[arg(long, value_name = "FILE")]
+        payload: std::path::PathBuf,
+        /// Where to write the stego image.
+        #[arg(long, value_name = "FILE")]
+        out: std::path::PathBuf,
+        /// The passphrase, for a tool that wants one.
+        ///
+        /// Defaults to the one the registry entry declares, which is a fixed
+        /// public string rather than a secret: it exists so the self-test is
+        /// reproducible. Set this when the stego image is for anything more
+        /// than a demonstration.
+        #[arg(long, value_name = "TEXT")]
+        passphrase: Option<String>,
+        /// Skip extracting the payload again to check it survived.
+        ///
+        /// Faster, and it gives up the only evidence that the embedder did
+        /// what it said. Worth it for a tool you have already checked and a
+        /// batch you are timing; not worth it once.
+        #[arg(long)]
+        no_verify: bool,
+    },
+
     /// Estimate what a run would cost, without running anything
     ///
     /// The command is typed exactly as you would run it, flags and all, so
@@ -418,6 +475,19 @@ pub enum Command {
         /// The corpus to check it against.
         #[arg(long, value_name = "DIR")]
         corpus: std::path::PathBuf,
+        /// Compare the records only, without re-reading the images.
+        ///
+        /// The default re-reads every image and checks it against the digest
+        /// its own record states, because the corpus digest is computed from
+        /// what the records SAY: a stego image can be swapped for an easier
+        /// one, its record left untouched, and every digest still agree. Only
+        /// re-reading the bytes catches that, and it is the difference
+        /// between "these bytes" and "this list of names".
+        ///
+        /// Use this for a corpus too large to re-read, and say which check
+        /// you ran when you quote the result.
+        #[arg(long)]
+        shallow: bool,
     },
 
     /// Turn result documents into a table a person can put in a report

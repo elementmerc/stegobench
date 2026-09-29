@@ -274,6 +274,107 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
     Output::ok(json, human)
 }
 
+/// Hide one payload in one image with a registered embedder.
+///
+/// Deliberately one image. The pairing rule says a cover and its stego twin
+/// must be written from the same source array through the same code path, and
+/// a loop around this command satisfies neither: it reads the cover back off
+/// disk each time and gives no way to state that the pair belongs together.
+/// So this makes a demonstration or a fixture, and `generators/` makes a
+/// corpus, and the help says so where somebody would otherwise find out by
+/// publishing a number.
+fn cmd_embed(
+    resolved: &Resolved,
+    embedder: &str,
+    cover: &Path,
+    payload: &Path,
+    out: &Path,
+    passphrase: Option<&str>,
+    no_verify: bool,
+) -> Output {
+    let reg = &resolved.registry;
+    let Some(entry) = reg.entries.get(embedder) else {
+        return Output::err(
+            exit::USAGE,
+            format!(
+                "no embedder called {embedder} is registered. `stegobench \
+                 list embedders` shows the ones that are"
+            ),
+        );
+    };
+    if entry.kind != Kind::Embedder {
+        return Output::err(
+            exit::USAGE,
+            format!(
+                "{embedder} is registered as a detector, which answers \
+                 questions about an image rather than hiding anything in \
+                 one. `stegobench list embedders` shows what can embed"
+            ),
+        );
+    }
+    for (what, path) in [("cover", cover), ("payload", payload)] {
+        if !path.is_file() {
+            return Output::err(
+                exit::PREFLIGHT_REFUSED,
+                format!("the {what} {} is not a file here", path.display()),
+            );
+        }
+    }
+
+    match stegobench_plugin::embed::run(entry, cover, payload, out, passphrase, !no_verify) {
+        Err(e) if e.contains("declares no way to embed") => Output::err(exit::PREFLIGHT_REFUSED, e),
+        Err(e) if e.starts_with("could not stage") || e.starts_with("no scratch") => {
+            Output::err(exit::PREFLIGHT_REFUSED, e)
+        }
+        Err(e) => Output::err(exit::PLUGIN_FAILED, e),
+        Ok(done) => {
+            let checked = match &done.recovered {
+                Some(Ok(())) => "the payload was extracted again and matches byte for byte",
+                Some(Err(_)) => "the payload did NOT survive",
+                None => "the payload was NOT checked, so nothing here says it is really in there",
+            };
+            let json = serde_json::json!({
+                "embedder": entry.name,
+                "cover": cover.display().to_string(),
+                "stego": done.stego.display().to_string(),
+                "bytes": done.bytes,
+                "verified": match &done.recovered {
+                    Some(Ok(())) => serde_json::json!(true),
+                    Some(Err(e)) => serde_json::json!({ "ok": false, "reason": e }),
+                    None => serde_json::Value::Null,
+                },
+            });
+            if let Some(Err(e)) = &done.recovered {
+                let mut bad = Output::err(
+                    exit::VERIFY_MISMATCH,
+                    format!(
+                        "{} wrote {} ({} bytes) and {e}.\nThe file is there \
+                         and what is in it is not what you gave it, so it is \
+                         not a stego image of that payload.",
+                        entry.name,
+                        done.stego.display(),
+                        done.bytes
+                    ),
+                );
+                bad.json = json;
+                return bad;
+            }
+            Output::ok(
+                json,
+                format!(
+                    "{} wrote {} ({} bytes), and {checked}.\nOne image is a \
+                     demonstration. A corpus needs every pair written from \
+                     one source through one code path: see `stegobench help \
+                     pairing`.",
+                    entry.name,
+                    done.stego.display(),
+                    done.bytes
+                ),
+            )
+        }
+    }
+}
+
 fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
     let reg = &resolved.registry;
     // The needs block goes FIRST, above the entry, because it is the question
@@ -619,13 +720,15 @@ fn cmd_validate(file: &Path) -> Output {
 /// one describes bytes somewhere else. So it is recomputed here rather than
 /// compared with itself.
 ///
-/// The limit is stated rather than hidden. The digest names what the corpus's
-/// own records declare about their images, so a match proves the document and
-/// the corpus describe the same manifest. It does not prove the images match
-/// their records: that would mean rehashing every file, which is a different
-/// and much slower question, and the answer to it belongs to whoever packed
-/// the release.
-fn cmd_verify(file: &Path, corpus: &Path) -> Output {
+/// Two checks, and the second is the one with teeth. The digest names what
+/// the corpus's own records declare about their images, so a match proves the
+/// document and the corpus describe the same manifest and nothing more: swap
+/// a stego image for an easier one and leave its record alone, and every
+/// digest still agrees while the number is now about different bytes. So
+/// unless the caller passes `shallow`, every image is re-read and checked
+/// against the digest its record states before this says the bytes are the
+/// bytes.
+fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -678,17 +781,84 @@ fn cmd_verify(file: &Path, corpus: &Path) -> Output {
     };
 
     let claimed = &result.corpus.digest;
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "ok": &found == claimed,
         "claimed": claimed,
         "found": found,
         "corpus": corpus.display().to_string(),
+        "checked": if shallow { "records" } else { "bytes" },
     });
     if &found == claimed {
+        // The records agree. That is necessary and it is not sufficient: the
+        // digest is over what the records state, so images can be swapped
+        // under records that still agree with each other. Unless the caller
+        // asked for the cheap check, re-read the bytes before saying they are
+        // the bytes.
+        if !shallow {
+            let (bad, read) = match score::rehash_corpus(corpus, |line| {
+                eprintln!("verify: {line}");
+            }) {
+                Ok(v) => v,
+                Err(e) => return Output::err(exit::FAILURE, e.to_string()),
+            };
+            if !bad.is_empty() {
+                json["ok"] = serde_json::Value::Bool(false);
+                json["mismatched"] = serde_json::json!(bad
+                    .iter()
+                    .map(|m| serde_json::json!({
+                        "id": m.id,
+                        "claimed": m.claimed,
+                        "found": match &m.found {
+                            Ok(f) => serde_json::json!(f),
+                            Err(e) => serde_json::json!({ "error": e }),
+                        },
+                    }))
+                    .collect::<Vec<_>>());
+                let mut lines = String::new();
+                for m in &bad {
+                    let got = match &m.found {
+                        Ok(f) => f.clone(),
+                        Err(e) => format!("could not be read: {e}"),
+                    };
+                    lines.push_str(&format!(
+                        "\n  {} claims {}\n    and is    {}",
+                        m.id, m.claimed, got
+                    ));
+                }
+                let mut out = Output::err(
+                    exit::VERIFY_MISMATCH,
+                    format!(
+                        "the records at {} match the document, and the images \
+                         do not match the records.{lines}\nThe corpus digest \
+                         is computed from what the records state, so it still \
+                         agrees; the bytes that were scored are not the bytes \
+                         here now. That number cannot be attributed to this \
+                         corpus.",
+                        corpus.display()
+                    ),
+                );
+                out.json = json;
+                return out;
+            }
+            let mut out = Output::ok(
+                json,
+                format!(
+                    "{} was measured on the corpus at {}. Both name {claimed}, \
+                     and all {read} image(s) hash to what their records state",
+                    file.display(),
+                    corpus.display()
+                ),
+            );
+            out.code = exit::OK;
+            return out;
+        }
         let mut out = Output::ok(
             json,
             format!(
-                "{} was measured on the corpus at {}. Both name {claimed}",
+                "{} names the same records as the corpus at {}. Both name \
+                 {claimed}.\nThe images were NOT re-read, because --shallow \
+                 was given, so this says the two describe the same list of \
+                 records rather than the same bytes",
                 file.display(),
                 corpus.display()
             ),
@@ -2104,9 +2274,31 @@ fn run(cli: &Cli) -> Output {
     match command {
         Command::Schema { name } => cmd_schema(name),
         Command::Validate { file } => cmd_validate(file),
-        Command::Verify { file, corpus } => cmd_verify(file, corpus),
+        Command::Verify {
+            file,
+            corpus,
+            shallow,
+        } => cmd_verify(file, corpus, *shallow),
         Command::List { kind } => with_registry(cli, |r| cmd_list(r, kind)),
         Command::Describe { name } => with_registry(cli, |r| cmd_describe(r, name)),
+        Command::Embed {
+            embedder,
+            cover,
+            payload,
+            out,
+            passphrase,
+            no_verify,
+        } => with_registry(cli, |r| {
+            cmd_embed(
+                r,
+                embedder,
+                cover,
+                payload,
+                out,
+                passphrase.as_deref(),
+                *no_verify,
+            )
+        }),
         Command::Plan { command } => with_registry(cli, |r| cmd_plan(r, command)),
         Command::Doctor {
             fixtures,
@@ -2202,8 +2394,68 @@ fn parse_or_explain() -> Cli {
             );
             std::process::exit(exit::USAGE);
         }
+        // `stegobench score ~/Pictures` is the commonest wrong first command
+        // there is, because it is what the tool sounds like it does. clap
+        // answers it with the required flags it did not get, which is true
+        // and tells the one person who most needs telling nothing at all.
+        // The splash screen is three lines about this exact
+        // misunderstanding, so the refusal says the same thing.
+        Err(e) if looks_like_a_folder_of_photos(&e) => {
+            eprintln!(
+                "a path was given to `score` without a flag, and this does \
+                 not take a folder of images that way."
+            );
+            eprintln!(
+                "\nIf you have a labelled corpus, name it with --corpus, and \
+                 a detector with --detector."
+            );
+            eprintln!(
+                "If you meant your own pictures, this is not the tool: it \
+                 measures how good a detector is, using images whose answers \
+                 are already known, and it cannot tell you whether something \
+                 is hidden in yours."
+            );
+            eprintln!("\n`stegobench help scope` is the whole of why.");
+            std::process::exit(exit::USAGE);
+        }
         Err(e) => e.exit(),
     }
+}
+
+/// Did somebody type `stegobench score <path>` and mean "check these"?
+///
+/// Matched on the arguments rather than on clap's message, because the
+/// message is prose and this has to keep working when it is reworded.
+fn looks_like_a_folder_of_photos(e: &clap::Error) -> bool {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    if first != "score" && first != "plan" {
+        return false;
+    }
+    // A bare word that is not a flag and not the value of one. Only the
+    // missing-argument and unexpected-argument failures, so a genuine typo in
+    // a flag still gets clap's own answer, which is the better one for it.
+    let kind = e.kind();
+    if kind != clap::error::ErrorKind::MissingRequiredArgument
+        && kind != clap::error::ErrorKind::UnknownArgument
+    {
+        return false;
+    }
+    let mut expecting_value = false;
+    for arg in argv.iter().skip(1) {
+        if expecting_value {
+            expecting_value = false;
+            continue;
+        }
+        if arg.starts_with('-') {
+            expecting_value = !arg.contains('=');
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 /// The visible command whose name is closest to what was typed.
@@ -3114,6 +3366,92 @@ mod tests {
         }
     }
 
+    /// A corpus whose records state the digest their image actually has.
+    ///
+    /// `corpus_named` fabricates digests, which is what the record-level
+    /// comparison needs and is exactly what the byte check exists to catch,
+    /// so a test of that check cannot be built on it.
+    fn corpus_honest(root: &Path, bodies: &[&[u8]]) {
+        use sha2::{Digest, Sha256};
+        std::fs::create_dir_all(root).unwrap();
+        for (i, body) in bodies.iter().enumerate() {
+            let role = if i == 0 { "clean" } else { "stego" };
+            std::fs::write(root.join(format!("i{i}.png")), body).unwrap();
+            let d = format!("{:x}", Sha256::digest(body));
+            std::fs::write(
+                root.join(format!("i{i}.json")),
+                format!(r#"{{"role":"{role}","sha256":"{d}"}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn verify_reads_the_images_and_says_so_when_they_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus)
+            .expect("readable")
+            .expect("named");
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let out = cmd_verify(&doc, &corpus, false);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert_eq!(out.json["checked"], serde_json::json!("bytes"));
+        assert!(
+            out.human.contains("hash to what their records state"),
+            "the answer does not say the bytes were read: {}",
+            out.human
+        );
+    }
+
+    #[test]
+    fn verify_catches_an_image_swapped_under_a_record_that_still_agrees() {
+        // The attack the byte check exists for, and the one the corpus digest
+        // cannot see: replace a stego image with an easier one, leave its
+        // record alone, and every digest in the corpus still agrees with
+        // every other. Scored again it gives a better number, and before this
+        // check `verify` called that number attributable to this corpus.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus)
+            .expect("readable")
+            .expect("named");
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        std::fs::write(corpus.join("i1.png"), b"a much easier image").unwrap();
+
+        // The records are untouched, so the corpus still names itself the
+        // same way. That is the point.
+        let after = score::corpus_digest(&corpus)
+            .expect("readable")
+            .expect("named");
+        assert_eq!(after, digest, "the swap changed the record level digest");
+
+        let out = cmd_verify(&doc, &corpus, false);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
+        assert_eq!(out.json["ok"], serde_json::json!(false));
+        assert!(
+            out.human.contains("the images do not match the records"),
+            "the refusal does not name the fault: {}",
+            out.human
+        );
+
+        // And the cheap check still passes, which is why it says what it
+        // checked rather than claiming more.
+        let shallow = cmd_verify(&doc, &corpus, true);
+        assert_eq!(shallow.code, exit::OK, "{}", shallow.human);
+        assert!(
+            shallow.human.contains("NOT re-read"),
+            "the shallow answer overclaims: {}",
+            shallow.human
+        );
+    }
+
     /// A result-v1 document claiming it was measured on `digest`.
     fn result_claiming(path: &Path, digest: &str) {
         let doc = serde_json::json!({
@@ -3149,7 +3487,7 @@ mod tests {
             .expect("named");
         let doc = dir.path().join("r.json");
         result_claiming(&doc, &digest);
-        let out = cmd_verify(&doc, &corpus);
+        let out = cmd_verify(&doc, &corpus, true);
         assert_eq!(out.code, exit::OK, "{}", out.human);
         assert_eq!(out.json["ok"], serde_json::json!(true));
     }
@@ -3170,7 +3508,7 @@ mod tests {
         let doc = dir.path().join("r.json");
         result_claiming(&doc, &digest);
 
-        let out = cmd_verify(&doc, &other);
+        let out = cmd_verify(&doc, &other, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH);
         assert!(out.human.contains("not about each other"), "{}", out.human);
         assert_eq!(out.json["ok"], serde_json::json!(false));
@@ -3186,7 +3524,7 @@ mod tests {
         corpus_named(&corpus, &["aa", "bb"]);
         let doc = dir.path().join("r.json");
         result_claiming(&doc, "");
-        let out = cmd_verify(&doc, &corpus);
+        let out = cmd_verify(&doc, &corpus, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH);
         assert!(
             out.human.contains("names no corpus digest"),
@@ -3204,7 +3542,7 @@ mod tests {
         std::fs::write(corpus.join("a.json"), r#"{"role":"clean"}"#).unwrap();
         let doc = dir.path().join("r.json");
         result_claiming(&doc, "sha256:whatever");
-        let out = cmd_verify(&doc, &corpus);
+        let out = cmd_verify(&doc, &corpus, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH);
         assert!(out.human.contains("cannot be named"), "{}", out.human);
     }
@@ -3214,7 +3552,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let doc = dir.path().join("x.json");
         std::fs::write(&doc, r#"{"hello":"world"}"#).unwrap();
-        let out = cmd_verify(&doc, dir.path());
+        let out = cmd_verify(&doc, dir.path(), true);
         assert_eq!(out.code, exit::SCHEMA_INVALID);
         assert!(out.human.contains("stegobench validate"), "{}", out.human);
     }

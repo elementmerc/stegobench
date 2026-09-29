@@ -17,10 +17,15 @@ stegobench verify their-result.json --corpus ./the-corpus
 it from a corpus on your own disk and tells you whether the two are about each
 other. It exits 5 if they aren't.
 
-What a match proves: the document and your copy describe the same set of
-records. What it doesn't prove: that the images match their records. That would
-mean rehashing every file, which is a slower question and belongs to whoever
-packed the release.
+A match proves the document and your copy describe the same set of records.
+That on its own is not enough, because the digest is computed from what the
+records say: somebody can replace a stego image with an easier one, leave its
+record untouched, and every digest still agrees.
+
+So `verify` then re-reads every image and checks it against the digest its own
+record states, and only then says the bytes are the bytes. It exits 5 naming
+the offending records if they differ. Pass `--shallow` for a corpus too large
+to re-read; it compares the records alone and says that is what it did.
 
 An empty digest means the corpus couldn't be named at all, because at least one
 of its records states no digest for its own image.

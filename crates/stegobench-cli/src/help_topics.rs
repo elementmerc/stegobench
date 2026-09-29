@@ -210,9 +210,13 @@ this order, which is the order of what it costs to be wrong.
 
 `corpus.digest` names the bytes the number came from. That recomputes it from \
 a corpus on your own disk and exits 5 if the two are not about each other. A \
-match proves the document and your copy describe the same records. It does not \
-prove the images match their records; that means rehashing every file and \
-belongs to whoever packed the release.
+match proves the document and your copy describe the same records, and by \
+default it then re-reads every image and checks it against the digest its own \
+record states. That second check is the one that matters: the corpus digest \
+is computed from what the records SAY, so a stego image can be swapped for an \
+easier one, its record left alone, and every digest still agree. --shallow \
+skips it for a corpus too large to re-read, and then says so rather than \
+claiming more than it checked.
 
 2. IS IT COMPARABLE TO ANYBODY ELSE'S NUMBER?
 

@@ -205,7 +205,16 @@ pub struct Prepared {
     limit: Option<u64>,
     /// The registry entry's own name and tier for the corpus, copied out so a
     /// `Prepared` does not borrow the registry for its whole life.
-    registered: Option<(String, Option<String>)>,
+    /// The registry entry this corpus resolved to: its id, its display
+    /// name and its tier.
+    ///
+    /// The id is carried as well as the name because the two differ and
+    /// the contamination check compares against them. `stegobench-starter`
+    /// is what `list corpora` prints and what a careful person passes to
+    /// `--trained-on`; `Stegobench starter corpus` is what a reader sees.
+    /// Comparing only the second exonerates exactly the person who used
+    /// the right name.
+    registered: Option<(String, String, Option<String>)>,
     checks: Checks,
     /// Whether the directory was proved to be the corpus a registry entry
     /// named, images included.
@@ -431,9 +440,24 @@ where
     // who can still decide not to quote it; a reader meeting the document
     // later can only find the declaration if they go looking.
     if let Some(trained) = trained_on {
-        let same = registered
-            .map(|e| e.id.as_str())
-            .is_some_and(|id| id == trained);
+        // Every name this corpus answers to, because a person declaring
+        // contamination honestly may write any of them: the registry id from
+        // `list corpora`, the display name from `describe`, or the directory
+        // they pointed at. Matching only one of the three let the most
+        // precise declaration through unflagged, which is the wrong way round
+        // for a check whose whole purpose is catching a flattering number.
+        let t = trained.trim();
+        let mut aliases: Vec<String> = vec![corpus_name(corpus)];
+        if let Some(e) = registered {
+            aliases.push(e.id.clone());
+            aliases.push(e.name.clone());
+        }
+        if let Some(base) = corpus.file_name().and_then(|s| s.to_str()) {
+            aliases.push(base.to_string());
+        }
+        let same = aliases
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(t) && !a.trim().is_empty());
         if same {
             progress(&format!(
                 "WARNING: this detector is declared as trained on {trained}, \
@@ -441,10 +465,25 @@ where
                  below measures what it memorised as well as what it detects, \
                  and it is not a figure to quote for {trained}"
             ));
+        } else if registered.is_none() {
+            // The names did not match, and without a registry entry that is
+            // weaker than it sounds: the only names this directory has are
+            // the ones on disk, so a detector trained on the very corpus this
+            // directory holds a copy of goes unflagged whenever the copy was
+            // given another name. Said out loud, because the alternative is a
+            // line that reads like a clean bill of health for a check that
+            // could not run.
+            progress(&format!(
+                "declared as trained on {trained}. This corpus is not \
+                 identified, so that could not be checked against it: pass \
+                 --corpus-id to say which registered corpus this directory \
+                 holds and the check becomes real"
+            ));
         } else {
             progress(&format!(
-                "declared as trained on {trained}, which the result records so \
-                 a reader can judge it"
+                "declared as trained on {trained}, which is not the corpus \
+                 being scored, and the result records it so a reader can \
+                 judge that for themselves"
             ));
         }
     }
@@ -489,7 +528,7 @@ where
     Ok(Prepared {
         corpus: corpus.to_path_buf(),
         limit,
-        registered: registered.map(|e| (e.name.clone(), e.tier.clone())),
+        registered: registered.map(|e| (e.id.clone(), e.name.clone(), e.tier.clone())),
         trained_on: trained_on.map(str::to_string),
         checks,
         claim_holds,
@@ -685,13 +724,14 @@ where
         },
         corpus: CorpusRef {
             name: match &prepared.registered {
-                Some((name, _)) => name.clone(),
+                Some((_, name, _)) => name.clone(),
                 None => corpus_name(&prepared.corpus),
             },
+            id: prepared.registered.as_ref().map(|(id, _, _)| id.clone()),
             tier: prepared
                 .registered
                 .as_ref()
-                .and_then(|(_, tier)| tier.clone()),
+                .and_then(|(_, _, tier)| tier.clone()),
             // The user pointed at a directory. Nothing here downloaded it, and
             // saying otherwise would be the harness vouching for bytes it
             // never saw arrive. Naming the corpus does not change that: a
@@ -1057,6 +1097,77 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// One image whose bytes are not the bytes its record claims.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mismatch {
+    /// The sample id, so the answer names the record rather than a path.
+    pub id: String,
+    /// What the record says the image hashes to.
+    pub claimed: String,
+    /// What it actually hashes to, or why that could not be established.
+    pub found: Result<String, String>,
+}
+
+/// How many mismatches are named before the rest are only counted.
+///
+/// A corpus that has been swapped wholesale produces one mismatch per image,
+/// and printing 344,357 lines helps nobody. The first few identify the fault;
+/// the count establishes its size.
+const NAMED_MISMATCHES: usize = 10;
+
+/// Re-read every image and check it against the digest its record states.
+///
+/// The corpus digest is computed from what the records SAY, so two corpora
+/// whose records match have the same digest whatever the images actually
+/// contain. That is the right identity for naming a corpus somebody extracted
+/// and moved, and it is not proof that the bytes are the ones measured: a
+/// stego image can be replaced with an easier one, the record left alone, and
+/// every digest still agrees. This is the check that closes that, and it is
+/// the reason `verify` can say "these bytes" rather than "this list of names".
+///
+/// Returns the mismatches found and the number of images actually read, so a
+/// caller can tell "checked and clean" from "there was nothing to check".
+pub fn rehash_corpus(
+    root: &Path,
+    mut progress: impl FnMut(&str),
+) -> Result<(Vec<Mismatch>, u64), ScoreError> {
+    let mut bad = Vec::new();
+    let mut read = 0u64;
+    let mut extra = 0u64;
+    let mut last = Instant::now();
+    for sample in Samples::open(root)? {
+        let sample = sample?;
+        let Some(claimed) = sample.digest.as_deref() else {
+            continue;
+        };
+        read += 1;
+        if last.elapsed() >= HEARTBEAT {
+            progress(&format!("rehashed {read} image(s) so far"));
+            last = Instant::now();
+        }
+        let found = hash_file(&sample.image).map_err(|e| e.to_string());
+        if found.as_deref() == Ok(claimed) {
+            continue;
+        }
+        if bad.len() < NAMED_MISMATCHES {
+            bad.push(Mismatch {
+                id: sample.id.clone(),
+                claimed: claimed.to_string(),
+                found,
+            });
+        } else {
+            extra += 1;
+        }
+    }
+    if extra > 0 {
+        progress(&format!(
+            "{} further image(s) also differ and are not listed",
+            extra
+        ));
+    }
+    Ok((bad, read))
 }
 
 /// The digest of a corpus on disk, for a caller that wants only that.

@@ -498,11 +498,20 @@ fn to_row(source: &Path, r: Result1) -> Row {
             r.metrics.n_error
         ));
     }
-    if r.declarations
-        .trained_on
-        .as_deref()
-        .is_some_and(|t| t == r.corpus.name)
-    {
+    // Against the id as well as the display name, and case folded. The two
+    // differ, and comparing only the name cleared the one person who had
+    // declared the contamination precisely: `--trained-on stegobench-starter`
+    // is the id `list corpora` prints, while the corpus renders as
+    // `Stegobench starter corpus`, so the careful declaration read as a
+    // different corpus and the flag stayed off.
+    if r.declarations.trained_on.as_deref().is_some_and(|t| {
+        let t = t.trim();
+        t.eq_ignore_ascii_case(r.corpus.name.trim())
+            || r.corpus
+                .id
+                .as_deref()
+                .is_some_and(|id| t.eq_ignore_ascii_case(id.trim()))
+    }) {
         flags.push("TRAINED ON THIS CORPUS: not being measured".to_string());
     }
     if r.declarations.self_reported {
