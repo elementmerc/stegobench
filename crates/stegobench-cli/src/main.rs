@@ -3989,14 +3989,16 @@ mod tests {
             );
         }
 
-        // 4: plugin failure. Reachable now that `score` runs: an embedder
-        // asked to tell two images apart is refused through this code. It is
-        // driven in the score module's own tests, which can build a corpus
-        // and a registry entry without this test constructing both.
+        // 4: plugin failure. Reachable now that `score` runs: a detector that
+        // broke, or a run whose answers could not be turned into an AUC, is
+        // reported through this code. It is driven in the score module's own
+        // tests, which can build a corpus and a registry entry without this
+        // test constructing both.
 
         // 5: verify mismatch. Reachable: `verify` recomputes a corpus digest
-        // and compares it with the one a result claims. Driven below, against
-        // a corpus the document was not measured on.
+        // and compares it with the one a result claims. Driven by the
+        // `verify_refuses_*` tests above, against a corpus the document was
+        // not measured on and against a document naming no digest at all.
 
         // 6: schema invalid.
         {
@@ -4006,15 +4008,18 @@ mod tests {
             assert_eq!(cmd_validate(&p).code, exit::SCHEMA_INVALID);
         }
 
-        // 7: licence refusal. NOT YET REACHABLE: no corpus-licence gate
-        // exists yet. See exit::LICENCE_REFUSED.
+        // 7: licence refusal. Reachable: `fetch` refuses a corpus that may
+        // not be redistributed before it looks for a transport at all. Driven
+        // in the fetch module's own tests, which hand it a refusing transport
+        // and prove the licence answered first.
 
         // 8: environment unfit. NO LONGER REACHABLE FROM A STUB: every
         // command in the tree is built, so the `not_yet` helper that used to
         // return this code is gone rather than kept as scaffolding nothing
-        // stands on. `cmd_doctor` still reaches it when a registered tool is
-        // missing or broken, and that wants its own test with a real registry
-        // directory rather than a shortcut here.
+        // stands on. Two real paths reach it: `fetch` when no transport is
+        // installed, and `cmd_doctor` when a registered tool is missing or
+        // broken. Doctor's wants its own test with a real registry directory
+        // rather than a shortcut here.
 
         // 130: interrupted. NOT YET REACHABLE from a unit test: this is a
         // signal-handler exit path (SIGINT/SIGTERM), which needs a real
