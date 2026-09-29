@@ -50,6 +50,11 @@ fn main() {
     write_embedded_adapters(&out_dir);
 
     let man_dir = out_dir.join("man");
+    // Emptied first, for the reason the mirror below is pruned: generation only
+    // ever writes, so a page for a command that is gone or hidden would survive
+    // in here and be copied out again on every build. This directory holds
+    // nothing but pages this script wrote, so removing it costs nothing.
+    let _ = fs::remove_dir_all(&man_dir);
     if let Err(e) = fs::create_dir_all(&man_dir) {
         // A man page that fails to generate must not fail the whole build:
         // it is documentation, not correctness, and a contributor without
@@ -78,6 +83,25 @@ fn main() {
             .join("../../target/man")
             .to_path_buf();
         if fs::create_dir_all(&workspace_man).is_ok() {
+            // Pruned before copying, because a copy only ever adds. A command
+            // that is removed, or hidden, stops being generated and its page
+            // would otherwise sit here until somebody deleted target/, and be
+            // packaged and installed from a directory nobody re-reads. That is
+            // how `stegobench-check.1` and `stegobench-scan.1` survived being
+            // hidden. Only pages this build did not just write are removed, so
+            // a file somebody put here on purpose under another name stays.
+            if let Ok(existing) = fs::read_dir(&workspace_man) {
+                for item in existing.flatten() {
+                    let path = item.path();
+                    let is_page = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e == "1");
+                    if is_page && !man_dir.join(item.file_name()).exists() {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+            }
             let _ = copy_dir(&man_dir, &workspace_man);
         }
     }
@@ -322,7 +346,7 @@ fn write_man_pages(cmd: &clap::Command, dir: &std::path::Path) -> std::io::Resul
     // and they are hidden from `--help` for that reason. A man page is
     // documentation too, so shipping one for them would advertise the very
     // thing the signpost exists to deny.
-    for sub in cmd.get_subcommands() {
+    for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
         let name = format!("{}-{}", cmd.get_name(), sub.get_name());
         let page = dir.join(format!("{name}.1"));
         let mut buf: Vec<u8> = Vec::new();
