@@ -316,8 +316,20 @@ pub struct Offer {
 }
 
 impl Offer {
+    /// The listing row: the command, a gutter, and what it gets you.
     pub fn line(&self) -> String {
         format!("{}    {}", self.run, self.why)
+    }
+
+    /// The command alone, for prose.
+    ///
+    /// The row above is two columns separated by a gutter, and a gutter is
+    /// four spaces in the middle of a sentence. Spliced after "Next: " it also
+    /// ended the sentence on the description's dangling tail, "to quote a
+    /// number from". A sentence takes the command; the reason is already the
+    /// sentence it sits in.
+    pub fn command(&self) -> &str {
+        &self.run
     }
 }
 
@@ -862,6 +874,43 @@ mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
     use stegobench_core::fetch::FileStore;
+
+    /// The offer is rendered two ways and they are not interchangeable.
+    ///
+    /// Found by running the binary rather than by reading it: the epilogue
+    /// after a small run said "Next: stegobench describe pentimento-core
+    /// 10,000 covers with their licences attached, to quote a number from",
+    /// with the listing gutter sitting in the middle of the sentence and the
+    /// sentence ending on the description's dangling tail. A listing row is
+    /// not a clause.
+    #[test]
+    fn the_prose_form_of_an_offer_is_a_command_and_not_a_listing_row() {
+        let offer = offer(&shipped()).expect("the shipped registry makes an offer");
+
+        assert!(
+            !offer.command().contains("  "),
+            "a run of spaces in a sentence: {:?}",
+            offer.command()
+        );
+        assert!(
+            offer.command().starts_with("stegobench "),
+            "the prose form has to be the command: {:?}",
+            offer.command()
+        );
+        let sentence = format!("Next: {}", offer.command());
+        assert!(
+            !sentence.contains("  "),
+            "the epilogue reads as two columns: {sentence:?}"
+        );
+
+        // And the listing row keeps its gutter, so this cannot be satisfied by
+        // flattening both forms into one.
+        assert!(
+            offer.line().contains("    "),
+            "the listing row lost its gutter: {:?}",
+            offer.line()
+        );
+    }
 
     fn shipped() -> Registry {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry");

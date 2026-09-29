@@ -1809,7 +1809,7 @@ fn summarise(
             lines.push(format!(
                 "{largest} images is a demonstration, not a measurement. \
                  Next: {}",
-                offer.line()
+                offer.command()
             ));
         }
     }
