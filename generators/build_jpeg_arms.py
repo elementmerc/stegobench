@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             for tool_id, embedder, rate in jobs:
                 arm = f"{tool_id}/{int(rate * 1000):04d}"
                 stego = out / arm / f"{stem}.jpg"
-                key = str(stego.relative_to(out))
+                key = stego.relative_to(out).as_posix()
                 # The manifest is the record, not the file on disk. See
                 # `should_rebuild` for the 118 covers that rule cost.
                 if not should_rebuild(key, stego, done, counts):
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
                         tool_id, {"writer": tool_id})
                 mf.write(json.dumps({
                     "arm": arm, "tool": tool_id, "rate": rate,
-                    "clean": str(pair_clean.relative_to(out)), "stego": key,
+                    "clean": pair_clean.relative_to(out).as_posix(), "stego": key,
                     "source_png": png.name,
                     "source_sha256": source_digest,
                     "pairing": ("writer-matched" if tool_id in matched
@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
 
             # The structural arm: same pixels, extra bytes after the end marker.
             structural = out / "structural/0000" / f"{stem}.jpg"
-            structural_key = str(structural.relative_to(out))
+            structural_key = structural.relative_to(out).as_posix()
             # Existence is not a manifest row here either; see `should_rebuild`.
             # This one is written and then recorded, so a kill between the two
             # orphans the pair permanently unless the next run rebuilds it.
@@ -370,8 +370,8 @@ def main(argv: list[str] | None = None) -> int:
                     mf.write(json.dumps({
                         "arm": "structural/0000", "tool": "append_after_eoi",
                         "rate": 0.0,
-                        "clean": str(clean.relative_to(out)),
-                        "stego": str(structural.relative_to(out)),
+                        "clean": clean.relative_to(out).as_posix(),
+                        "stego": structural.relative_to(out).as_posix(),
                         "source_png": png.name,
                     "source_sha256": source_digest,
                         "payload_bytes": added, "jpeg_quality": args.quality,

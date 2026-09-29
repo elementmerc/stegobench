@@ -240,6 +240,22 @@ class ResumeTests(unittest.TestCase):
         for key in keys:
             self.assertTrue((self.out / key).is_file(), key)
 
+    def test_the_keys_are_separated_the_same_way_on_every_platform(self):
+        """A manifest key is an identifier, so it cannot be OS shaped.
+
+        Built with the platform separator, a corpus packed on Windows records
+        `arm\\0500\\00000.jpg` and one packed anywhere else records
+        `arm/0500/00000.jpg`. Nothing downstream matches the two: the resume
+        rule rebuilds every arm it already has, and a pair written on one
+        machine never finds its twin on another.
+        """
+        self.assertEqual(self.run_builder(), 0)
+        keys = self.keys()
+        self.assertTrue(keys, "nothing was recorded, so nothing was checked")
+        for key in keys:
+            self.assertNotIn("\\", key, key)
+            self.assertIn("/", key, key)
+
     def test_a_recorded_pair_is_not_rebuilt(self):
         self.run_builder()
         before = len(self.rows())

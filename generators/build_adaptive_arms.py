@@ -282,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
                     for rate in rates:
                         arm = f"{scheme}/{int(rate * 1000):04d}"
                         stego = out / arm / f"{stem}.png"
-                        key = str(stego.relative_to(out))
+                        key = stego.relative_to(out).as_posix()
                         # The manifest is the record, not the file on disk.
                         # See `should_rebuild`, which carries the reasoning and
                         # the 118 covers it cost to learn it.
@@ -316,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
                         mf.write(json.dumps({
                             "arm": arm, "tool": scheme, "rate": rate,
                             "domain": "spatial", "rate_unit": "bits per pixel",
-                            "clean": str(clean.relative_to(out)), "stego": key,
+                            "clean": clean.relative_to(out).as_posix(), "stego": key,
                             "source_png": png.name,
                             "source_sha256": source_digest,
                             "samples_changed": changed,
@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
                     for rate in rates:
                         arm = f"{scheme}/{int(rate * 1000):04d}"
                         stego = out / arm / f"{stem}.jpg"
-                        key = str(stego.relative_to(out))
+                        key = stego.relative_to(out).as_posix()
                         # The same rule as the spatial loop above, and now
                         # literally the same code: see `should_rebuild`.
                         if not should_rebuild(key, stego, done, counts):
@@ -409,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
                             "arm": arm, "tool": scheme, "rate": rate,
                             "domain": "jpeg-dct",
                             "rate_unit": "bits per non-zero AC coefficient",
-                            "clean": str(clean.relative_to(out)), "stego": key,
+                            "clean": clean.relative_to(out).as_posix(), "stego": key,
                             "source_jpeg": src.name,
                             "coefficients_changed": changed,
                             "coding": "simulated at the optimal rate, not a real STC",
