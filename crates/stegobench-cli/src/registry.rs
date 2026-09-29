@@ -577,10 +577,22 @@ mod tests {
             "{} outlived its resolution, so the scratch directory is leaking",
             found.display()
         );
-        assert!(
-            stegobench_plugin::adapter::resolve(&declared, &roots).is_err(),
-            "the adapter still resolves after the resolution was dropped"
-        );
+        // NOT "resolving now fails". Resolution falls back to the working
+        // directory on purpose, so that a contributor standing in a checkout
+        // is served by the tree they are standing in. Asserting a failure here
+        // therefore asserts the absence of that fallback, and its outcome
+        // depends on where the test was run from: it passed under `cargo test`,
+        // whose working directory is the package, and failed every time the
+        // same binary was run from the root of the repository, where
+        // `plugins/adapters` is real. What the lifetime actually promises is
+        // that the scratch copy is gone, so that is what is checked.
+        if let Ok(after) = stegobench_plugin::adapter::resolve(&declared, &roots) {
+            assert_ne!(
+                after, found,
+                "the scratch copy is still being handed out after its \
+                 resolution was dropped"
+            );
+        }
     }
 
     /// The whole point of embedding. A binary with a built-in copy that has
