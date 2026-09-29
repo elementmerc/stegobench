@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Daniel Iwugo
 
-//! Column alignment for the one-line listings `stegobench list` prints.
+//! Column alignment for the listings and tables the CLI prints.
 //!
 //! WHY THIS EXISTS RATHER THAN A FORMAT WIDTH
 //!
@@ -30,6 +30,17 @@
 /// has one; a name that did would need a width crate, which this deliberately
 /// does not pull in for a listing.
 pub fn align(rows: &[Vec<String>]) -> Vec<String> {
+    align_with(rows, " ")
+}
+
+/// The same alignment, with the gutter between columns given rather than
+/// assumed.
+///
+/// A one-line listing reads best with a single space; a twelve-column score
+/// table needs two, or the eye loses which number belongs to which heading.
+/// The widths are computed identically either way, which is the whole reason
+/// this takes a parameter instead of being written out twice.
+pub fn align_with(rows: &[Vec<String>], gutter: &str) -> Vec<String> {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut widths = vec![0usize; columns];
     for row in rows {
@@ -42,7 +53,7 @@ pub fn align(rows: &[Vec<String>]) -> Vec<String> {
             let mut line = String::new();
             for (i, cell) in row.iter().enumerate() {
                 if i > 0 {
-                    line.push(' ');
+                    line.push_str(gutter);
                 }
                 line.push_str(cell);
                 if i + 1 < row.len() {

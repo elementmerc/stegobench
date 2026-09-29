@@ -882,22 +882,11 @@ fn render_text(report: &Report) -> String {
         for row in &group.rows {
             table.push(cells(row).to_vec());
         }
-        let widths: Vec<usize> = (0..HEADINGS.len())
-            .map(|i| {
-                table
-                    .iter()
-                    .map(|r| r[i].chars().count())
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect();
-        for line in &table {
-            let rendered: Vec<String> = line
-                .iter()
-                .zip(&widths)
-                .map(|(c, w)| format!("{c:<w$}"))
-                .collect();
-            let _ = writeln!(out, "{}", rendered.join("  ").trim_end());
+        // Two spaces rather than one, because twelve columns of mostly numbers
+        // run together at a single space and the eye loses which figure sits
+        // under which heading.
+        for line in stegobench_core::table::align_with(&table, "  ") {
+            let _ = writeln!(out, "{line}");
         }
 
         // The flags get their own lines under the table rather than a
