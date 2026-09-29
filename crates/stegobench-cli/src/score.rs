@@ -734,6 +734,15 @@ fn why_no_auc(scores: &[f64], labels: &[bool], at: &str) -> String {
              this is a bug in stegobench rather than anything you did. Please \
              report it with this message."
         }
+        // Every image errored. The sentence underneath is `metrics`' one, and
+        // there a user really did hand over an empty file; here nobody gave
+        // anything, the detector produced nothing, and a reader who is told
+        // "no scores were given" has no reason to look at the tool.
+        "empty" => {
+            " Every image was put to this tool and none of them came back with \
+             a number, which is the tool or its parser rather than the corpus: \
+             `stegobench doctor` runs its self-test and says which."
+        }
         // The numbers came from the detector, so the next step is the detector.
         "not-a-number" => {
             " This is the detector's output, so the fix is with the tool or \
@@ -2717,6 +2726,19 @@ mod tests {
             "a NaN from a detector needs a next step: {nan}"
         );
 
+        // The case a detector that fails on everything lands in. The shared
+        // sentence is `metrics`' one, where a user really did hand over an
+        // empty file, so on this path it needs the reason nothing arrived.
+        let empty = why_no_auc(&[], &[], "");
+        assert!(
+            empty.contains("none of them came back with a number"),
+            "an empty answer set has to say the tool produced nothing: {empty}"
+        );
+        assert!(
+            empty.contains("stegobench doctor"),
+            "and where to look next: {empty}"
+        );
+
         let one_sided = why_no_auc(&[1.0, 2.0], &[true, true], "");
         assert!(one_sided.contains("0 clean and 2 stego"), "{one_sided}");
         assert!(
@@ -2747,6 +2769,7 @@ mod tests {
             (vec![1.0, 2.0], vec![true]),
             (vec![f64::NAN, 1.0], vec![true, false]),
             (vec![1.0, 2.0], vec![true, true]),
+            (vec![], vec![]),
         ] {
             let shared = crate::metrics::why_unrankable(&scores, &labels, "").to_string();
             let here = why_no_auc(&scores, &labels, "");
