@@ -184,9 +184,15 @@ def prose_files(root: pathlib.Path) -> list[pathlib.Path]:
             paths.extend(root.glob(pattern))
         paths = [
             p for p in paths
-            if not any(part in str(p.relative_to(root)) for part in NOT_OURS)
+            if not any(part in p.relative_to(root).as_posix() for part in NOT_OURS)
         ]
-    return sorted({p for p in paths if p.is_file()})
+    # Ordered by the posix spelling rather than by the path object, because
+    # path comparison follows the platform: Windows folds case, so it sorts
+    # `docs\guide\x.md` before `README.md` while every other machine does
+    # the reverse. That order reaches the report, and a report whose row
+    # order depends on the OS that wrote it is not reproducible.
+    return sorted({p for p in paths if p.is_file()},
+                  key=lambda p: p.relative_to(root).as_posix())
 
 
 def addresses_in(root: pathlib.Path) -> dict[str, list[str]]:
@@ -202,7 +208,7 @@ def addresses_in(root: pathlib.Path) -> dict[str, list[str]]:
             url = tidy(raw)
             if not url:
                 continue
-            where = str(path.relative_to(root))
+            where = path.relative_to(root).as_posix()
             names = found.setdefault(url, [])
             if where not in names:
                 names.append(where)

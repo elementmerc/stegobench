@@ -35,6 +35,7 @@ skips when it is absent, and says so.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import stat
@@ -218,8 +219,16 @@ class NothingIsPublishedBeforeItIsSigned(unittest.TestCase):
 
 
 class TheSigningScriptIsUsable(unittest.TestCase):
-    def test_it_exists_and_is_executable(self) -> None:
+    def test_it_exists(self) -> None:
         self.assertTrue(SIGN_SCRIPT.is_file())
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows has no executable bit, and git does not fabricate one on "
+        "checkout. The bit is what the release runner needs, and that is "
+        "Linux, so it is asserted where it means something.",
+    )
+    def test_it_is_executable(self) -> None:
         mode = SIGN_SCRIPT.stat().st_mode
         self.assertTrue(mode & stat.S_IXUSR, "sign-artefacts.sh is not executable")
 
