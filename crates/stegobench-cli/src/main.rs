@@ -1903,7 +1903,10 @@ fn cmd_fetch(
     }
 
     let limits = fetch::limits(max_bytes, budget_minutes);
-    let dest = dest.map_or_else(fetch::default_dest, Path::to_path_buf);
+    let dest = dest
+        .map(Path::to_path_buf)
+        .or_else(|| registry::non_empty("STEGOBENCH_CORPUS_DIR").map(std::path::PathBuf::from))
+        .unwrap_or_else(fetch::default_dest);
     // A pre-flight rather than a discovery an hour in: an unwritable
     // destination is the same failure whether it is found now or after 48 GB.
     if let Err(e) = std::fs::create_dir_all(&dest) {
@@ -2275,6 +2278,42 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "rejected: {args:?}");
         }
+    }
+
+    /// An environment variable bound with clap's `env` is read before any of
+    /// our code runs, and clap treats a variable that is set but empty as a
+    /// flag supplied without its value. `STEGOBENCH_REGISTRY=` in a shell
+    /// profile therefore made EVERY command refuse with "a value is required
+    /// for '--registry <DIR>'", including `--help`. Every variable is now
+    /// read by the resolver that wants it, through `non_empty`, which treats
+    /// empty as unset. This walks the real tree so a later argument cannot
+    /// reintroduce the binding quietly.
+    #[test]
+    fn no_argument_reads_its_environment_variable_through_clap() {
+        fn walk(cmd: &clap::Command, found: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                if let Some(var) = arg.get_env() {
+                    found.push(format!(
+                        "{} --{} reads {}",
+                        cmd.get_name(),
+                        arg.get_id(),
+                        var.to_string_lossy()
+                    ));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, found);
+            }
+        }
+        let root = Cli::command();
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        assert!(
+            found.is_empty(),
+            "an empty value in one of these variables would refuse every \
+             command: {}",
+            found.join(", ")
+        );
     }
 
     /// L: walks the actual command tree from `Cli::command()` rather than a

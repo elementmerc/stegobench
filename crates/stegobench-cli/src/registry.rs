@@ -210,8 +210,11 @@ fn load(dir: &Path) -> Result<Registry, Error> {
 /// Works out which registry answers, in the order the module docstring sets
 /// out, and loads it.
 pub fn resolve(explicit: Option<&Path>) -> Result<Resolved, Error> {
-    if let Some(dir) = explicit {
-        return Resolved::from_dir(dir);
+    let named = explicit
+        .map(Path::to_path_buf)
+        .or_else(|| non_empty("STEGOBENCH_REGISTRY").map(PathBuf::from));
+    if let Some(dir) = named {
+        return Resolved::from_dir(&dir);
     }
     let candidates = search_path();
     for (dir, make) in &candidates {
@@ -333,7 +336,7 @@ pub(crate) fn system_data_dirs() -> Vec<PathBuf> {
 /// An empty `HOME` is the case that matters: joining onto it produces a
 /// relative path that silently resolves against the current directory, which
 /// is the "a registry you did not mean" failure this module is trying to avoid.
-pub(crate) fn non_empty(key: &str) -> Option<String> {
+pub fn non_empty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 

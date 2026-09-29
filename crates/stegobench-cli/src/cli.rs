@@ -111,7 +111,10 @@ pub struct Cli {
     /// Left out, stegobench searches: see WHERE THE REGISTRY COMES FROM under
     /// `--help`. Named here, the path is used as given, and a path that is not
     /// there is an error rather than a fall back.
-    #[arg(long, global = true, value_name = "DIR", env = "STEGOBENCH_REGISTRY")]
+    /// STEGOBENCH_REGISTRY is read by the resolver rather than declared here,
+    /// so a variable that is set but empty is treated as unset instead of
+    /// making clap refuse every command for a missing value.
+    #[arg(long, global = true, value_name = "DIR")]
     pub registry: Option<std::path::PathBuf>,
 
     /// Optional so a bare `stegobench` can print a short orientation rather
@@ -195,7 +198,10 @@ pub enum Command {
         /// Where the self-test fixtures live. Defaults to the checkout, then
         /// beside the executable, then your data directories, then the copy
         /// compiled into this binary.
-        #[arg(long, value_name = "DIR", env = "STEGOBENCH_FIXTURES")]
+        ///
+        /// STEGOBENCH_FIXTURES is read by the resolver, not declared here, so
+        /// an empty variable is ignored rather than fatal.
+        #[arg(long, value_name = "DIR")]
         fixtures: Option<std::path::PathBuf>,
         /// Report what is installed without running the self-tests. Faster,
         /// and cannot tell a working tool from a broken one.
@@ -349,7 +355,10 @@ pub enum Command {
         ///
         /// Defaults to a directory under your user data directory, so the same
         /// tier fetched from two working directories is downloaded once.
-        #[arg(long, value_name = "DIR", env = "STEGOBENCH_CORPUS_DIR")]
+        ///
+        /// STEGOBENCH_CORPUS_DIR sets it for good, and is read when the
+        /// destination is chosen so an empty variable is ignored.
+        #[arg(long, value_name = "DIR")]
         dest: Option<std::path::PathBuf>,
         /// Refuse a route that declares more bytes than this.
         ///
