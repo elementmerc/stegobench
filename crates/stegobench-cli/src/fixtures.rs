@@ -151,15 +151,27 @@ impl std::fmt::Display for Error {
     }
 }
 
+/// A directory that would be accepted, and what finding it there would mean.
+///
+/// The same shape as `registry`'s, so the two modules stay readable side by
+/// side.
+type Candidate = (PathBuf, fn(PathBuf) -> Source);
+
 /// Every directory that would be accepted, in order.
-pub fn search_path() -> Vec<PathBuf> {
-    let mut out = vec![PathBuf::from("fixtures")];
-    out.extend(beside_executable());
+///
+/// Consumed by [`resolve`] rather than merely mirroring it. The two used to
+/// build this list separately, which meant a sixth location added here would
+/// have been tested and never searched.
+pub fn search_path() -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = vec![(PathBuf::from("fixtures"), Source::WorkingDirectory)];
+    for dir in beside_executable() {
+        out.push((dir, Source::BesideExecutable));
+    }
     if let Some(d) = user_data_dir() {
-        out.push(d.join(INSTALL_SUBDIR).join("fixtures"));
+        out.push((d.join(INSTALL_SUBDIR).join("fixtures"), Source::UserData));
     }
     for d in system_data_dirs() {
-        out.push(d.join(INSTALL_SUBDIR).join("fixtures"));
+        out.push((d.join(INSTALL_SUBDIR).join("fixtures"), Source::SystemData));
     }
     out
 }
@@ -196,32 +208,15 @@ pub fn resolve(explicit: Option<&Path>) -> Result<Fixtures, Error> {
         return Err(Error::NamedButMissing(p));
     }
 
-    let mut candidates = vec![PathBuf::from("fixtures")];
-    let beside = beside_executable();
-    let user = user_data_dir().map(|d| d.join(INSTALL_SUBDIR).join("fixtures"));
-    let system: Vec<PathBuf> = system_data_dirs()
-        .into_iter()
-        .map(|d| d.join(INSTALL_SUBDIR).join("fixtures"))
-        .collect();
-    candidates.extend(beside.iter().cloned());
-    candidates.extend(user.iter().cloned());
-    candidates.extend(system.iter().cloned());
-
-    for p in candidates {
+    // `is_dir()` rather than `exists()`: a FILE called `fixtures` is not a
+    // fixture directory, and selecting it would turn a mistake into a
+    // confusing read error from a path nobody typed.
+    for (p, make) in search_path() {
         if !p.is_dir() {
             continue;
         }
-        let source = if p == Path::new("fixtures") {
-            Source::WorkingDirectory(p.clone())
-        } else if beside.contains(&p) {
-            Source::BesideExecutable(p.clone())
-        } else if user.as_deref() == Some(p.as_path()) {
-            Source::UserData(p.clone())
-        } else {
-            Source::SystemData(p.clone())
-        };
         return Ok(Fixtures {
-            source,
+            source: make(p.clone()),
             dir: p,
             _scratch: None,
         });
@@ -320,7 +315,7 @@ mod tests {
     #[test]
     fn the_search_path_starts_at_the_checkout_and_ends_at_the_system() {
         let path = search_path();
-        assert_eq!(path.first().unwrap(), Path::new("fixtures"));
+        assert_eq!(path.first().unwrap().0, Path::new("fixtures"));
         assert!(
             path.len() > 1,
             "nothing but the working directory was searched"
