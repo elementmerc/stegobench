@@ -69,7 +69,10 @@ bundled = false            # derived from the size, not chosen: true at or
                            # below 750 MB, and the entry is refused if the
                            # flag disagrees with its own size
 
-[emits]
+[emits]                    # required once there is an [invoke] block: nothing
+                           # can work out from a number which way round it
+                           # reads, so an entry the harness can drive has to
+                           # say. The entry is refused without it
 output = "score"           # a number per image, which is what a curve needs
 higher_means_stego = true
 
@@ -168,6 +171,12 @@ adapter:
 export MY_DETECTOR_ENDPOINT=http://10.1.2.3:3000/api/score
 ```
 
+Check the port is yours before you start. 3000 is a common default and
+something else on the machine may already hold it, in which case your probes
+reach that instead and answer with whatever it serves: a web application
+replying `405 Method Not Allowed` to a POST looks nothing like a detector and
+costs a while to recognise.
+
 A private address here is entirely fine. It is in your shell, for this run,
 rather than in a file that reaches everybody who clones the repository. The
 same goes for a licence token: name the variable in `secrets`, and the harness
@@ -241,6 +250,8 @@ Worth knowing before you start a long one:
 
 | Flag | What it is for |
 |---|---|
+| `--jobs N` | How many images to score at once. Defaults to 1, one image at a time, because each worker starts its own container or process and several competing for one machine can make a tool fail in ways that look like a detection result. Raise it slowly and watch the machine; above the core count usually buys nothing |
+| `--keep-raw` | Keep what the detector printed for every image, not only for the ones no answer could be read from. It goes beside the records in `<records>.raw.jsonl`, and on an 18 image run it was 46 times the size of the records file. This is the flag for writing an adapter |
 | `--limit N` | A smoke test over the first N items. The result is marked `custom`, because a prefix of a corpus is not the corpus |
 | `--timeout SECONDS` | How long any single image gets before the detector is killed and that item is recorded as an error. Defaults to 60 |
 | `--corpus DIR` | A directory of unpacked samples on this machine, never a registered id. `stegobench fetch <id>` is what turns an id into a directory |

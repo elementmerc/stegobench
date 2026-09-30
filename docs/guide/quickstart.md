@@ -140,6 +140,8 @@ Useful flags:
 | `--split test` | score only the held-out half, which is where a trained detector's number has to come from |
 | `--limit N` | stop after N items, for a smoke test. Marks the result `custom` |
 | `--timeout SECONDS` | how long one image gets before the detector is killed. Default 60 |
+| `--jobs N` | how many images to score at once. Default 1, one at a time, because several workers competing for one machine can make a tool fail in ways that look like a result. Raise it slowly |
+| `--keep-raw` | keep what the detector printed for every image, in `<records>.raw.jsonl`. Several times the size of the records file, and what you want while writing an adapter |
 | `--trained-on ID` | record which corpus this detector was trained on, because a detector scored on what it trained on isn't being measured |
 
 Exit code 0 means every detector asked for produced a result. 3 means at least

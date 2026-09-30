@@ -37,6 +37,13 @@ the parts that are deliberately not finished.
   writes a validated `result-v1` document. The run resumes after an
   interruption, and refuses to continue if the corpus changed under the
   records rather than filing answers against the wrong images.
+- `stegobench score --jobs N` scores N images at once. It defaults to 1
+  because each worker starts its own container or process, and several
+  competing for one machine can make a tool fail in ways that look like a
+  detection result.
+- `stegobench score --keep-raw` keeps what the detector printed for every
+  image, in `<records>.raw.jsonl`, rather than only for the ones no answer
+  could be read from. It is what an adapter is debugged on.
 - `stegobench score` checks the two reliability rules rather than declaring
   them. A corpus that puts a cover and its stego twin on opposite sides of a
   train and test split stops the run, because that inflates every number and
@@ -114,6 +121,12 @@ the parts that are deliberately not finished.
 
 ### Registry
 
+- A detector entry with an `[invoke]` block now has to declare `[emits]`, and
+  is refused at load with the block to add if it doesn't. Nothing can tell
+  from a number whether a high one means stego, so the assumption made in
+  place of a declaration was one of the two ways a measurement comes out with
+  its sign reversed, and `describe` read it back as though somebody had
+  written it down.
 - Thirteen tools registered: seven detectors (Aletheia's SPA, RS and
   rich-model estimators, StegExpose, zsteg, plus Stegcore and StegaShield as
   subjects rather than references) and six embedders (steghide, outguess,

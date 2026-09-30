@@ -78,6 +78,10 @@ progress still reaches a terminal.
   4 that at least one failed, so 0 never means "some".
   Resumable, per detector: every answer lands in a records file as it is
   produced, and the same command run again continues rather than restarting.
+  `--jobs N` scores N images at once and defaults to 1, because each worker
+  starts its own container or process. `--keep-raw` keeps what the detector
+  printed for every image in `<records>.raw.jsonl`, rather than only for the
+  ones no answer could be read from, which is what an adapter is debugged on.
   It reads an unpacked corpus directory, and marks every such run `custom`,
   because a directory carries no digest anybody can check. A tiny corpus
   ships in the clone at `corpora/starter` (six covers, twelve stego images)

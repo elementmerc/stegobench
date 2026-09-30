@@ -63,9 +63,12 @@ endpoint_env = "STEGASHIELD_ENDPOINT"
 #     STEGASHIELD_ENDPOINT=http://<host>:<port>/api/analyze
 #
 # The route is `/api/analyze` (the vendor's spelling, so it stays American)
-# and the container serves it on port 3000. The host is yours and only yours:
-# the instance runs on whatever machine or docker network you start it on,
-# and it is normally an internal one with no route to the internet.
+# and the container serves it on port 3000 unless you moved it. Check that it
+# is free before you start: 3000 is a common default and something else may
+# already hold it, in which case the probes reach that instead and answer with
+# whatever it serves. The host is yours and only yours: the instance runs on
+# whatever machine or docker network you start it on, and it is normally an
+# internal one with no route to the internet.
 #
 # It is a comment and not an `env` line on purpose. A value here would be a
 # DEFAULT, and a default address is scored against whatever answers on it, so
