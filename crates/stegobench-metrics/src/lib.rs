@@ -312,6 +312,25 @@ pub fn roc_auc_interval(scores: &[f64], labels: &[bool], z: f64) -> Option<AucIn
     }
     let se = var.sqrt();
 
+    // A WIDTH OF ZERO IS NOT A MEASUREMENT OF PRECISION
+    //
+    // DeLong's variance is built from how much each observation moves the
+    // statistic. When the classes separate completely every positive beats
+    // every negative, each component is identical, the sample variance is
+    // exactly zero and the interval collapses onto the estimate. The same
+    // happens when a detector answers identically every time, which gives
+    // 0.5 with no width.
+    //
+    // Both cases printed a 95% interval of zero width on as few as four
+    // observations, which is the most quotable and least defensible line the
+    // tool could produce. There is no width to report here, so none is
+    // reported: the estimator has nothing to say at the boundary, and saying
+    // so is honest where inventing a bound from a method this crate does not
+    // implement would not be.
+    if se == 0.0 {
+        return None;
+    }
+
     Some(AucInterval {
         auc,
         standard_error: se,
@@ -1067,30 +1086,43 @@ mod delong_tests {
         assert!(got.low < got.auc && got.auc < got.high);
     }
 
+    /// This test used to assert the opposite, and the opposite was wrong.
+    ///
+    /// Six observations that happen to separate cleanly say nothing about
+    /// how the detector behaves on the seventh, so "95% confident the AUC is
+    /// between 1.0 and 1.0" is a claim no sample of this size supports. It
+    /// was also the single most quotable line the tool produced.
     #[test]
-    fn a_perfect_separation_has_a_zero_width_interval() {
-        // Every positive above every negative. There is no sampling noise in
-        // the ordering, so DeLong's variance is exactly zero, and the
-        // interval must not be reported as wider than the measurement.
+    fn a_perfect_separation_reports_no_interval_rather_than_a_width_of_zero() {
         let scores = vec![1.0, 2.0, 3.0, 10.0, 11.0, 12.0];
         let labels = vec![false, false, false, true, true, true];
-        let got = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
-        assert_eq!(got.auc, 1.0);
-        assert_eq!(got.standard_error, 0.0);
-        assert_eq!((got.low, got.high), (1.0, 1.0));
+        assert_eq!(roc_auc(&scores, &labels), Some(1.0));
+        assert_eq!(roc_auc_interval(&scores, &labels, Z_95), None);
     }
 
+    /// The same collapse from the other direction.
+    ///
+    /// Every comparison is a tie, so every structural component is identical
+    /// and the variance is zero. The estimator is not certain here; it has
+    /// nothing to say. What the detector did is reported by the identical
+    /// answers finding, not by a zero width interval.
     #[test]
-    fn a_detector_answering_one_number_to_everything_has_no_spread_either() {
-        // AUC 0.5 by construction. Every comparison is a tie, so every
-        // structural component is 0.5 and the variance is zero: the tool is
-        // not uncertain about this AUC, it is certain the detector said
-        // nothing. The warning about that lives in `score`, not here.
+    fn one_answer_to_everything_reports_no_interval_either() {
         let scores = vec![7.0; 8];
         let labels = vec![true, false, true, false, true, false, true, false];
-        let got = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
-        assert_eq!(got.auc, 0.5);
-        assert_eq!(got.standard_error, 0.0);
+        assert_eq!(roc_auc(&scores, &labels), Some(0.5));
+        assert_eq!(roc_auc_interval(&scores, &labels, Z_95), None);
+    }
+
+    /// A real sample still gets a real interval, so the guard above cannot
+    /// be quietly swallowing every case.
+    #[test]
+    fn an_ordinary_sample_still_has_a_width() {
+        let scores = vec![1.0, 4.0, 2.0, 9.0, 3.0, 8.0, 5.0, 7.0];
+        let labels = vec![false, true, false, true, false, true, false, true];
+        let got = roc_auc_interval(&scores, &labels, Z_95).expect("an interval");
+        assert!(got.standard_error > 0.0);
+        assert!(got.low < got.high, "[{}, {}]", got.low, got.high);
     }
 
     #[test]

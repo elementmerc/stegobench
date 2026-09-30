@@ -283,8 +283,16 @@ impl Report {
             self.auc,
             match self.auc_ci95 {
                 Some([lo, hi]) => format!("\n95% interval   [{lo:.4}, {hi:.4}]"),
-                None => "\n95% interval   not estimated: one class has fewer \
-                         than two members"
+                // Two different reasons, and naming the wrong one sends a
+                // reader to fix a sample size that is not the problem.
+                None if self.n_clean < 2 || self.n_stego < 2 => {
+                    "\n95% interval   not estimated: one class has fewer \
+                     than two members"
+                        .to_string()
+                }
+                None => "\n95% interval   not estimated: these answers \
+                         separate with nothing left over, so the estimator \
+                         has no width to report"
                     .to_string(),
             }
         );
@@ -844,8 +852,32 @@ mod tests {
         let report = compute(input, &[("0.50".to_string(), 0.5)]).expect("rankable");
         let text = report.human();
         assert!(text.contains("AUC            1.0000"), "{text}");
-        assert!(text.contains("95% interval   [1.0000, 1.0000]"), "{text}");
         assert!(text.contains("TPR at 0.50    1.0000"), "{text}");
+        // These four answers separate completely, so there is no interval to
+        // print. What must NOT appear is a 95% interval of zero width, which
+        // is what both commands used to show.
+        assert!(text.contains("95% interval   not estimated"), "{text}");
+        assert!(text.contains("separate with nothing left over"), "{text}");
+        assert!(!text.contains("fewer than two members"), "{text}");
+
+        // A sample with room in it still prints a real interval here, so the
+        // rendering itself is still the same as `score`'s.
+        let spread = compute(
+            Input {
+                // Deliberately overlapping: one stego image scores below
+                // two clean ones, so the classes do not separate and the
+                // estimator has something to measure.
+                scores: vec![Some(0.9), Some(0.5), Some(0.4), Some(0.2), Some(0.8), Some(0.7)],
+                labels: vec![true, false, true, false, true, false],
+            },
+            &[],
+        )
+        .expect("rankable");
+        assert!(
+            spread.human().contains("95% interval   ["),
+            "{}",
+            spread.human()
+        );
         // Full precision is still one flag away, for anybody doing
         // arithmetic on it.
         assert_eq!(report.to_json()["auc"], serde_json::json!(1.0));
