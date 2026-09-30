@@ -1732,32 +1732,21 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         }
     }
     human.push_str(&format!(
-        "\nRecords        about {records_mb:.1} MB\nWorst case     {} (a \
-         ceiling, not a forecast: every item hitting the {timeout}s \
-         deadline)\nConfiguration  {configuration}: {why}",
+        "\nRecords        about {records_mb:.1} MB\nWorst case     \
+         {}\nConfiguration  {configuration}: {why}",
         human_duration((items * timeout * entries.len() as u64) as f64)
     ));
 
-    // WHERE THE RATE COMES FROM, SAID IN THE OUTPUT RATHER THAN ONLY IN THE
-    // REGISTRY
-    //
-    // `seconds_per_image` is a number whoever registered the tool wrote down.
-    // Nothing here has ever timed a detector, and the mechanism that was meant
-    // to replace a declared rate with a measured one does not exist yet, so
-    // every total printed above is arithmetic over a guess. It is also a rate
-    // for the WORK, and the host starts the tool once per image, so the
-    // start-up cost of a container or a process is in the real run and not in
-    // the figure. Measured 2026-09-30: an estimate of about 3 minutes against
-    // roughly 11 minutes on the same machine. Saying "about" in front of a
-    // figure that is systematically low is the plan being confidently wrong,
-    // which is worse than the plan admitting what it knows.
+    // One line, because the reasoning behind it is on `plan --help` and a
+    // reader who wants it can ask. What cannot be left out is the claim: a
+    // total presented without the word "declared" reads as a measurement,
+    // and saying "about" in front of a figure that is systematically low is
+    // the plan being confidently wrong.
     if estimated > 0 {
         human.push_str(
-            "\n\nThe rate is what each tool's registry entry DECLARES. \
-             Nothing here has timed one, and the figure covers the work on an \
-             image and not the cost of starting the tool once per image, so \
-             a real run takes longer. Read the total as a floor and an order \
-             of magnitude, not a budget.",
+            "\n\nRates are declared by each registry entry, not measured, and \
+             exclude per-image start-up. Read the total as a floor. \
+             `stegobench plan --help` says why.",
         );
     }
     if !notes.is_empty() {
@@ -1782,9 +1771,7 @@ fn plan_configuration(
     let Some(id) = corpus_id else {
         return (
             "custom",
-            "no --corpus-id, so nothing to check this directory against. \
-             Comparable with itself, not with anybody else's number"
-                .into(),
+            "no --corpus-id, so nothing to check this directory against".into(),
         );
     };
     let Some(entry) = reg.corpora.get(id) else {
@@ -6922,10 +6909,22 @@ mod tests {
             "{}",
             out.human
         );
-        assert!(out.human.contains("DECLARES"), "{}", out.human);
+        // The estimate still says it is declared rather than measured, and
+        // still says the total is a floor. What moved into `plan --help` is
+        // the REASONING for both; what stays here is the claim itself, which
+        // is the part a reader has to see without asking for it.
+        assert!(out.human.contains("declared"), "{}", out.human);
         assert!(
-            out.human.contains("a ceiling, not a forecast"),
+            out.human.contains("Read the total as a floor"),
             "{}",
+            out.human
+        );
+        // And the worst-case figure is now bare, because the parenthetical
+        // explaining it was longer than the line it qualified.
+        assert!(out.human.contains("Worst case"), "{}", out.human);
+        assert!(
+            !out.human.contains("a ceiling, not a forecast"),
+            "the explanation belongs in `plan --help`, not in every run: {}",
             out.human
         );
         assert_eq!(out.json["rate_source"], serde_json::json!("declared"));

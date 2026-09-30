@@ -265,6 +265,19 @@ pub enum Command {
     /// The command is typed exactly as you would run it, flags and all, so
     /// anything `score` requires is required here too.
     ///
+    /// WHERE THE RATE COMES FROM, AND WHY THE TOTAL IS A FLOOR
+    ///
+    /// Every per-image rate is a number whoever registered the tool wrote
+    /// down. Nothing here has ever timed a detector, so the totals are
+    /// arithmetic over a declaration. The rate also covers the work on an
+    /// image and not the cost of starting the tool once per image, and for a
+    /// container that start-up dominates: measured on 2026-09-30, an estimate
+    /// of about 3 minutes against roughly 11 minutes on the same machine.
+    ///
+    /// So read the total as a floor and an order of magnitude. "Worst case"
+    /// is the other end, and it is a ceiling rather than a forecast: every
+    /// item hitting the timeout deadline, which a real run will not do.
+    ///
     /// Example:
     ///   stegobench plan score --corpus corpora/starter --detector stegexpose
     Plan {
