@@ -340,7 +340,8 @@ def check_covers(rows: list[dict], expected: int, report: Report) -> None:
                     f"{len(unstamped):,} row(s) carry no whole-number "
                     f"tier_order, e.g. {unstamped[:3]}. Tier order is the one "
                     f"ordering the tiers nest over, so a row without it "
-                    f"belongs to no tier. Run manifest_repair.py")
+                    f"belongs to no tier. Run "
+                    f"`pentimento manifest-repair <manifest>`")
     orders = sorted(r["tier_order"] for r in rows
                     if isinstance(r.get("tier_order"), int)
                     and not isinstance(r.get("tier_order"), bool))
