@@ -181,8 +181,48 @@ pub struct CorpusRef {
     /// in one and differ by the clean count in the other, with no way to tell
     /// which convention they were holding.
     pub pairs: u64,
+    /// How many items the corpus holds in total, where the run covered only
+    /// some of them.
+    ///
+    /// Absent means the run covered the whole corpus, which is the ordinary
+    /// case and should not have to be stated.
+    ///
+    /// THE DIGEST DOES NOT SAY THIS AND CANNOT
+    ///
+    /// `digest` is computed over the corpus manifest, so it names the
+    /// directory rather than the subset that was scored. A run over eight
+    /// images of eighteen therefore produced a byte-identical digest to the
+    /// full run, and `verify` recomputed it, found it matching, and said the
+    /// document "was measured on the corpus ... all 18 image(s) hash to what
+    /// their records state". That sentence was false and exit 0 asserted it.
+    ///
+    /// `--limit` is otherwise a free dial for anybody who wants a flattering
+    /// number: sweep it, keep the value that suits, and the tool a reviewer
+    /// runs blesses the result. So a truncated run says so here, and `verify`
+    /// reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of_items: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<String>,
+}
+
+/// What a plugin's two-sided self-test said.
+///
+/// `Answered` is not a pass and not a fault. A SUBJECT is a tool being
+/// measured, so "did not detect the fixture" is the finding rather than a
+/// broken installation, and collapsing it into `Failed` would mean the
+/// benchmark permanently describing what it measures as faulty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SelfTest {
+    /// Correct on both fixtures.
+    Passed,
+    /// Wrong on at least one.
+    Failed,
+    /// Could not be asked, which is not the same as being wrong.
+    Skipped,
+    /// It answered, and settled neither fixture.
+    Answered,
 }
 
 /// Which hiding method, at what strength.
@@ -358,6 +398,19 @@ pub struct PluginRef {
     /// What the thing that produced these numbers could reach while it ran.
     /// It says nothing about how the tool is pinned; `pinned_by` says that.
     pub isolation: Isolation,
+    /// What the plugin's own two-sided self-test said, at the time of this
+    /// run.
+    ///
+    /// The self-test is mandatory to register a detector and used to stop
+    /// there, so a reviewer holding a result had no way to tell a plugin that
+    /// passed from one that has never settled either fixture. The check is
+    /// two images against a corpus of thousands, so running it beside the
+    /// measurement costs nothing worth saving.
+    ///
+    /// Absent in a document written before this was recorded, or where no
+    /// fixtures could be found to ask with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selftest: Option<SelfTest>,
 }
 
 /// How the bytes that ran are named, and how somebody else would get them.
@@ -462,7 +515,36 @@ pub struct Declarations {
     /// trained on is not being measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trained_on: Option<String>,
-    /// Set by the submission path, never by the submitter.
+    /// Whether this run scored a detector against the corpus it declared it
+    /// was trained on.
+    ///
+    /// **Set by the harness from what it actually ran, never by the person
+    /// running it**, the same rule `configuration` follows and for the same
+    /// reason: the one person who should not be deciding whether a number is
+    /// contaminated is the one who wants it to be clean.
+    ///
+    /// The leaderboard promised to reject a contaminated submission "without
+    /// an explicit contamination flag" while no such flag existed, so the
+    /// rule could not be applied to anything. The run has always warned about
+    /// this in the terminal; the warning is what a reviewer never sees.
+    ///
+    /// Defaults to false so a document written before this existed still
+    /// parses, which is safe because every such document predates any means
+    /// of setting it.
+    #[serde(default)]
+    pub contaminated: bool,
+    /// Whether this number came from whoever owns the detector, rather than
+    /// from an independent run.
+    ///
+    /// `score` writes `true`, because it is being run by somebody and the
+    /// harness has no way to know who. The submission path clears it when a
+    /// run is reproduced independently.
+    ///
+    /// It used to be written `false` unconditionally, which meant a vendor
+    /// scoring their own product got a document asserting the opposite, and
+    /// nothing stopped that document being published as though a third party
+    /// had produced it. A field that defaults to the flattering answer is
+    /// worse than no field.
     pub self_reported: bool,
 }
 
@@ -1104,6 +1186,7 @@ mod tests {
                 source: CorpusSource::Fetched,
                 digest: "sha256:b633b019".into(),
                 pairs: 1000,
+                of_items: None,
                 split: Some("test".into()),
             },
             arm: Arm {
@@ -1132,6 +1215,7 @@ mod tests {
                     name: "aletheia-rich".into(),
                     image: "ghcr.io/x/y@sha256:abc".into(),
                     determinism: Determinism::Exact,
+                    selftest: None,
                     pinned_by: PinnedBy::ImageDigest,
                     isolation: Isolation::SandboxNoNetwork,
                 }],
@@ -1146,6 +1230,7 @@ mod tests {
                 pairing: Pairing::SingleVariable,
                 configuration: Configuration::Named,
                 trained_on: None,
+                contaminated: false,
                 self_reported: false,
             },
             content_digest: None,

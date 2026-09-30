@@ -513,6 +513,19 @@ pub enum Command {
             value_parser = positive_jobs
         )]
         jobs: usize,
+        /// The seed your detector was run with, recorded as your
+        /// declaration.
+        ///
+        /// Nothing in this harness is random, so this is not a seed it uses:
+        /// it is the one YOU set inside your plugin, written into the
+        /// document because a learned detector with a sampling step is not
+        /// reproducible without it. Leave it out if your plugin is
+        /// deterministic; absent is an answer rather than an omission.
+        ///
+        /// Nothing checks the value. What catches a wrong one is somebody
+        /// re-running the measurement and getting a different number.
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
         /// Keep what the detector printed, for every image rather than only
         /// the ones it could not be read on.
         ///

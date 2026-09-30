@@ -1542,6 +1542,34 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                 out.json = json;
                 return out;
             }
+            // A TRUNCATED RUN IS NOT A MEASUREMENT OF THIS CORPUS
+            //
+            // The digest covers the corpus manifest, so a run that scored
+            // eight images of eighteen produces a digest identical to the
+            // full run's and reaches this line. Saying "was measured on the
+            // corpus ... all 18 image(s)" about it is an affirmative false
+            // statement from the one command whose job is refusing those, and
+            // exit 0 is what a reviewer's script reads.
+            //
+            // `--limit` would otherwise be a free dial: sweep it, keep the
+            // value that flatters, and the benchmark certifies the answer.
+            if let Some(total) = result.corpus.of_items {
+                let scored = result.metrics.n_clean + result.metrics.n_stego;
+                let mut out = Output::err_because(
+                    exit::VERIFY_MISMATCH,
+                    "partial-run",
+                    format!(
+                        "{} scored {scored} of the {total} item(s) this corpus \
+                         holds, so it is not a measurement of it. The digests \
+                         agree because a digest names the corpus and not the \
+                         part of it that was read. Score the whole corpus \
+                         before quoting a number for it.",
+                        file.display()
+                    ),
+                );
+                out.json = json;
+                return out;
+            }
             let mut out = Output::ok(
                 json,
                 format!(
@@ -1552,6 +1580,23 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                 ),
             );
             out.code = exit::OK;
+            return out;
+        }
+        // The same refusal as the deep path: --shallow says the bytes were
+        // not re-read, not that a partial run counts as a whole one.
+        if let Some(total) = result.corpus.of_items {
+            let scored = result.metrics.n_clean + result.metrics.n_stego;
+            let mut out = Output::err_because(
+                exit::VERIFY_MISMATCH,
+                "partial-run",
+                format!(
+                    "{} scored {scored} of the {total} item(s) this corpus \
+                     holds, so it is not a measurement of it. Score the whole \
+                     corpus before quoting a number for it.",
+                    file.display()
+                ),
+            );
+            out.json = json;
             return out;
         }
         let mut out = Output::ok(
@@ -2511,6 +2556,10 @@ struct ScoreRequest<'a> {
     jobs: usize,
     /// Keep what the detector printed for every image.
     keep_raw: bool,
+    /// The seed the caller declared their plugin was run with.
+    seed: Option<u64>,
+    /// Where the self-test fixtures live.
+    fixtures: Option<&'a Path>,
     limit: Option<u64>,
 }
 
@@ -2526,6 +2575,8 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         timeout,
         jobs,
         keep_raw,
+        seed,
+        fixtures,
         limit,
     } = req;
     let reg = &resolved.registry;
@@ -2694,6 +2745,8 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
             timeout,
             jobs,
             keep_raw,
+            seed,
+            fixtures,
             out,
             out_dir.as_deref(),
             resolved.adapter_roots(),
@@ -2926,6 +2979,8 @@ fn run_one<P>(
     timeout: u64,
     jobs: usize,
     keep_raw: bool,
+    seed: Option<u64>,
+    fixtures: Option<&Path>,
     out: Option<&Path>,
     out_dir: Option<&Path>,
     adapter_roots: &[PathBuf],
@@ -2954,6 +3009,8 @@ where
             timeout: std::time::Duration::from_secs(timeout),
             jobs,
             keep_raw,
+            seed,
+            fixtures,
             adapter_roots,
         },
         |line: &str| say(line),
@@ -3703,8 +3760,16 @@ fn run(cli: &Cli) -> Output {
             timeout,
             jobs,
             keep_raw,
+            seed,
             limit,
         } => with_registry(cli, |r| {
+            // Resolved here and held for the whole call, the same way
+            // `doctor` holds it, because for the built-in copy this owns the
+            // scratch directory the fixture images were unpacked into. A
+            // machine with no fixtures records no self-test rather than
+            // refusing the run: the measurement is still worth having, and
+            // the document says the check was not made.
+            let found = fixtures::resolve(None).ok();
             cmd_score(
                 r,
                 ScoreRequest {
@@ -3718,6 +3783,8 @@ fn run(cli: &Cli) -> Output {
                     timeout: *timeout,
                     jobs: *jobs,
                     keep_raw: *keep_raw,
+                    seed: *seed,
+                    fixtures: found.as_ref().map(|f| f.dir()),
                     limit: *limit,
                 },
             )
@@ -4500,6 +4567,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
             },
         );
@@ -4555,6 +4624,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
             },
         );
@@ -5675,6 +5746,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6341,6 +6414,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6388,6 +6463,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6439,6 +6516,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6479,6 +6558,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6541,6 +6622,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6583,6 +6666,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6621,6 +6706,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6663,6 +6750,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6708,6 +6797,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6726,6 +6817,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6761,6 +6854,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6797,6 +6892,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -6842,6 +6939,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -7012,6 +7111,8 @@ mod tests {
                         timeout: 5,
                         jobs: 1,
                         keep_raw: false,
+                        seed: None,
+                        fixtures: None,
                         limit: None,
                         split: None,
                     },
@@ -7123,6 +7224,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -7170,6 +7273,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -7216,6 +7321,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: Some(2),
                 split: None,
             },
@@ -7261,6 +7368,8 @@ mod tests {
                 timeout: 5,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 limit: None,
                 split: None,
             },
@@ -7454,6 +7563,8 @@ mod tests {
                     timeout: 5,
                     jobs: 1,
                     keep_raw: false,
+                    seed: None,
+                    fixtures: None,
                     limit: None,
                     split: None,
                 },
@@ -7550,6 +7661,7 @@ mod tests {
                 timeout: 60,
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
                 limit: None,
             },
             Command::Validate {

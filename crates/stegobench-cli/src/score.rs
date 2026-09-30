@@ -50,7 +50,7 @@ use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
     Arm, ArmMetrics, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain,
     Host, Isolation, Metrics, Pairing, PinnedBy, PluginRef, Provenance, Rate, RateUnit, Result1,
-    SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
+    SelfTest, SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Sample, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
@@ -66,6 +66,10 @@ pub struct Request<'a> {
     /// Keep what the detector printed for every image, not only the ones it
     /// could not be read on.
     pub keep_raw: bool,
+    /// The seed the caller declared their plugin was run with.
+    pub seed: Option<u64>,
+    /// Where the self-test fixtures live.
+    pub fixtures: Option<&'a Path>,
     pub limit: Option<u64>,
     /// The registry's entry for this corpus, where the caller named one.
     ///
@@ -279,6 +283,12 @@ pub struct Prepared {
     /// the same declaration: it is a property of the detector and the command,
     /// not of one pass over the corpus.
     trained_on: Option<String>,
+    /// Whether the detector declared it was trained on this very corpus.
+    contaminated: bool,
+    /// How many items the corpus held, where `--limit` stopped the run short.
+    ///
+    /// `None` means the run covered all of it.
+    of_items: Option<u64>,
     /// Which samples this run covers, in corpus order.
     ///
     /// All true unless `--split` narrowed it. One bool per sample, the same
@@ -354,6 +364,8 @@ where
             timeout: request.timeout,
             jobs: request.jobs,
             keep_raw: request.keep_raw,
+            seed: request.seed,
+            fixtures: request.fixtures,
             adapter_roots: request.adapter_roots,
         },
         &mut progress,
@@ -406,6 +418,10 @@ where
     // single image is scored, because the answer does not depend on the run
     // and a Core tier is hours: discovering at the end that the directory was
     // never the corpus named is discovering it far too late.
+    // Recorded on the document as well as warned about, because the warning
+    // goes to whoever ran this and the document goes to whoever has to trust
+    // the number.
+    let mut contaminated = false;
     let claim_holds = match registered {
         None => false,
         Some(entry) => match entry
@@ -530,6 +546,7 @@ where
         let same = aliases
             .iter()
             .any(|a| a.trim().eq_ignore_ascii_case(t) && !a.trim().is_empty());
+        contaminated = same;
         if same {
             progress(&format!(
                 "WARNING: this detector is declared as trained on {trained}, \
@@ -598,9 +615,13 @@ where
 
     let mut labels = Vec::new();
     let mut keep = Vec::new();
+    // Set only when `--limit` actually cut the walk short, so the ordinary
+    // whole-corpus run says nothing rather than saying "all of it".
+    let mut of_items: Option<u64> = None;
     let mut arm_names: Vec<String> = Vec::new();
     let mut arms: Vec<Option<u16>> = Vec::new();
-    for (i, sample) in Samples::open(corpus)?.enumerate() {
+    let mut rows = Samples::open(corpus)?.enumerate();
+    while let Some((i, sample)) = rows.next() {
         let sample = sample?;
         let take = match wanted {
             None => true,
@@ -614,6 +635,16 @@ where
             labels.push(sample.role == Role::Stego);
             arms.push(intern(&mut arm_names, arm_name_of(&sample)));
             if limit.is_some_and(|n| labels.len() as u64 >= n) {
+                // Keep walking, without scoring, purely to learn how big the
+                // corpus was. The digest covers the directory rather than the
+                // subset, so this count is the only thing that can tell a
+                // reader, or `verify`, that the run stopped early.
+                let mut total = i as u64 + 1;
+                for (_, rest) in rows.by_ref() {
+                    rest?;
+                    total += 1;
+                }
+                of_items = Some(total);
                 break;
             }
         }
@@ -648,8 +679,10 @@ where
     Ok(Prepared {
         corpus: corpus.to_path_buf(),
         limit,
+        of_items,
         registered: registered.map(|e| (e.id.clone(), e.name.clone(), e.tier.clone())),
         trained_on: trained_on.map(str::to_string),
+        contaminated,
         checks,
         claim_holds,
         labels,
@@ -680,6 +713,11 @@ pub struct How<'a> {
     /// Keep what the detector printed for every image, not only the ones it
     /// could not be read on.
     pub keep_raw: bool,
+    /// The seed the caller declared their plugin was run with.
+    pub seed: Option<u64>,
+    /// Where the self-test fixtures live, so the run can record whether the
+    /// plugin settled them. `None` records nothing rather than guessing.
+    pub fixtures: Option<&'a Path>,
     /// The trees a relative `invoke.adapter` is resolved against.
     pub adapter_roots: &'a [PathBuf],
 }
@@ -698,8 +736,23 @@ where
         timeout,
         jobs,
         keep_raw,
+        seed,
+        fixtures,
         adapter_roots,
     } = how;
+
+    // Two images against a corpus of thousands, run beside the measurement so
+    // the document can say whether the thing it measured was working. Doing
+    // it here rather than trusting a `doctor` from an hour ago is the point:
+    // the claim is about this run.
+    let selftest = fixtures.map(|dir| {
+        match stegobench_plugin::selftest::run(entry, dir, adapter_roots) {
+            stegobench_plugin::selftest::Verified::Passed => SelfTest::Passed,
+            stegobench_plugin::selftest::Verified::Failed(_) => SelfTest::Failed,
+            stegobench_plugin::selftest::Verified::Skipped(_) => SelfTest::Skipped,
+            stegobench_plugin::selftest::Verified::Answered(_) => SelfTest::Answered,
+        }
+    });
     refuse_embedder(entry)?;
 
     // The scoring pass. Streams, and every answer is on disk before the next
@@ -976,6 +1029,7 @@ where
             // A pair is a cover and its stego twin, so the count is the stego
             // side. See the field's own documentation in `result.rs`.
             pairs: labels.iter().filter(|&&stego| stego).count() as u64,
+            of_items: prepared.of_items,
             // Which half was scored, so a reader is never left inferring it
             // from `split_discipline`. That field says the corpus keeps a
             // pair together; this one says which side of it the number came
@@ -995,11 +1049,12 @@ where
             per_arm: per_arm(&scores, &labels, &arms, &prepared.arm_names),
         },
         provenance: Provenance {
-            seed: None,
+            seed,
             plugins: vec![PluginRef {
                 name: entry.name.clone(),
                 image: version,
                 determinism: entry.determinism.unwrap_or(Determinism::Unstated),
+                selftest,
                 // Two fields because an entry can declare an image AND
                 // `invoke.host`: the image digest names the subject while what
                 // executes is an adapter here that posts to a running
@@ -1035,7 +1090,11 @@ where
             pairing: checks.pairing,
             configuration: named,
             trained_on: prepared.trained_on.clone(),
-            self_reported: false,
+            contaminated: prepared.contaminated,
+            // True because somebody ran this, and the harness cannot know
+            // whether that somebody owns the detector. The submission path
+            // is what clears it.
+            self_reported: true,
         },
         content_digest: None,
     };
@@ -2159,6 +2218,8 @@ mod tests {
             timeout: Duration::from_secs(5),
             jobs: 1,
             keep_raw: false,
+            seed: None,
+            fixtures: None,
             limit,
             split: None,
         }
@@ -2519,6 +2580,8 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 adapter_roots: &[],
             },
             |_| {},
@@ -2644,6 +2707,8 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 adapter_roots: &[],
             },
             |m| lines.push(m.to_string()),
@@ -3407,6 +3472,8 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     jobs: 1,
                     keep_raw: false,
+                    seed: None,
+                    fixtures: None,
                     adapter_roots: &[],
                 },
                 |l: &str| lines.push(l.to_string()),
@@ -3430,6 +3497,8 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 jobs: 1,
                 keep_raw: false,
+                seed: None,
+                fixtures: None,
                 adapter_roots: &[],
             },
             |_| {},
