@@ -61,6 +61,11 @@ pub struct Request<'a> {
     pub corpus: &'a Path,
     pub records: PathBuf,
     pub timeout: Duration,
+    /// How many images to score at once. 1 is one at a time.
+    pub jobs: usize,
+    /// Keep what the detector printed for every image, not only the ones it
+    /// could not be read on.
+    pub keep_raw: bool,
     pub limit: Option<u64>,
     /// The registry's entry for this corpus, where the caller named one.
     ///
@@ -345,8 +350,12 @@ where
         entry,
         &prepared,
         &request.records,
-        request.timeout,
-        request.adapter_roots,
+        How {
+            timeout: request.timeout,
+            jobs: request.jobs,
+            keep_raw: request.keep_raw,
+            adapter_roots: request.adapter_roots,
+        },
         &mut progress,
     )
 }
@@ -658,17 +667,39 @@ where
 /// Callable repeatedly against the same [`Prepared`]. Nothing it does touches
 /// the corpus beyond reading the images the detector is handed, so the second
 /// detector costs a scoring pass and nothing else.
+/// How to run one detector, as against which detector and over what.
+///
+/// Grouped because every one of these is decided once, before any detector
+/// is probed for, and they travel together to every scoring call.
+#[derive(Clone, Copy)]
+pub struct How<'a> {
+    /// What one image is given before the detector is killed.
+    pub timeout: Duration,
+    /// How many images to score at once. 1 is one at a time.
+    pub jobs: usize,
+    /// Keep what the detector printed for every image, not only the ones it
+    /// could not be read on.
+    pub keep_raw: bool,
+    /// The trees a relative `invoke.adapter` is resolved against.
+    pub adapter_roots: &'a [PathBuf],
+}
+
 pub fn score_one<P>(
     entry: &Entry,
     prepared: &Prepared,
     records: &Path,
-    timeout: Duration,
-    adapter_roots: &[PathBuf],
+    how: How<'_>,
     mut progress: P,
 ) -> Result<(Result1, Tally), ScoreError>
 where
     P: FnMut(&str),
 {
+    let How {
+        timeout,
+        jobs,
+        keep_raw,
+        adapter_roots,
+    } = how;
     refuse_embedder(entry)?;
 
     // The scoring pass. Streams, and every answer is on disk before the next
@@ -691,16 +722,38 @@ where
         prepared.limit,
         prepared.side.map(|_| prepared.keep.clone()),
     )?;
+    // Beside the records and named after them, so the two halves of one
+    // run's evidence sit together and a second detector cannot write into
+    // the first one's.
+    let raw_path = {
+        let name = records.file_name().unwrap_or_default().to_string_lossy();
+        let stem = name.strip_suffix(".records.jsonl").unwrap_or(&name);
+        records.with_file_name(format!("{stem}.raw.jsonl"))
+    };
     let own_started = Instant::now();
     let tally = runner::score(
-        entry,
+        runner::Run {
+            entry,
+            already: records,
+            timeout,
+            jobs,
+            adapter_roots,
+            raw: runner::RawPolicy {
+                path: Some(&raw_path),
+                every: keep_raw,
+            },
+        },
         &mut feed,
-        records,
         &mut sink,
-        timeout,
-        adapter_roots,
         |t| progress(&format!("{} scored, {} errored", t.scored, t.errored)),
     )?;
+    // Said once, after the run, because it is a fact about the evidence
+    // rather than about the measurement: the number is still good and the
+    // reader has to know the tool's own words were not all kept.
+    if let Some(problem) = &tally.raw_problem {
+        progress(problem);
+    }
+
     // A corpus defect part way through is a failure, not a short run. Checked
     // after the loop because the iterator cannot return one.
     if let Some(e) = feed.fault {
@@ -804,30 +857,33 @@ where
     // Said out loud here rather than recorded in the document, because
     // `result-v1` has no field for it and inventing one quietly is how a
     // schema stops meaning what it says. See DEFERRED.md.
-    if scores.len() > 1 && scores.windows(2).all(|w| w[0] == w[1]) {
-        progress(&format!(
-            "every one of the {} answers from {} was identical, so this AUC is 0.5 \
-             by construction and not by measurement: it did not separate these images",
-            scores.len(),
-            entry.name
-        ));
-    }
-    // An AUC at or near zero is not a bad detector, it is a detector wired up
-    // backwards: every stego image scored BELOW every clean one, which takes
-    // as much signal as getting it right. A run that reports 0.0000 and exits
-    // 0 is a green build over an adapter whose sign is inverted, and the
-    // number reads in a table as "this tool is useless" rather than "nobody
-    // has read this tool's output correctly yet".
-    if auc < 0.5 {
-        progress(&format!(
-            "{} scored {auc:.4}, which is below the 0.5 a coin flip gets. That \
-             usually means its scores run the wrong way round rather than that \
-             it cannot see anything: at {:.4} it separates these images about as \
-             well inverted as it would upright. Check the adapter's sign before \
-             reading this as a measurement",
-            entry.name,
-            1.0 - auc
-        ));
+    // Both judgements live in `stegobench-metrics` so that `metrics`, the
+    // documented path for anybody bringing their own detector, cannot drift
+    // from what `score` says about the same numbers. The crate returns the
+    // finding; the wording stays here, because a dependency-free arithmetic
+    // crate has no business owning a sentence.
+    //
+    // Said out loud rather than recorded in the document, because `result-v1`
+    // has no field for either and inventing one quietly is how a schema stops
+    // meaning what it says. See DEFERRED.md.
+    for finding in stegobench_metrics::findings(&scores, &labels) {
+        progress(&match finding {
+            stegobench_metrics::Finding::EveryScoreIdentical { count } => format!(
+                "every one of the {count} answers from {} was identical, so this AUC is 0.5 \
+                 by construction and not by measurement: it did not separate these images. \
+                 A detector that found nothing and an adapter misreading its output look \
+                 exactly like this, and only the tool's own output tells them apart",
+                entry.name
+            ),
+            stegobench_metrics::Finding::ScoresRunBackwards { auc, inverted } => format!(
+                "{} scored {auc:.4}, which is below the 0.5 a coin flip gets. That \
+                 usually means its scores run the wrong way round rather than that \
+                 it cannot see anything: at {inverted:.4} it separates these images about as \
+                 well inverted as it would upright. Check the adapter's sign before \
+                 reading this as a measurement",
+                entry.name
+            ),
+        });
     }
 
     let mut tpr_at_fpr = BTreeMap::new();
@@ -2101,6 +2157,8 @@ mod tests {
             adapter_roots: &[],
             records: dir.with_extension("records.jsonl"),
             timeout: Duration::from_secs(5),
+            jobs: 1,
+            keep_raw: false,
             limit,
             split: None,
         }
@@ -2457,8 +2515,12 @@ mod tests {
             &entry,
             &prepared,
             &root.with_extension("t.jsonl"),
-            Duration::from_secs(5),
-            &[],
+            How {
+                timeout: Duration::from_secs(5),
+                jobs: 1,
+                keep_raw: false,
+                adapter_roots: &[],
+            },
             |_| {},
         )
         .expect("scored");
@@ -2574,9 +2636,18 @@ mod tests {
     #[cfg(unix)]
     fn said(entry: &Entry, prepared: &Prepared, records: &Path) -> String {
         let mut lines = Vec::new();
-        let _ = score_one(entry, prepared, records, Duration::from_secs(5), &[], |m| {
-            lines.push(m.to_string())
-        });
+        let _ = score_one(
+            entry,
+            prepared,
+            records,
+            How {
+                timeout: Duration::from_secs(5),
+                jobs: 1,
+                keep_raw: false,
+                adapter_roots: &[],
+            },
+            |m| lines.push(m.to_string()),
+        );
         lines.join("\n")
     }
 
@@ -3332,8 +3403,12 @@ mod tests {
                 &detector,
                 &prepared,
                 &records,
-                Duration::from_secs(5),
-                &[],
+                How {
+                    timeout: Duration::from_secs(5),
+                    jobs: 1,
+                    keep_raw: false,
+                    adapter_roots: &[],
+                },
                 |l: &str| lines.push(l.to_string()),
             )
             .unwrap_or_else(|e| panic!("{name} failed: {e}"));
@@ -3351,8 +3426,12 @@ mod tests {
             &detector,
             &prepared,
             &tmp.path().join("third.jsonl"),
-            Duration::from_secs(5),
-            &[],
+            How {
+                timeout: Duration::from_secs(5),
+                jobs: 1,
+                keep_raw: false,
+                adapter_roots: &[],
+            },
             |_| {},
         )
         .expect("third")

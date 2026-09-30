@@ -318,6 +318,17 @@ pub struct ArmMetrics {
 /// Everything needed to run it again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Provenance {
+    /// The seed the detector's plugin was run with, as declared by whoever
+    /// ran it.
+    ///
+    /// The harness has no seed of its own: nothing in scoring is random, so
+    /// there is no `--seed` flag and there is not going to be one. A seed
+    /// this tool generated and nothing consumed would make a document look
+    /// more controlled than the run was.
+    ///
+    /// Absent means the plugin is deterministic, which is an answer rather
+    /// than an omission. Nothing checks the value; what catches a wrong seed
+    /// is somebody re-running the measurement and getting a different number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
     pub plugins: Vec<PluginRef>,

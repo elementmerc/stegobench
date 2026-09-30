@@ -36,6 +36,29 @@ pub fn positive_seconds(text: &str) -> Result<u64, String> {
     }
 }
 
+/// Workers must be at least one, and a cap keeps a typo from felling the box.
+///
+/// The ceiling is deliberately generous rather than tied to the core count:
+/// a container-backed detector spends most of its wall clock waiting rather
+/// than computing, so more workers than cores is a reasonable thing to ask
+/// for. What it stops is the slipped digit, where 8 becomes 800 and the
+/// machine spends its afternoon out-of-memory killing its own workers.
+pub fn positive_jobs(text: &str) -> Result<usize, String> {
+    const CEILING: usize = 256;
+    match text.parse::<usize>() {
+        Ok(0) => Err("0 workers would score nothing. Give 1 for one image at \
+                      a time, or more to run several at once."
+            .to_string()),
+        Ok(n) if n > CEILING => Err(format!(
+            "{n} workers is beyond the {CEILING} this accepts. Each one starts \
+             its own container or process, so a number this size is usually a \
+             slipped digit."
+        )),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("{text:?} is not a whole number of workers")),
+    }
+}
+
 /// How `report` renders a table.
 ///
 /// Defined here rather than beside the renderer because `build.rs` includes
@@ -388,14 +411,14 @@ pub enum Command {
         /// corpus out as a directory and leaves a downloaded archive for you
         /// to unpack, then name the directory here and the id under
         /// --corpus-id.
-        #[arg(long, value_name = "DIR")]
+        #[arg(short = 'c', long, value_name = "DIR")]
         corpus: std::path::PathBuf,
         /// Which registered detector to ask. See `stegobench list detectors`.
         ///
         /// Repeatable, and `all` means every registered detector. With more
         /// than one, --out and --records name DIRECTORIES rather than files
         /// and each detector gets its own file inside them.
-        #[arg(long, value_name = "NAME", num_args = 1.., required = true)]
+        #[arg(short = 'd', long, value_name = "NAME", num_args = 1.., required = true)]
         detector: Vec<String>,
         /// Score only one half of the train and test split.
         ///
@@ -453,7 +476,7 @@ pub enum Command {
         ///
         /// Refused when it lands inside the corpus: a file written there
         /// joins the corpus and the next run measures a different set.
-        #[arg(long, value_name = "FILE")]
+        #[arg(short = 'o', long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
         /// Seconds any single image is given before the detector is killed and
         /// that item is recorded as an error.
@@ -468,6 +491,41 @@ pub enum Command {
             value_parser = positive_seconds
         )]
         timeout: u64,
+        /// How many images to score at once. Defaults to 1, one at a time.
+        ///
+        /// A run is serial unless you ask for otherwise, because the cost of
+        /// getting this wrong is paid by the detector rather than by us: each
+        /// worker starts its own container or process, and several of them
+        /// competing for one machine's memory can make a tool fail in ways
+        /// that look like a detection result rather than a resource problem.
+        ///
+        /// Records are written in corpus order whatever this is set to, so a
+        /// parallel run produces the same file a serial one would and can be
+        /// interrupted and resumed the same way.
+        ///
+        /// Start low and watch the machine. A number above the core count
+        /// usually buys nothing: on 2026-09-17, 128 workers on 16 cores
+        /// produced 298 out-of-memory kills for a 1.2x speedup.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value = "1",
+            value_parser = positive_jobs
+        )]
+        jobs: usize,
+        /// Keep what the detector printed, for every image rather than only
+        /// the ones it could not be read on.
+        ///
+        /// The output of an image the harness could not read an answer from
+        /// is kept either way, because a detector that found nothing and an
+        /// adapter misreading its output produce the same record and only the
+        /// tool's own words tell them apart. This flag widens that to
+        /// everything, which is what you want while writing an adapter.
+        ///
+        /// It goes beside the records, in <records>.raw.jsonl, one line per
+        /// image. Expect it to be several times the size of the records file.
+        #[arg(long)]
+        keep_raw: bool,
         /// Score the first this many items, for a smoke test.
         ///
         /// A PREFIX in corpus order, not a sample spread across the corpus.
@@ -620,7 +678,7 @@ pub enum Command {
         /// A PATH to an unpacked corpus, never a registered id: this reads
         /// the bytes, so it needs the bytes. `stegobench fetch <id>` is how
         /// an id becomes a directory.
-        #[arg(long, value_name = "DIR")]
+        #[arg(short = 'c', long, value_name = "DIR")]
         corpus: std::path::PathBuf,
         /// Compare the records only, without re-reading the images.
         ///
@@ -663,7 +721,7 @@ pub enum Command {
         format: ReportFormat,
         /// Where to write it. Defaults to stdout, and a file is written by
         /// rename-on-close so a reader never opens half a table.
-        #[arg(long, value_name = "FILE")]
+        #[arg(short = 'o', long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
     },
 
