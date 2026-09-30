@@ -3,7 +3,20 @@
 name = "stegexpose"
 kind = "detector"
 upstream = "https://github.com/b3dk7/StegExpose"
-licence = "GPL-3.0"
+# NONE GRANTED, and this said GPL-3.0 with nothing behind it. Checked inside
+# the pinned image on 2026-09-30: the cloned repository has no LICENSE file,
+# no COPYING file, and its README has no licence section, so nothing upstream
+# grants any permission and the default under copyright is that none is given.
+#
+# It's the failure this project was built to correct, sitting in our own
+# registry: a licence somebody wrote down once from an impression rather than
+# from a document. It cost nothing until we went to publish the image, and
+# then it was the difference between a mirror we may lawfully serve and one we
+# may not.
+#
+# Running it locally is unaffected. Redistributing the image is not, so the
+# image stays unpublished until the author is asked.
+licence = "none-granted"
 maintainer = "third_party"
 
 [image]
