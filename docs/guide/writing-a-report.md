@@ -50,6 +50,41 @@ differs in more than the payload` is longer than a symbol and a footnote, and
 it's longer on purpose: a symbol needs a legend, and a legend is the thing a
 copied row leaves behind.
 
+## The per-arm breakdown
+
+A run over a corpus with more than one named arm carries a second, smaller
+table under the first one:
+
+```
+Per arm. The AUC above pools the arms this run covered, and a pooled figure
+describes none of them: chance on one arm beside detection on another
+averages to something in between that nothing measured.
+
+detector    corpus                                arm       AUC                    clean/stego
+stegexpose  stegobench-starter @ sha256:0b2d03f6  lsb-0100  0.5000 [0.113, 0.887]  6/6
+stegexpose  stegobench-starter @ sha256:0b2d03f6  lsb-0400  0.6944 [0.359, 1.000]  6/6
+```
+
+The headline for that run is 0.5972, and it describes neither arm. One of them
+is chance and the other isn't, and a reader calibrating a threshold needs to
+know which is which. The clean images are shared: every arm is scored against
+all of them, because an image with nothing hidden in it belongs to no arm in
+particular.
+
+The breakdown appears only where the document has one. A run over a corpus
+with a single arm shows nothing extra, because a breakdown of one row is the
+headline figure printed twice.
+
+Arms are ordered by name, never by score, for the same reason the rows above
+them are. An interval appears beside an arm that reported one and nowhere
+else.
+
+A Core tier run breaks down into 39 arms and a report can hold thousands of
+documents, so `text` and `markdown` stop at 200 arm lines per table and say
+how many documents they left out. Nothing is lost: those documents are still
+rows in the table above, and `--format csv` and `--json` carry every arm of
+every one of them.
+
 ## The four things it won't do
 
 **It won't put two corpora in one table.** An AUC on one corpus and an AUC on
@@ -82,7 +117,15 @@ named gap beats no table; the exit code is how a script knows it's short.
 
 The CSV starts each line with a `record_type` column. A file that couldn't be
 read appears as a row with `record_type=skipped_file`, so a script reading the
-CSV can't miss that the table is short.
+CSV can't miss that the table is short. Each arm of a run appears as a line
+with `record_type=arm` straight after the `result` line it breaks down, with
+its name in `arm_name` and the run's conditions repeated on it: a spreadsheet
+gets sorted, and a line whose conditions live in the line above loses them the
+first time somebody clicks a column heading.
+
+`--json` carries the same figures under a `per_arm` list on each row, as
+numbers rather than as rendered text. The list is there on every row, empty
+where the document has no breakdown.
 
 The default doesn't change when you redirect stdout. A command that prints one
 thing on a laptop and another in CI is a command whose output you can't

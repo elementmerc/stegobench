@@ -137,6 +137,25 @@ it the report goes to stdout.
 
 WHAT THE EXIT CODE MEANS HERE
 
+PER ARM
+
+A corpus of several arms gets a second table, one row per arm, under the
+main one. The headline AUC pools the arms, and a pooled figure describes
+none of them: chance on one arm beside detection on another averages to
+something in between that nothing measured. On the starter corpus the
+pooled 0.5972 is `lsb-0100` at 0.5000, exactly chance, beside `lsb-0400`
+at 0.6944.
+
+Every arm is scored against the WHOLE clean set rather than a share of it,
+because a clean image belongs to no arm. Rows are sorted by arm name and
+never by score, and each carries its own detector and corpus so a line
+lifted out of the middle takes its conditions with it.
+
+A corpus of one arm gets no second table, since a breakdown of one row is
+the headline printed twice.
+
+EXIT CODES
+
   0   every file found became a row.
   1   a file could not be read. The table printed and is short by that much.
   2   nothing under the paths given is a result document, so there was no

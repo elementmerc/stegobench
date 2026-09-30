@@ -53,8 +53,8 @@ use std::path::{Path, PathBuf};
 
 use stegobench_core::exit;
 use stegobench_core::result::{
-    Configuration, CorpusSource, Determinism, Domain, Isolation, Pairing, PinnedBy, PluginRef,
-    RateUnit, Result1, SplitDiscipline,
+    ArmMetrics, Configuration, CorpusSource, Determinism, Domain, Isolation, Pairing, PinnedBy,
+    PluginRef, RateUnit, Result1, SplitDiscipline,
 };
 
 use crate::cli::ReportFormat;
@@ -86,6 +86,19 @@ pub const MAX_RESULTS: usize = 10_000;
 /// directories are not followed at all, so the depth cap is a second line
 /// rather than the only one.
 pub const MAX_DEPTH: usize = 8;
+
+/// How many per-arm lines one table prints before it names the rest instead.
+///
+/// A Core tier run breaks down into 39 arms and a report may hold thousands of
+/// documents, so an uncapped breakdown is a wall of text nobody reads with the
+/// main table buried somewhere above it. Two hundred lines is five such runs,
+/// which is more than anybody compares by eye and far short of the wall.
+///
+/// This one truncates where [`MAX_RESULTS`] refuses, and the difference is
+/// that nothing is lost here: the documents are all still in the table above,
+/// the count of what is not shown is printed, and `--format csv` and `--json`
+/// carry every arm of every document with no cap at all.
+pub const MAX_ARM_LINES_SHOWN: usize = 200;
 
 /// Why a whole report could not be produced.
 ///
@@ -196,6 +209,13 @@ pub struct Row {
     /// different claim from one that runs from 0.59 to 0.61.
     pub auc_ci95: Option<[f64; 2]>,
     pub tpr_at_fpr: BTreeMap<String, f64>,
+    /// The same measurement taken again within each arm, ordered by arm name.
+    ///
+    /// Empty for a document whose corpus holds fewer than two named arms, and
+    /// a row whose breakdown is empty renders exactly as it did before there
+    /// was one: an empty column of "not applicable" on the common case is
+    /// noise, and noise is what a reader learns to skip past.
+    pub per_arm: Vec<ArmMetrics>,
     pub pairing: Pairing,
     pub split: SplitDiscipline,
     pub n_clean: u64,
@@ -566,6 +586,12 @@ fn to_row(source: &Path, r: Result1) -> Row {
         flags.push("the plugins could reach the network during this run".to_string());
     }
 
+    // By arm name and deliberately not by score, for the reason the rows
+    // themselves are not ordered by score: an ordering is read as a ranking
+    // whatever the prose beside it says.
+    let mut per_arm = r.metrics.per_arm;
+    per_arm.sort_by(|a, b| a.arm.cmp(&b.arm));
+
     Row {
         source: source.display().to_string(),
         detector: r.subject.name,
@@ -585,6 +611,7 @@ fn to_row(source: &Path, r: Result1) -> Row {
         auc: r.metrics.auc,
         auc_ci95: r.metrics.auc_ci95,
         tpr_at_fpr: r.metrics.tpr_at_fpr,
+        per_arm,
         pairing: r.declarations.pairing,
         split: r.declarations.split_discipline,
         n_clean: r.metrics.n_clean,
@@ -817,6 +844,19 @@ fn flags_cell(flags: &[String]) -> String {
     flags.join(" · ")
 }
 
+/// A figure with its interval where there is one, and bare where there is not.
+///
+/// Never an invented interval and never a placeholder in place of one: an AUC
+/// of 0.60 whose interval runs from 0.29 to 0.91 is a different claim from one
+/// that runs from 0.59 to 0.61, and a run that reported no interval has made
+/// neither claim.
+fn auc_cell(auc: f64, ci95: Option<[f64; 2]>) -> String {
+    match ci95 {
+        Some([lo, hi]) => format!("{auc:.4} [{lo:.3}, {hi:.3}]"),
+        None => format!("{auc:.4}"),
+    }
+}
+
 /// The columns every format agrees on, in order.
 const HEADINGS: [&str; 12] = [
     "detector",
@@ -841,16 +881,82 @@ fn cells(row: &Row) -> [String; 12] {
         configuration_str(row.configuration).to_string(),
         row.arm(),
         domain_str(row.domain).to_string(),
-        match row.auc_ci95 {
-            Some([lo, hi]) => format!("{:.4} [{lo:.3}, {hi:.3}]", row.auc),
-            None => format!("{:.4}", row.auc),
-        },
+        auc_cell(row.auc, row.auc_ci95),
         tpr_cell(&row.tpr_at_fpr, 0.01),
         tpr_cell(&row.tpr_at_fpr, 0.10),
         pairing_str(row.pairing).to_string(),
         split_str(row.split).to_string(),
         format!("{}/{}/{}", row.n_clean, row.n_stego, row.n_error),
     ]
+}
+
+/// The columns of the per-arm breakdown.
+///
+/// Each line names its detector and its corpus rather than inheriting them
+/// from a heading, for the reason every other row in this module does: a line
+/// lifted out of the middle takes its conditions with it.
+const ARM_HEADINGS: [&str; 5] = ["detector", "corpus", "arm", "AUC", "clean/stego"];
+
+fn arm_cells(row: &Row, arm: &ArmMetrics) -> [String; 5] {
+    [
+        row.detector.clone(),
+        format!("{} @ {}", row.corpus_name, abbreviate(&row.corpus_digest)),
+        arm.arm.clone(),
+        auc_cell(arm.auc, arm.auc_ci95),
+        format!("{}/{}", arm.n_clean, arm.n_stego),
+    ]
+}
+
+/// The sentence above a per-arm breakdown.
+///
+/// The reasoning is one line here and at length in `stegobench help reports`,
+/// because it is the same reasoning every time and a paragraph repeated under
+/// every table is a paragraph nobody reads twice.
+const ARM_INTRO: &str = "The AUC above pools the arms this run covered, and a \
+                         pooled figure describes none of them: chance on one \
+                         arm beside detection on another averages to \
+                         something in between that nothing measured.";
+
+/// The per-arm lines for one table, and how many documents' breakdowns the cap
+/// left out.
+///
+/// None where no document in the table carries a breakdown, which is the
+/// common case and the one that must render as it did before.
+///
+/// Whole documents are kept or left out together, and once one is left out
+/// every later one is too, so the cap cannot produce a breakdown that looks
+/// complete for a document it cut in half or an order that depends on which
+/// documents happened to be small.
+fn arm_table(group: &Group) -> Option<(Vec<[String; 5]>, usize)> {
+    let mut lines: Vec<[String; 5]> = Vec::new();
+    let mut withheld = 0usize;
+    let mut full = false;
+    for row in group.rows.iter().filter(|r| !r.per_arm.is_empty()) {
+        // The first document is printed whatever its size, so a corpus with
+        // more arms than the cap shows its breakdown rather than nothing.
+        let fits = lines.is_empty() || lines.len() + row.per_arm.len() <= MAX_ARM_LINES_SHOWN;
+        if full || !fits {
+            full = true;
+            withheld += 1;
+            continue;
+        }
+        for arm in &row.per_arm {
+            lines.push(arm_cells(row, arm));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some((lines, withheld))
+}
+
+fn arm_withheld_note(withheld: usize) -> String {
+    format!(
+        "{withheld} further document(s) in this table carry a per-arm \
+         breakdown that is not printed here, because this stops at \
+         {MAX_ARM_LINES_SHOWN} lines. --format csv and --json carry every arm \
+         of every document."
+    )
 }
 
 /// The block naming what did not make it into the table.
@@ -935,6 +1041,19 @@ fn render_text(report: &Report) -> String {
         // under which heading.
         for line in stegobench_core::table::align_with(&table, "  ") {
             let _ = writeln!(out, "{line}");
+        }
+
+        if let Some((lines, withheld)) = arm_table(group) {
+            let _ = write!(out, "\n{}\n\n", wrap(&format!("Per arm. {ARM_INTRO}"), 78));
+            let mut arms: Vec<Vec<String>> =
+                vec![ARM_HEADINGS.iter().map(|h| h.to_string()).collect()];
+            arms.extend(lines.into_iter().map(|l| l.to_vec()));
+            for line in stegobench_core::table::align_with(&arms, "  ") {
+                let _ = writeln!(out, "{line}");
+            }
+            if withheld > 0 {
+                let _ = writeln!(out, "{}", wrap(&arm_withheld_note(withheld), 78));
+            }
         }
 
         // The flags get their own lines under the table rather than a
@@ -1055,6 +1174,28 @@ fn render_markdown(report: &Report) -> String {
             let _ = writeln!(out, "| {} |", line.join(" | "));
         }
         out.push('\n');
+
+        if let Some((lines, withheld)) = arm_table(group) {
+            let _ = write!(out, "### Per arm\n\n{ARM_INTRO}\n\n");
+            let _ = writeln!(out, "| {} |", ARM_HEADINGS.join(" | "));
+            let _ = writeln!(
+                out,
+                "|{}|",
+                ARM_HEADINGS
+                    .iter()
+                    .map(|_| "---")
+                    .collect::<Vec<_>>()
+                    .join("|")
+            );
+            for line in lines {
+                let cells: Vec<String> = line.iter().map(|c| escape_md(c)).collect();
+                let _ = writeln!(out, "| {} |", cells.join(" | "));
+            }
+            let _ = writeln!(out);
+            if withheld > 0 {
+                let _ = writeln!(out, "{}\n", arm_withheld_note(withheld));
+            }
+        }
     }
     out
 }
@@ -1083,11 +1224,14 @@ fn render_csv(report: &Report) -> String {
         "pinned_by",
         "isolation",
         "embedder",
+        "arm_name",
         "rate_value",
         "rate_unit",
         "domain",
         "image_format",
         "auc",
+        "auc_ci95_low",
+        "auc_ci95_high",
         "tpr_at_fpr",
         "pairing",
         "split_discipline",
@@ -1122,54 +1266,105 @@ fn render_csv(report: &Report) -> String {
 
     for group in &report.groups {
         for row in &group.rows {
-            let (rate_value, rate_unit) = match row.rate {
-                Some((v, u)) => (v.to_string(), unit_str(u).to_string()),
-                None => (String::new(), String::new()),
+            let mut emit = |line: Vec<String>| {
+                debug_assert_eq!(line.len(), columns.len());
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    line.iter()
+                        .map(|c| csv_field(c))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
             };
-            let line = vec![
-                "result".to_string(),
-                row.corpus_name.clone(),
-                row.corpus_digest.clone(),
-                source_str(row.corpus_source).to_string(),
-                row.corpus_tier.clone().unwrap_or_default(),
-                row.corpus_pairs.to_string(),
-                configuration_str(row.configuration).to_string(),
-                row.detector.clone(),
-                row.subject_version.clone(),
-                row.pinned_by.to_string(),
-                row.isolation.to_string(),
-                row.embedder.clone(),
-                rate_value,
-                rate_unit,
-                domain_str(row.domain).to_string(),
-                row.format.clone(),
-                format!("{:.4}", row.auc),
-                tpr_all(&row.tpr_at_fpr),
-                pairing_str(row.pairing).to_string(),
-                split_str(row.split).to_string(),
-                row.n_clean.to_string(),
-                row.n_stego.to_string(),
-                row.n_error.to_string(),
-                row.trained_on.clone().unwrap_or_default(),
-                row.self_reported.to_string(),
-                row.network_reachable.to_string(),
-                row.harness_version.clone(),
-                row.started_utc.clone(),
-                flags_cell(&row.flags),
-                row.source.clone(),
-            ];
-            debug_assert_eq!(line.len(), columns.len());
-            let _ = writeln!(
-                out,
-                "{}",
-                line.iter()
-                    .map(|c| csv_field(c))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
+            emit(csv_line(row, None));
+            // Straight after the document they break down, and uncapped:
+            // this is the format a script reads, and a script that asked for
+            // every field is not helped by a figure being left out of it.
+            for arm in &row.per_arm {
+                emit(csv_line(row, Some(arm)));
+            }
         }
     }
     out
+}
+
+/// One CSV line: the document as a whole, or one arm within it.
+///
+/// An arm line repeats every condition of the document it came from rather
+/// than pointing back at a line above it. A spreadsheet gets sorted, and a row
+/// whose conditions live in a neighbouring row loses them the first time
+/// somebody clicks a column heading.
+fn csv_line(row: &Row, arm: Option<&ArmMetrics>) -> Vec<String> {
+    let (rate_value, rate_unit) = match row.rate {
+        Some((v, u)) => (v.to_string(), unit_str(u).to_string()),
+        None => (String::new(), String::new()),
+    };
+    let (auc, ci95) = match arm {
+        Some(a) => (a.auc, a.auc_ci95),
+        None => (row.auc, row.auc_ci95),
+    };
+    let (ci_low, ci_high) = match ci95 {
+        Some([lo, hi]) => (format!("{lo:.4}"), format!("{hi:.4}")),
+        // Empty rather than a placeholder: this run reported no interval, and
+        // any number here would be one nobody measured.
+        None => (String::new(), String::new()),
+    };
+    vec![
+        match arm {
+            Some(_) => "arm".to_string(),
+            None => "result".to_string(),
+        },
+        row.corpus_name.clone(),
+        row.corpus_digest.clone(),
+        source_str(row.corpus_source).to_string(),
+        row.corpus_tier.clone().unwrap_or_default(),
+        row.corpus_pairs.to_string(),
+        configuration_str(row.configuration).to_string(),
+        row.detector.clone(),
+        row.subject_version.clone(),
+        row.pinned_by.to_string(),
+        row.isolation.to_string(),
+        row.embedder.clone(),
+        arm.map(|a| a.arm.clone()).unwrap_or_default(),
+        rate_value,
+        rate_unit,
+        domain_str(row.domain).to_string(),
+        row.format.clone(),
+        format!("{auc:.4}"),
+        ci_low,
+        ci_high,
+        // The curve was reported for the run rather than per arm, so an arm
+        // line says nothing about it instead of repeating a figure that is
+        // about a different population.
+        match arm {
+            Some(_) => String::new(),
+            None => tpr_all(&row.tpr_at_fpr),
+        },
+        pairing_str(row.pairing).to_string(),
+        split_str(row.split).to_string(),
+        match arm {
+            Some(a) => a.n_clean.to_string(),
+            None => row.n_clean.to_string(),
+        },
+        match arm {
+            Some(a) => a.n_stego.to_string(),
+            None => row.n_stego.to_string(),
+        },
+        // Unscored images are counted for the run and not attributed to an
+        // arm, so an arm line leaves the cell empty rather than claiming zero.
+        match arm {
+            Some(_) => String::new(),
+            None => row.n_error.to_string(),
+        },
+        row.trained_on.clone().unwrap_or_default(),
+        row.self_reported.to_string(),
+        row.network_reachable.to_string(),
+        row.harness_version.clone(),
+        row.started_utc.clone(),
+        flags_cell(&row.flags),
+        row.source.clone(),
+    ]
 }
 
 /// RFC 4180 quoting, written here rather than pulled in as a dependency: a
@@ -1266,7 +1461,14 @@ pub fn to_json(report: &Report) -> serde_json::Value {
                 "domain": domain_str(r.domain),
                 "format": r.format,
                 "auc": r.auc,
+                "auc_ci95": r.auc_ci95,
                 "tpr_at_fpr": r.tpr_at_fpr,
+                // Always present, empty array and all, because the key being
+                // absent for most documents would make every consumer handle
+                // two shapes of the same answer. The values are the schema's
+                // own, so an arm that reported no interval carries no
+                // `auc_ci95` key rather than a null somebody reads as zero.
+                "per_arm": r.per_arm,
                 "pairing": pairing_str(r.pairing),
                 "split_discipline": split_str(r.split),
                 "n_clean": r.n_clean,
@@ -2408,6 +2610,301 @@ mod tests {
             "{:?}",
             report.skipped
         );
+    }
+
+    /// A document whose corpus held more than one named arm, written to
+    /// `dir/a.json`.
+    fn with_arms(dir: &Path, arms: serde_json::Value) -> PathBuf {
+        let mut v = Doc::default().value();
+        v["metrics"]["per_arm"] = arms;
+        let path = dir.join("a.json");
+        std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+        path
+    }
+
+    /// Two arms, of which one is chance and the other is not. It is the case
+    /// the breakdown exists for: the pooled figure describes neither.
+    fn two_arms() -> serde_json::Value {
+        serde_json::json!([
+            {"arm": "lsb-0400", "auc": 0.6944, "n_clean": 5, "n_stego": 5},
+            {"arm": "lsb-0100", "auc": 0.5, "auc_ci95": [0.4, 0.6], "n_clean": 5, "n_stego": 5},
+        ])
+    }
+
+    #[test]
+    fn a_two_arm_document_breaks_down_into_both_arms_in_every_format() {
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(dir.path(), two_arms());
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        for format in [
+            ReportFormat::Text,
+            ReportFormat::Markdown,
+            ReportFormat::Csv,
+        ] {
+            let text = flat(&render(&report, format));
+            assert!(text.contains("lsb-0100"), "{format:?} lost an arm: {text}");
+            assert!(text.contains("lsb-0400"), "{format:?} lost an arm: {text}");
+            assert!(text.contains("0.6944"), "{format:?} lost a figure: {text}");
+            assert!(text.contains("0.5000"), "{format:?} lost a figure: {text}");
+        }
+        // And the headline figure is still there beside them, because the
+        // breakdown is additional rather than a replacement.
+        assert!(flat(&render(&report, ReportFormat::Text)).contains("0.9000"));
+    }
+
+    /// The common case. A document with no breakdown must render exactly as it
+    /// did before there was such a thing: no empty column, no "not
+    /// applicable" on every row.
+    #[test]
+    fn a_document_with_no_arms_gains_nothing_in_any_format() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc::default().write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert!(arm_table(&report.groups[0]).is_none());
+        for format in [ReportFormat::Text, ReportFormat::Markdown] {
+            let text = flat(&render(&report, format));
+            assert!(!text.contains("Per arm"), "{format:?}: {text}");
+            assert!(!text.contains("clean/stego "), "{format:?}: {text}");
+        }
+        let csv = render(&report, ReportFormat::Csv);
+        assert!(
+            !csv.lines().any(|l| l.starts_with("arm,")),
+            "an arm line with no arms: {csv}"
+        );
+    }
+
+    #[test]
+    fn an_arm_interval_is_shown_where_there_is_one_and_not_invented_where_there_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(dir.path(), two_arms());
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(text.contains("0.5000 [0.400, 0.600]"), "{text}");
+        // The arm that reported none is bare, not bracketed with anything.
+        assert!(
+            !text.contains("0.6944 ["),
+            "an interval was invented: {text}"
+        );
+
+        let csv = render(&report, ReportFormat::Csv);
+        let arm_lines: Vec<&str> = csv.lines().filter(|l| l.starts_with("arm,")).collect();
+        assert_eq!(arm_lines.len(), 2);
+        assert!(
+            arm_lines.iter().any(|l| l.contains("0.4000,0.6000")),
+            "{csv}"
+        );
+        assert!(
+            arm_lines.iter().any(|l| l.contains("0.6944,,")),
+            "the missing interval was filled in: {csv}"
+        );
+
+        let arms = &to_json(&report)["groups"][0]["rows"][0]["per_arm"];
+        assert!(arms[0]["auc_ci95"].is_array());
+        assert!(
+            arms[1].get("auc_ci95").is_none(),
+            "an absent interval became a value: {arms}"
+        );
+    }
+
+    /// By name, and deliberately not by score. An ordering is read as a
+    /// ranking whatever the prose beside it says, which is why the rows above
+    /// are not ordered by score either.
+    #[test]
+    fn the_breakdown_is_ordered_by_arm_name_and_is_reproducible() {
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(
+            dir.path(),
+            serde_json::json!([
+                {"arm": "wow-0200", "auc": 0.99, "n_clean": 5, "n_stego": 5},
+                {"arm": "lsb-0400", "auc": 0.6, "n_clean": 5, "n_stego": 5},
+                {"arm": "hugo-0100", "auc": 0.7, "n_clean": 5, "n_stego": 5},
+            ]),
+        );
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let names: Vec<&str> = report.groups[0].rows[0]
+            .per_arm
+            .iter()
+            .map(|a| a.arm.as_str())
+            .collect();
+        assert_eq!(names, ["hugo-0100", "lsb-0400", "wow-0200"]);
+        for format in [
+            ReportFormat::Text,
+            ReportFormat::Markdown,
+            ReportFormat::Csv,
+        ] {
+            let first = render(&build(&[dir.path().to_path_buf()]).unwrap(), format);
+            let second = render(&build(&[dir.path().to_path_buf()]).unwrap(), format);
+            assert_eq!(first, second, "{format:?} is not reproducible");
+        }
+    }
+
+    #[test]
+    fn the_json_carries_the_arm_figures_as_numbers_rather_than_as_a_rendered_string() {
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(dir.path(), two_arms());
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let row = &to_json(&report)["groups"][0]["rows"][0];
+        assert_eq!(row["per_arm"][0]["arm"], serde_json::json!("lsb-0100"));
+        assert_eq!(row["per_arm"][0]["auc"], serde_json::json!(0.5));
+        assert_eq!(row["per_arm"][0]["n_clean"], serde_json::json!(5));
+        assert_eq!(row["per_arm"][1]["auc"], serde_json::json!(0.6944));
+        assert_eq!(row["per_arm"].as_array().map(|a| a.len()), Some(2));
+    }
+
+    /// The key is there on every row, empty array and all. An absent key would
+    /// make a consumer handle two shapes of one answer.
+    #[test]
+    fn the_json_carries_an_empty_breakdown_as_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc::default().write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(
+            to_json(&report)["groups"][0]["rows"][0]["per_arm"],
+            serde_json::json!([])
+        );
+    }
+
+    /// The breakdown of one arm is the headline figure written twice, and the
+    /// core type says so by leaving it empty. Nothing here second-guesses it.
+    #[test]
+    fn a_single_arm_breakdown_is_rendered_if_a_document_carries_one() {
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(
+            dir.path(),
+            serde_json::json!([{"arm": "only", "auc": 0.9, "n_clean": 5, "n_stego": 5}]),
+        );
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert!(flat(&render(&report, ReportFormat::Text)).contains("only"));
+    }
+
+    fn many_arms(count: usize, prefix: &str) -> serde_json::Value {
+        serde_json::Value::Array(
+            (0..count)
+                .map(|i| {
+                    serde_json::json!({
+                        "arm": format!("{prefix}-{i:04}"),
+                        "auc": 0.6,
+                        "n_clean": 5,
+                        "n_stego": 5,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// A Core tier run breaks down into 39 arms and a report may hold
+    /// thousands of documents. The cap stops the wall of text, and it says how
+    /// many documents it left out rather than trailing off.
+    #[test]
+    fn the_breakdown_stops_at_the_cap_and_names_what_it_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            let mut v = Doc::default().value();
+            v["subject"]["name"] = serde_json::json!(format!("detector-{i}"));
+            v["provenance"]["plugins"][0]["name"] = serde_json::json!(format!("detector-{i}"));
+            v["metrics"]["per_arm"] = many_arms(80, "lsb");
+            std::fs::write(
+                dir.path().join(format!("{i}.json")),
+                serde_json::to_string(&v).unwrap(),
+            )
+            .unwrap();
+        }
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let (lines, withheld) = arm_table(&report.groups[0]).unwrap();
+        assert_eq!(lines.len(), 160, "the cap cut a document in half");
+        assert_eq!(withheld, 2);
+        for format in [ReportFormat::Text, ReportFormat::Markdown] {
+            let text = flat(&render(&report, format));
+            assert!(
+                text.contains("2 further document(s) in this table"),
+                "{format:?}: {text}"
+            );
+        }
+        // The machine formats are uncapped: four documents of eighty arms is
+        // 320 arm lines and every one of them is there.
+        let csv = render(&report, ReportFormat::Csv);
+        assert_eq!(csv.lines().filter(|l| l.starts_with("arm,")).count(), 320);
+        let json = to_json(&report);
+        for row in json["groups"][0]["rows"].as_array().unwrap() {
+            assert_eq!(row["per_arm"].as_array().map(|a| a.len()), Some(80));
+        }
+    }
+
+    /// A corpus with more arms than the cap shows its breakdown rather than
+    /// nothing at all.
+    #[test]
+    fn one_document_larger_than_the_cap_is_still_printed_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(dir.path(), many_arms(MAX_ARM_LINES_SHOWN + 5, "lsb"));
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let (lines, withheld) = arm_table(&report.groups[0]).unwrap();
+        assert_eq!(lines.len(), MAX_ARM_LINES_SHOWN + 5);
+        assert_eq!(withheld, 0);
+    }
+
+    /// An arm line is a line somebody sorts a spreadsheet by, so it repeats
+    /// every condition rather than pointing back at the line above it.
+    #[test]
+    fn a_csv_arm_line_carries_the_conditions_of_the_document_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Doc::default().value();
+        v["declarations"]["pairing"] = serde_json::json!("confounded");
+        v["metrics"]["per_arm"] = two_arms();
+        std::fs::write(
+            dir.path().join("a.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let csv = render(&report, ReportFormat::Csv);
+        let columns = csv.lines().next().unwrap().split(',').count();
+        for line in csv.lines().filter(|l| l.starts_with("arm,")) {
+            assert_eq!(line.split(',').count(), columns, "{line}");
+            assert!(line.contains("confounded"), "{line}");
+            assert!(line.contains("corpus-a"), "{line}");
+            assert!(line.contains("detector-a"), "{line}");
+            assert!(line.contains("CONFOUNDED"), "{line}");
+        }
+    }
+
+    /// Two corpora never share a table, and a per-arm figure is no more
+    /// comparable across that boundary than a pooled one. Each breakdown sits
+    /// under its own corpus, and every line names it.
+    #[test]
+    fn a_breakdown_never_crosses_a_corpus_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, digest, arm) in [("one", "d", "lsb-0100"), ("two", "e", "wow-0200")] {
+            let mut v = Doc::default().value();
+            v["corpus"]["name"] = serde_json::json!(name);
+            v["corpus"]["digest"] = serde_json::json!(format!("sha256:{}", digest.repeat(64)));
+            v["metrics"]["per_arm"] = serde_json::json!([
+                {"arm": arm, "auc": 0.6, "n_clean": 5, "n_stego": 5},
+                {"arm": "shared", "auc": 0.7, "n_clean": 5, "n_stego": 5},
+            ]);
+            std::fs::write(
+                dir.path().join(format!("{name}.json")),
+                serde_json::to_string(&v).unwrap(),
+            )
+            .unwrap();
+        }
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(report.groups.len(), 2);
+        for group in &report.groups {
+            let (lines, _) = arm_table(group).unwrap();
+            assert_eq!(lines.len(), 2, "a breakdown gathered two corpora");
+            for line in &lines {
+                assert!(
+                    line[1].starts_with(&group.corpus_name),
+                    "an arm line does not name its corpus: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_auc_cell_brackets_an_interval_only_where_there_is_one() {
+        assert_eq!(auc_cell(0.5, None), "0.5000");
+        assert_eq!(auc_cell(0.5, Some([0.4, 0.6])), "0.5000 [0.400, 0.600]");
     }
 
     #[test]

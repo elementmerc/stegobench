@@ -504,6 +504,42 @@ impl Result1 {
                 self.metrics.auc
             ));
         }
+        // The same checks the headline gets. An arm figure reaches a reader
+        // through `report` looking exactly as measured as the pooled one, so
+        // a per-arm AUC of 1.4 slipping through validation would be the very
+        // failure the headline check exists to stop, one level down.
+        let mut seen_arms = std::collections::BTreeSet::new();
+        for a in &self.metrics.per_arm {
+            if !(0.0..=1.0).contains(&a.auc) {
+                bad.push(format!(
+                    "per_arm {:?} has auc {}, which is outside 0 to 1 and is                      not a valid ROC AUC",
+                    a.arm, a.auc
+                ));
+            }
+            if let Some([lo, hi]) = a.auc_ci95 {
+                if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) || lo > hi {
+                    bad.push(format!(
+                        "per_arm {:?} has the interval [{lo}, {hi}], which is                          not an interval inside 0 to 1",
+                        a.arm
+                    ));
+                } else if a.auc < lo || a.auc > hi {
+                    // An interval that does not contain its own estimate is
+                    // arithmetically impossible, so the document is reporting
+                    // two numbers that cannot both have come from one run.
+                    bad.push(format!(
+                        "per_arm {:?} has auc {} outside its own interval                          [{lo}, {hi}]",
+                        a.arm, a.auc
+                    ));
+                }
+            }
+            if a.arm.trim().is_empty() {
+                bad.push("a per_arm entry names no arm".to_string());
+            } else if !seen_arms.insert(a.arm.as_str()) {
+                // Two rows for one arm means a reader picks whichever they
+                // see first, and the two need not agree.
+                bad.push(format!("per_arm names {:?} more than once", a.arm));
+            }
+        }
         for (fpr, tpr) in &self.metrics.tpr_at_fpr {
             match fpr.parse::<f64>() {
                 Ok(f) if (0.0..=1.0).contains(&f) => {}
@@ -623,6 +659,65 @@ impl Result1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arm(name: &str, auc: f64, ci: Option<[f64; 2]>) -> ArmMetrics {
+        ArmMetrics {
+            arm: name.into(),
+            auc,
+            auc_ci95: ci,
+            n_clean: 6,
+            n_stego: 6,
+        }
+    }
+
+    #[test]
+    fn an_arm_auc_outside_the_unit_interval_is_refused_like_the_headline_one() {
+        // It reaches a reader through `report` looking exactly as measured
+        // as the pooled figure, so it has to clear the same bar.
+        let mut d = sample();
+        d.metrics.per_arm = vec![arm("wow-0200", 1.4, None)];
+        let bad = d.validate().expect_err("refused");
+        assert!(bad.iter().any(|m| m.contains("wow-0200")), "{bad:?}");
+    }
+
+    #[test]
+    fn an_arm_interval_that_does_not_contain_its_own_estimate_is_refused() {
+        // Arithmetically impossible, so the document is reporting two
+        // numbers that cannot both have come from one run.
+        let mut d = sample();
+        d.metrics.per_arm = vec![arm("wow-0200", 0.9, Some([0.1, 0.5]))];
+        let bad = d.validate().expect_err("refused");
+        assert!(
+            bad.iter().any(|m| m.contains("outside its own interval")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn one_arm_named_twice_is_refused_because_a_reader_would_pick_one() {
+        let mut d = sample();
+        d.metrics.per_arm = vec![arm("wow-0200", 0.6, None), arm("wow-0200", 0.8, None)];
+        let bad = d.validate().expect_err("refused");
+        assert!(bad.iter().any(|m| m.contains("more than once")), "{bad:?}");
+    }
+
+    #[test]
+    fn an_arm_with_no_name_is_refused() {
+        let mut d = sample();
+        d.metrics.per_arm = vec![arm("   ", 0.6, None)];
+        let bad = d.validate().expect_err("refused");
+        assert!(bad.iter().any(|m| m.contains("names no arm")), "{bad:?}");
+    }
+
+    #[test]
+    fn a_well_formed_breakdown_validates() {
+        let mut d = sample();
+        d.metrics.per_arm = vec![
+            arm("lsb-0100", 0.5, Some([0.1135, 0.8865])),
+            arm("lsb-0400", 0.6944, Some([0.3588, 1.0])),
+        ];
+        assert_eq!(d.validate(), Ok(()));
+    }
 
     #[test]
     fn two_runs_that_differ_only_in_when_they_ran_seal_to_the_same_digest() {

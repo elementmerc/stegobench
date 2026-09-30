@@ -109,12 +109,40 @@ container runs with no network; a locally installed program is one the operator
 installed, and the harness can't speak for it.
 
 `provenance.plugins[].determinism` says whether two runs of that tool agree at
-all. Most say `nondeterministic`, which is honest rather than alarming.
+all. Most say `unstated`, which means nobody has checked. That's different
+from `nondeterministic`, which means somebody did check and it varies, and
+only the second is a reason to distrust the number. Until 2026-09-30 every
+document said `nondeterministic` because the value was written by the scoring
+code rather than read from anywhere, so it was never a measurement.
+
+`content_digest` covers the whole document except the two fields recording
+when the run happened. Two runs of the same detector over the same corpus
+produce documents that differ as text and carry the same digest, so checking
+reproduction is a string comparison rather than a diff you have to know how to
+read. `stegobench verify` refuses a document whose digest doesn't match its own
+contents, which means something in it changed after it was written. A document
+carrying no digest at all is fine: it means nobody offered one.
+
+## Is one number hiding two?
+
+`metrics.per_arm` breaks the headline down, one row per arm, and it's the
+field to read before quoting anything. A corpus usually holds several arms,
+and the headline pools them, so it describes none of them. On the starter
+corpus the pooled 0.5972 is `lsb-0100` at 0.5000, which is exactly chance,
+sitting beside `lsb-0400` at 0.6944. Quoting 0.5972 would tell a reader this
+detector works a bit; the truth is it doesn't work at all on one arm.
+
+Each arm is measured against the whole clean set rather than a share of it,
+since a clean image belongs to no arm. The list is empty when the corpus holds
+one arm, because a breakdown of one row is the headline written twice.
+
+If somebody quotes you a single AUC over a multi-arm corpus, ask which arm.
 
 ## The short version
 
 A number is defensible when the digest checks out, `pairing` is
 `single-variable`, `split_discipline` is `by-cover` or genuinely not
-applicable, and `trained_on` is absent or names something other than the corpus
-it was scored on. Everything else is a reason to ask one more question, not a
-reason to throw the number away.
+applicable, `trained_on` is absent or names something other than the corpus it
+was scored on, and you've read `per_arm` rather than the headline alone.
+Everything else is a reason to ask one more question, not a reason to throw
+the number away.
