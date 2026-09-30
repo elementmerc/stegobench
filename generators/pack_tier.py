@@ -60,7 +60,8 @@ import tarfile
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from tiers import TierError, covers_in_tier_order, tier_name  # noqa: E402
+from tiers import (TierError, covers_in_tier_order, tier_name,  # noqa: E402
+                   tier_slug)
 
 #: Fixed timestamp for every tar member. Any real clock makes the archive differ
 #: between runs, which would break the checksum comparison that proves one tier
@@ -124,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             rows[row["file"]] = row
 
     name = tier_name(args.count)
+    slug = tier_slug(args.count)
     plan = shard_plan(len(chosen), args.per_shard)
     print(f"{name}: {len(chosen)} samples into {len(plan)} shard(s) "
           f"of up to {args.per_shard}")
@@ -132,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     index: list[dict] = []
     mismatches = 0
     for shard_no, (start, end) in enumerate(plan):
-        shard = out / f"pentimento-{name.lower()}-{shard_no:05d}.tar"
+        shard = out / f"pentimento-{slug}-{shard_no:05d}.tar"
         digest = hashlib.sha256()
         packed = 0
         with tarfile.open(shard, "w", format=tarfile.PAX_FORMAT) as tar:
@@ -193,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
               f"NOT packed. The tier is incomplete; fix the corpus and re-run.",
               file=sys.stderr)
 
-    manifest_out = out / f"pentimento-{name.lower()}-index.json"
+    manifest_out = out / f"pentimento-{slug}-index.json"
     manifest_out.write_text(json.dumps({
         "tier": name,
         "samples": len(chosen) - mismatches,

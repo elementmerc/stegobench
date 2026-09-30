@@ -57,6 +57,9 @@ import os
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from tiers import slug_of_tier_name  # noqa: E402
+
 #: The collection licence this corpus DECLARES. See the header for why the
 #: strictest obligation is the honest choice rather than the loosest.
 #:
@@ -538,7 +541,7 @@ def cmd_prepare(args) -> int:
               f"licence deliberately.", file=sys.stderr)
         return 1
 
-    identifier = f"pentimento-{tier.lower()}-v1"
+    identifier = f"pentimento-{slug_of_tier_name(tier)}-v1"
     total_bytes = sum(s["bytes"] for s in index["shards"])
     blurb = (
         f"Pentimento {tier}: {summary['total']:,} permissively licensed cover "
@@ -587,7 +590,7 @@ def cmd_prepare(args) -> int:
     # means a v1.1 corpus needs either a wrongly named dataset or a second
     # one, splitting downloads and inbound links, and it forecloses the bare
     # name for good. Costs nothing today; impossible to change later.
-    kaggle_slug = f"pentimento-{tier.lower()}"
+    kaggle_slug = f"pentimento-{slug_of_tier_name(tier)}"
 
     # Kaggle EXTRACTS anything named `.tar` on upload and offers no way to
     # refuse, so this copy ships with the shards named `.tar.bin` and arrives
@@ -614,7 +617,7 @@ def cmd_prepare(args) -> int:
             "file is recognised by its contents rather than by its name, so "
             "`load_pentimento.py` and "
             "`webdataset` both open these directly, for example `python "
-            f"load_pentimento.py pentimento-{tier.lower()}-00000.tar.bin`. "
+            f"load_pentimento.py pentimento-{slug_of_tier_name(tier)}-00000.tar.bin`. "
             "SHA256SUMS-covers on this copy names the shards as they arrive, "
             "so `sha256sum -c SHA256SUMS-covers` verifies the download here "
             "just as it does on the other mirrors."
@@ -652,7 +655,7 @@ def cmd_torrent(args) -> int:
         return 1
     index = json.loads(index_files[0].read_text(encoding="utf-8"))
     tier = index["tier"]
-    identifier = f"pentimento-{tier.lower()}-v1"
+    identifier = f"pentimento-{slug_of_tier_name(tier)}-v1"
 
     if not args.web_seed and not args.allow_no_seed:
         print(

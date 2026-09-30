@@ -149,6 +149,46 @@ def tier_cover_names(manifest: pathlib.Path, count: int) -> set[str]:
 
 
 def tier_name(count: int) -> str:
-    """The published name for a tier size, or a description of an odd one."""
+    """The published name for a tier size, or a description of an odd one.
+
+    For PROSE. A filename wants [`tier_slug`], because this one can contain a
+    space and brackets.
+    """
     return {200: "Nano", 1000: "Lite", 10000: "Core", 100000: "Full"}.get(
         count, f"custom ({count})")
+
+
+def tier_slug(count: int) -> str:
+    """The same name, in a form safe to put in a filename.
+
+    `tier_name` was being lowercased and dropped straight into shard names, so
+    an odd count produced `pentimento-custom (8)-wow-0400-00000.tar`: a space
+    and two brackets in a filename that goes to three public archives in an
+    unattended upload. Those break naive shell loops, URL-encode differently
+    on each of the three, and produce a public page that is wrong in a way
+    this project cannot withdraw.
+
+    Kept as a separate function rather than by sanitising `tier_name`, because
+    the human-readable form is worth having in the terminal and in the index.
+    """
+    return {200: "nano", 1000: "lite", 10000: "core", 100000: "full"}.get(
+        count, f"custom-{count}")
+
+
+def slug_of_tier_name(name: str) -> str:
+    """A filename-safe slug from a tier's published NAME.
+
+    For the publish path, which reads the name back out of a packed index
+    rather than knowing the count. `"Core"` gives `core` exactly as the old
+    `.lower()` did, so no published identifier moves; `"custom (8)"` gives
+    `custom-8` instead of keeping the space and brackets.
+
+    That matters here more than anywhere else in the toolkit: these strings
+    become an Internet Archive identifier, a Kaggle slug and a HuggingFace
+    repository name, uploaded unattended. An Archive item is close to
+    immutable once created, so a name that is wrong is wrong permanently.
+    """
+    safe = "".join(c if c.isalnum() else "-" for c in name.lower())
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    return safe.strip("-")

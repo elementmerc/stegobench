@@ -50,7 +50,8 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from tiers import TierError, tier_cover_names  # noqa: E402
+from tiers import (TierError, slug_of_tier_name,  # noqa: E402
+                   tier_cover_names)
 
 #: The one sentence that must appear before anything else, everywhere. A reader
 #: who takes a number from here and compares it with a BOSSbase number has been
@@ -215,7 +216,7 @@ def readme(cover_index: dict, licences: dict, arms: dict | None, version: str) -
 
     # The quick start has to name a real arm and a real size, because a card
     # whose example config does not exist is worse than no example.
-    HF_REPO = HF_REPO_FORMAT.format(tier=tier.lower())
+    HF_REPO = HF_REPO_FORMAT.format(tier=slug_of_tier_name(tier))
     stego_arms = sorted(a["arm"] for a in (arms or {}).get("arms", [])
                         if not a["arm"].startswith("clean"))
     # Alphabetical puts `append_after_eoi-0000` first, which appends a payload
@@ -377,7 +378,7 @@ Shards are [WebDataset](https://github.com/webdataset/webdataset) tar files.
 Inside each, a sample's parts share a basename:
 
 ```
-pentimento-{tier.lower()}-00000.tar
+pentimento-{slug_of_tier_name(tier)}-00000.tar
   000000.png     the image
   000000.json    its manifest row, licence included
 ```
@@ -413,7 +414,7 @@ rather than as an error.
 **On Kaggle the shards are named `.tar.bin`, and that command still works
 there.** Kaggle extracts anything whose name ends in `.tar` when it is
 uploaded and offers no way to refuse, so the Kaggle copy ships as
-`pentimento-{tier.lower()}-00000.tar.bin`: the same tar file, under a name
+`pentimento-{slug_of_tier_name(tier)}-00000.tar.bin`: the same tar file, under a name
 Kaggle leaves alone. That copy's `SHA256SUMS-covers` names the shards the way
 they arrive, so `sha256sum -c` checks it exactly as it checks the others. The
 digests are identical on every mirror; only the filenames differ.
@@ -427,7 +428,7 @@ both open a `.tar.bin` shard directly; the only difference is the filename
 you type:
 
 ```
-python load_pentimento.py pentimento-{tier.lower()}-00000.tar.bin
+python load_pentimento.py pentimento-{slug_of_tier_name(tier)}-00000.tar.bin
 ```
 
 If you have already extracted a shard by hand, `load_pentimento.py` reads the
@@ -519,7 +520,7 @@ def citation(version: str, today: str, tier: str = "Core") -> str:
     return f"""cff-version: 1.2.0
 message: "If you use this corpus, please cite it as below."
 title: "Pentimento {tier}: a licence-traceable steganalysis corpus"
-url: "https://archive.org/details/pentimento-{tier.lower()}-v1"
+url: "https://archive.org/details/pentimento-{slug_of_tier_name(tier)}-v1"
 repository-code: "https://github.com/elementmerc/pentimento"
 contact:
   - family-names: Iwugo
@@ -607,7 +608,7 @@ def croissant(cover_index: dict, licences: dict, arms: dict | None,
     exists and still not be able to load a single sample from it.
     """
     tier = cover_index.get("tier", "Core")
-    slug = tier.lower()
+    slug = slug_of_tier_name(tier)
     stego_total, stego_count, clean_total, clean_count = split_arms(arms)
 
     distribution = [

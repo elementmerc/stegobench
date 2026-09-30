@@ -23,7 +23,9 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from tiers import TierError, covers_in_tier_order, tier_cover_names, tier_name  # noqa: E402
+from tiers import (TierError, covers_in_tier_order,  # noqa: E402
+                   slug_of_tier_name, tier_cover_names, tier_name,
+                   tier_slug)
 
 
 class TierNamingTests(unittest.TestCase):
@@ -31,6 +33,49 @@ class TierNamingTests(unittest.TestCase):
         self.assertEqual(tier_name(200), "Nano")
         self.assertEqual(tier_name(1000), "Lite")
         self.assertEqual(tier_name(10000), "Core")
+
+class TestTierSlug(unittest.TestCase):
+    """Names that end up in filenames and in public identifiers."""
+
+    def test_a_published_tier_slug_is_unchanged(self) -> None:
+        # These are live: an Internet Archive item and a Kaggle dataset are
+        # named from them. If this test ever has to change, something already
+        # published has moved.
+        self.assertEqual(tier_slug(200), "nano")
+        self.assertEqual(tier_slug(1000), "lite")
+        self.assertEqual(tier_slug(10000), "core")
+        self.assertEqual(tier_slug(100000), "full")
+
+    def test_an_odd_count_is_safe_in_a_filename(self) -> None:
+        # The display name is `custom (8)`, which was lowercased straight into
+        # a shard name and produced `pentimento-custom (8)-wow-0400-00000.tar`.
+        self.assertEqual(tier_slug(8), "custom-8")
+        self.assertNotIn(" ", tier_slug(8))
+        self.assertNotIn("(", tier_slug(8))
+
+    def test_the_prose_name_keeps_its_brackets(self) -> None:
+        # Fixing the filename must not make the terminal uglier.
+        self.assertEqual(tier_name(8), "custom (8)")
+
+    def test_a_name_from_a_packed_index_converts_the_same_way(self) -> None:
+        # The publish path reads the NAME back out of an index rather than
+        # knowing the count, so the two routes have to agree.
+        for count in (200, 1000, 10000, 100000, 8):
+            self.assertEqual(
+                slug_of_tier_name(tier_name(count)),
+                tier_slug(count),
+                f"the two routes disagree for {count}",
+            )
+
+    def test_a_slug_carries_nothing_a_url_would_have_to_escape(self) -> None:
+        for name in ("Core", "custom (8)", "custom (12345)"):
+            slug = slug_of_tier_name(name)
+            self.assertTrue(
+                all(c.isalnum() or c == "-" for c in slug),
+                f"{name!r} gave {slug!r}",
+            )
+            self.assertFalse(slug.startswith("-") or slug.endswith("-"), slug)
+
 
     def test_an_unpublished_size_describes_itself(self):
         self.assertEqual(tier_name(37), "custom (37)")
