@@ -54,7 +54,7 @@ pub const HEARTBEAT: Duration = Duration::from_secs(30);
 /// Counts rather than the records themselves, because the records went to the
 /// sink as they were produced and holding them here would put the corpus back
 /// in memory one layer up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Tally {
     /// Items this run scored, not counting ones resumed from a previous run.
     pub scored: u64,
@@ -64,6 +64,14 @@ pub struct Tally {
     /// because `n_error` in a result is required precisely so that zero is an
     /// assertion rather than an absence.
     pub errored: u64,
+    /// Why the tool's own output stopped being kept, if it did.
+    ///
+    /// A sidecar that cannot be written does not fail the run, because the
+    /// measurement is in the records file and is still good. It travels back
+    /// here so the caller can say so once, rather than leaving somebody to
+    /// find a short sidecar later and guess whether the tool was quiet or the
+    /// disk was full.
+    pub raw_problem: Option<String>,
 }
 
 impl Tally {
@@ -114,6 +122,87 @@ pub enum RunError {
 /// write to anything else without this module learning a second way to do it.
 pub trait Sink {
     fn write(&mut self, record: &Record) -> std::io::Result<()>;
+}
+
+/// The sidecar holding what tools printed, opened only if anything asked for
+/// one.
+///
+/// Appended and flushed per line for the same reason the records file is: a
+/// run that is killed should still explain the items it got through. Separate
+/// from the records file rather than a field on `Record`, so the format other
+/// things already read does not change shape, and so a reader who does not
+/// care never pays to parse it.
+struct RawSink {
+    /// Taken from the policy and kept until the first line needs writing.
+    ///
+    /// Opened lazily because most runs keep nothing: every item answered and
+    /// nobody asked for more. Creating the file up front left an empty
+    /// sidecar beside every records file, which is a question for whoever
+    /// finds it later and an answer to nothing.
+    path: Option<PathBuf>,
+    file: Option<std::fs::File>,
+    every: bool,
+}
+
+impl RawSink {
+    fn open(policy: RawPolicy<'_>) -> Self {
+        Self {
+            path: policy.path.map(Path::to_path_buf),
+            file: None,
+            every: policy.every,
+        }
+    }
+
+    /// Keep this item's output, if the policy wants it.
+    ///
+    /// An item the harness could not read an answer from is kept whatever the
+    /// policy, because that is the one a reader cannot diagnose without it.
+    /// Returns a problem to report the FIRST time writing fails, and closes
+    /// itself so a full disk does not produce one warning per image.
+    ///
+    /// A sidecar that cannot be written must not take the run down with it:
+    /// the measurement is in the records file and is still good. It must not
+    /// fail silently either, or a reader finds a short sidecar later and has
+    /// no idea whether the tool was quiet or the disk was full.
+    #[must_use]
+    fn keep(&mut self, id: &str, record: &Record, raw: &crate::selftest::Raw) -> Option<String> {
+        if raw.is_empty() || (!self.every && record.error.is_none()) {
+            return None;
+        }
+        if self.file.is_none() {
+            let path = self.path.clone()?;
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                Ok(f) => self.file = Some(f),
+                Err(e) => {
+                    self.path = None;
+                    return Some(format!(
+                        "could not open {} to keep what the tool printed: {e}. \
+                         The measurement is unaffected",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        let file = self.file.as_mut()?;
+        let line = serde_json::json!({
+            "id": id,
+            "stdout": raw.stdout,
+            "stderr": raw.stderr,
+        });
+        match writeln!(file, "{line}").and_then(|()| file.flush()) {
+            Ok(()) => None,
+            Err(e) => {
+                self.file = None;
+                Some(format!(
+                    "could not keep what the tool printed: {e}. The                      measurement is unaffected and nothing further will be                      kept for this run"
+                ))
+            }
+        }
+    }
 }
 
 /// Appends records as JSON lines.
@@ -217,13 +306,45 @@ impl Prior {
 /// `adapter_roots` are the trees a relative `invoke.adapter` is resolved
 /// against, and are passed straight through to [`crate::selftest::read_one`]
 /// so a scoring run asks the same question the self-test asked.
+/// Everything about a scoring run except the work itself.
+///
+/// Grouped because they travel together and are decided together, before a
+/// single image is read: which subject, against which records file, under
+/// what deadline, how many at a time.
+pub struct Run<'a> {
+    pub entry: &'a Entry,
+    /// The record file being appended to. A path that does not exist is a
+    /// fresh run.
+    pub already: &'a Path,
+    /// What one image is given before the detector is killed.
+    pub timeout: Duration,
+    /// How many images to score at once. 1 is one at a time.
+    pub jobs: usize,
+    /// The trees a relative `invoke.adapter` is resolved against.
+    pub adapter_roots: &'a [PathBuf],
+    /// Where to keep what the tool printed, and how much of it.
+    pub raw: RawPolicy<'a>,
+}
+
+/// What to do with a tool's own output.
+///
+/// The default keeps the output of items the harness could not read an answer
+/// from, which is close to free because it is rare, and is exactly the case
+/// where a reader cannot otherwise tell a detector that found nothing from a
+/// harness that misread it. `every` keeps all of it, which is what somebody
+/// debugging an adapter wants and what nobody wants by default.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawPolicy<'a> {
+    /// Where the sidecar goes. `None` keeps nothing whatever `every` says.
+    pub path: Option<&'a Path>,
+    /// Keep the output of items that answered, not only the ones that did not.
+    pub every: bool,
+}
+
 pub fn score<I, S, P>(
-    entry: &Entry,
+    run: Run<'_>,
     items: I,
-    already: &Path,
     sink: &mut S,
-    timeout: Duration,
-    adapter_roots: &[PathBuf],
     mut progress: P,
 ) -> Result<Tally, RunError>
 where
@@ -231,6 +352,15 @@ where
     S: Sink,
     P: FnMut(&Tally),
 {
+    let Run {
+        entry,
+        already,
+        timeout,
+        jobs,
+        adapter_roots,
+        raw: raw_policy,
+    } = run;
+    let mut raw_sink = RawSink::open(raw_policy);
     let mut prior = Prior::open(already)?;
     // One id at a time, walked in step with the items. Holding the finished
     // ids in a collection would be a collection that grows with the corpus,
@@ -240,25 +370,34 @@ where
     let mut tally = Tally::default();
     let mut last_beat = Instant::now();
 
-    for (position, item) in items.into_iter().enumerate() {
-        // Resume, positionally. The ids must agree or the corpus moved under
-        // the records, and scoring on regardless would file every answer
-        // against the wrong image.
-        if let Some(done) = recorded.as_deref() {
-            if done != item.id {
-                return Err(RunError::Diverged {
-                    position: position as u64,
-                    recorded: done.to_string(),
-                    offered: item.id,
-                });
-            }
-            tally.resumed += 1;
-            recorded = prior.next_id()?;
-            continue;
-        }
+    let mut it = items.into_iter().enumerate();
 
-        let record = crate::selftest::read_one(entry, &item.path, timeout, adapter_roots)
-            .into_record(item.id.as_str());
+    // RESUME IS ALWAYS A PREFIX, WHICH IS WHAT MAKES THE PARALLEL PHASE SAFE
+    //
+    // Records are appended in corpus order, so what a previous run finished is
+    // a run of items from the start and never a scattering through the middle.
+    // Draining that prefix sequentially leaves a tail that is entirely
+    // unscored, and items in that tail have no ordering constraint between
+    // them: they only have to be WRITTEN in order. So the resume check keeps
+    // its exact previous behaviour and the concurrency is confined to work
+    // that no earlier run touched.
+    while recorded.is_some() {
+        let Some((position, item)) = it.next() else {
+            break;
+        };
+        let done = recorded.as_deref().unwrap_or_default();
+        if done != item.id {
+            return Err(RunError::Diverged {
+                position: position as u64,
+                recorded: done.to_string(),
+                offered: item.id,
+            });
+        }
+        tally.resumed += 1;
+        recorded = prior.next_id()?;
+    }
+
+    let mut finish = |record: Record, tally: &mut Tally| -> Result<(), RunError> {
         if record.error.is_some() {
             tally.errored += 1;
         }
@@ -267,7 +406,106 @@ where
             source: e,
         })?;
         tally.scored += 1;
+        Ok(())
+    };
 
+    if jobs <= 1 {
+        for (_, item) in it {
+            let mut raw = crate::selftest::Raw::default();
+            let record = crate::selftest::read_one_observed(
+                entry,
+                &item.path,
+                timeout,
+                adapter_roots,
+                &mut raw,
+            )
+            .into_record(item.id.as_str());
+            if let Some(problem) = raw_sink.keep(&item.id, &record, &raw) {
+                tally.raw_problem.get_or_insert(problem);
+            }
+            finish(record, &mut tally)?;
+            if last_beat.elapsed() >= HEARTBEAT {
+                progress(&tally);
+                last_beat = Instant::now();
+            }
+        }
+        return Ok(tally);
+    }
+
+    // A WINDOW OF `jobs`, NOT A QUEUE OF EVERY ITEM
+    //
+    // The whole corpus is 344,357 items at Core, so nothing here may hold a
+    // collection that grows with it. One chunk of at most `jobs` items is in
+    // memory at a time, and the records come back in the order they were
+    // handed out, so the file this appends to is byte for byte the file a
+    // serial run would have written. That is what keeps resume working after
+    // an interrupted parallel run.
+    //
+    // Chunked rather than a continuously fed pool: a slow item stalls its own
+    // chunk, which costs a little throughput, and in exchange the ordering is
+    // a property of the structure instead of something a reassembly buffer
+    // has to be trusted to get right.
+    let mut chunk: Vec<WorkItem> = Vec::with_capacity(jobs);
+    loop {
+        chunk.clear();
+        chunk.extend(it.by_ref().take(jobs).map(|(_, item)| item));
+        if chunk.is_empty() {
+            break;
+        }
+
+        let scored: Vec<(Record, crate::selftest::Raw)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|item| {
+                    scope.spawn(move || {
+                        let mut raw = crate::selftest::Raw::default();
+                        let record = crate::selftest::read_one_observed(
+                            entry,
+                            &item.path,
+                            timeout,
+                            adapter_roots,
+                            &mut raw,
+                        )
+                        .into_record(item.id.as_str());
+                        (record, raw)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .zip(chunk.iter())
+                .map(|(handle, item)| {
+                    // A panicking worker is recorded as an error against its
+                    // own item rather than taken as the end of the run. The
+                    // alternative loses every answer in the chunk, including
+                    // the ones that were fine, and leaves a records file the
+                    // next run cannot resume from.
+                    handle.join().unwrap_or_else(|_| {
+                        (
+                            Record {
+                                id: item.id.clone(),
+                                score: None,
+                                verdict: None,
+                                error: Some(
+                                    "the worker scoring this item panicked; the run \
+                                     continued and this item was not measured"
+                                        .into(),
+                                ),
+                                elapsed_ms: None,
+                            },
+                            crate::selftest::Raw::default(),
+                        )
+                    })
+                })
+                .collect()
+        });
+
+        for ((record, raw), item) in scored.into_iter().zip(chunk.iter()) {
+            if let Some(problem) = raw_sink.keep(&item.id, &record, &raw) {
+                tally.raw_problem.get_or_insert(problem);
+            }
+            finish(record, &mut tally)?;
+        }
         if last_beat.elapsed() >= HEARTBEAT {
             progress(&tally);
             last_beat = Instant::now();
@@ -328,6 +566,125 @@ mod tests {
             .collect()
     }
 
+    /// A parallel run must produce the file a serial run would have.
+    ///
+    /// Resume reads the records positionally, so an out of order write does
+    /// not merely look untidy: the next run compares recorded ids against
+    /// corpus ids, finds them disagreeing, and refuses the whole corpus as
+    /// having changed. Byte equality is therefore the real contract, not an
+    /// aesthetic one.
+    #[test]
+    fn a_parallel_run_writes_what_a_serial_run_would_have() {
+        let dir = tempfile::tempdir().expect("tmp");
+        // Sleeps in reverse order of id, so the workers finish back to front
+        // and any reliance on completion order shows up rather than passing
+        // by luck on a fast machine.
+        let e = scripted(&tool(
+            dir.path(),
+            "n=$(basename \"$1\" .png); sleep 0.$((9 - 10#$n % 10)); echo 0.5",
+        ));
+
+        let mut serial_out = Cursor::new(Vec::new());
+        let mut sink = JsonLines::new(&mut serial_out);
+        let serial = score(
+            Run {
+                entry: &e,
+                already: &dir.path().join("none.jsonl"),
+                timeout: Duration::from_secs(30),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
+            items(dir.path(), 8),
+            &mut sink,
+            |_| {},
+        )
+        .expect("the serial run");
+
+        let mut parallel_out = Cursor::new(Vec::new());
+        let mut sink = JsonLines::new(&mut parallel_out);
+        let parallel = score(
+            Run {
+                entry: &e,
+                already: &dir.path().join("none.jsonl"),
+                timeout: Duration::from_secs(30),
+                jobs: 4,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
+            items(dir.path(), 8),
+            &mut sink,
+            |_| {},
+        )
+        .expect("the parallel run");
+
+        assert_eq!(serial_out.get_ref(), parallel_out.get_ref());
+        assert_eq!(parallel.scored, serial.scored);
+        assert_eq!(parallel.errored, serial.errored);
+    }
+
+    /// Interrupting a parallel run and finishing it must give the same file
+    /// as never having been interrupted.
+    #[test]
+    fn a_parallel_run_resumes_from_what_a_parallel_run_left() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let e = scripted(&tool(dir.path(), "echo 0.5"));
+
+        let whole = {
+            let mut out = Cursor::new(Vec::new());
+            let mut sink = JsonLines::new(&mut out);
+            score(
+                Run {
+                    entry: &e,
+                    already: &dir.path().join("none.jsonl"),
+                    timeout: Duration::from_secs(30),
+                    jobs: 4,
+                    adapter_roots: &[],
+                    raw: Default::default(),
+                },
+                items(dir.path(), 9),
+                &mut sink,
+                |_| {},
+            )
+            .expect("the uninterrupted run");
+            out.into_inner()
+        };
+
+        // Stand in for an interruption: the first five items are already on
+        // disk, written by an earlier parallel run.
+        let part = dir.path().join("part.jsonl");
+        let five: Vec<u8> = whole
+            .split_inclusive(|b| *b == b'\n')
+            .take(5)
+            .flatten()
+            .copied()
+            .collect();
+        std::fs::write(&part, &five).expect("the partial records");
+
+        let mut rest = Cursor::new(Vec::new());
+        let mut sink = JsonLines::new(&mut rest);
+        let tally = score(
+            Run {
+                entry: &e,
+                already: &part,
+                timeout: Duration::from_secs(30),
+                jobs: 4,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
+            items(dir.path(), 9),
+            &mut sink,
+            |_| {},
+        )
+        .expect("the resumed run");
+
+        assert_eq!(tally.resumed, 5, "the prefix already on disk");
+        assert_eq!(tally.scored, 4, "only the tail is rescored");
+        let mut joined = five;
+        joined.extend_from_slice(rest.get_ref());
+        assert_eq!(joined, whole, "resuming produced a different file");
+    }
+
     #[test]
     fn every_item_is_scored_once_and_recorded_in_order() {
         let dir = tempfile::tempdir().expect("tmp");
@@ -335,12 +692,16 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);
         let tally = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &dir.path().join("none.jsonl"),
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 4),
-            &dir.path().join("none.jsonl"),
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect("ran");
@@ -368,12 +729,16 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);
         let tally = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &record_path,
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 4),
-            &record_path,
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect("ran");
@@ -398,12 +763,16 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);
         let err = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &record_path,
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 2),
-            &record_path,
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect_err("it should refuse");
@@ -425,12 +794,16 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);
         let tally = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &record_path,
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 1),
-            &record_path,
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect("ran");
@@ -455,12 +828,16 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);
         let tally = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &record_path,
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 2),
-            &record_path,
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect("ran");
@@ -481,12 +858,16 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);
         let tally = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &dir.path().join("none.jsonl"),
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 3),
-            &dir.path().join("none.jsonl"),
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect("ran");
@@ -505,12 +886,16 @@ mod tests {
         let mut sink = JsonLines::new(&mut out);
         let started = Instant::now();
         let tally = score(
-            &e,
+            Run {
+                entry: &e,
+                already: &dir.path().join("none.jsonl"),
+                timeout: Duration::from_millis(200),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 1),
-            &dir.path().join("none.jsonl"),
             &mut sink,
-            Duration::from_millis(200),
-            &[],
             |_| {},
         )
         .expect("ran");
@@ -538,12 +923,16 @@ mod tests {
         let file = std::fs::File::create(&record_path).expect("create");
         let mut sink = JsonLines::new(file);
         score(
-            &e,
+            Run {
+                entry: &e,
+                already: &dir.path().join("none.jsonl"),
+                timeout: Duration::from_secs(10),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: Default::default(),
+            },
             items(dir.path(), 3),
-            &dir.path().join("none.jsonl"),
             &mut sink,
-            Duration::from_secs(10),
-            &[],
             |_| {},
         )
         .expect("ran");

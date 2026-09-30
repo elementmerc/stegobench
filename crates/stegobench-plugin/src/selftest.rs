@@ -87,6 +87,7 @@ fn run_one(
     fixture: &Path,
     timeout: Duration,
     adapter_roots: &[PathBuf],
+    raw: &mut Raw,
 ) -> Reading {
     let Some(invoke) = &entry.invoke else {
         return Reading::Failed("entry declares no invoke block".into());
@@ -205,7 +206,9 @@ fn run_one(
         _ => String::from_utf8_lossy(&out.stdout).into_owned(),
     };
 
-    parsers::parse(&invoke.parser, &text, &String::from_utf8_lossy(&out.stderr))
+    raw.stdout = text.clone();
+    raw.stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    parsers::parse(&invoke.parser, &text, &raw.stderr.clone())
 }
 
 /// Runs a binary plugin directly, with no container.
@@ -214,7 +217,7 @@ fn run_one(
 /// no isolation here and that is a deliberate limit: a binary entry says the
 /// operator already trusts this program enough to have installed it, which is
 /// a different statement from pulling a stranger's image.
-fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
+fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration, raw: &mut Raw) -> Reading {
     let (Some(bin), Some(invoke)) = (&entry.binary, &entry.invoke) else {
         return Reading::Failed("entry is not a runnable binary".into());
     };
@@ -234,16 +237,64 @@ fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration) -> Reading {
     let mut program_cmd = Command::new(&path);
     program_cmd.args(&argv);
     match crate::exec::captured(program_cmd, program, timeout) {
-        Ok(out) => parsers::parse(
-            &invoke.parser,
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        ),
+        Ok(out) => {
+            raw.stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            raw.stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            parsers::parse(&invoke.parser, &raw.stdout.clone(), &raw.stderr.clone())
+        }
         // Passed through rather than wrapped. The message already names the
         // tool and says what happened, and "could not run X: X gave no answer"
         // reports a timeout as a launch failure, which sends the reader to the
         // wrong problem.
         Err(e) => Reading::Failed(e),
+    }
+}
+
+/// What the tool actually printed, kept so a reader can tell a detector that
+/// found nothing from a harness that misread it.
+///
+/// Empty when the tool never ran, which is the honest answer: a container
+/// that could not start printed nothing to keep. The failure itself is
+/// already in the record's `error`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Raw {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Raw {
+    /// Whether there is anything here worth writing down.
+    pub fn is_empty(&self) -> bool {
+        self.stdout.is_empty() && self.stderr.is_empty()
+    }
+}
+
+/// [`read_one`], and also what the tool printed while answering.
+///
+/// The raw text is an out-parameter rather than part of the return type so
+/// that every path that fails BEFORE the tool runs stays exactly as it was:
+/// those paths have no output to report and should not have to say so.
+pub fn read_one_observed(
+    entry: &Entry,
+    fixture: &Path,
+    timeout: Duration,
+    adapter_roots: &[PathBuf],
+    raw: &mut Raw,
+) -> Reading {
+    if entry.invoke.as_ref().is_some_and(|i| i.host) {
+        return run_host_adapter(entry, fixture, timeout, adapter_roots, raw);
+    }
+    match (&entry.image, &entry.binary) {
+        (Some(img), _) => run_one(
+            entry,
+            &img.reference.clone(),
+            fixture,
+            timeout,
+            adapter_roots,
+            raw,
+        ),
+        (_, Some(_)) => run_binary(entry, fixture, timeout, raw),
+        _ => Reading::Failed("entry declares neither an image nor a binary".into()),
     }
 }
 
@@ -259,22 +310,7 @@ pub fn read_one(
     timeout: Duration,
     adapter_roots: &[PathBuf],
 ) -> Reading {
-    // A host adapter wins over the image: the entry names an image to identify
-    // the subject, but the thing to run is here, not in it.
-    if entry.invoke.as_ref().is_some_and(|i| i.host) {
-        return run_host_adapter(entry, fixture, timeout, adapter_roots);
-    }
-    match (&entry.image, &entry.binary) {
-        (Some(img), _) => run_one(
-            entry,
-            &img.reference.clone(),
-            fixture,
-            timeout,
-            adapter_roots,
-        ),
-        (_, Some(_)) => run_binary(entry, fixture, timeout),
-        _ => Reading::Failed("entry declares neither an image nor a binary".into()),
-    }
+    read_one_observed(entry, fixture, timeout, adapter_roots, &mut Raw::default())
 }
 
 /// Runs an adapter on this machine, for tools that are services.
@@ -288,6 +324,7 @@ fn run_host_adapter(
     fixture: &Path,
     timeout: Duration,
     adapter_roots: &[PathBuf],
+    raw: &mut Raw,
 ) -> Reading {
     let Some(invoke) = &entry.invoke else {
         return Reading::Failed("entry declares no invoke block".into());
@@ -321,11 +358,11 @@ fn run_host_adapter(
         }
     }
     match crate::exec::captured(cmd, &program, timeout) {
-        Ok(out) => parsers::parse(
-            &invoke.parser,
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        ),
+        Ok(out) => {
+            raw.stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            raw.stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            parsers::parse(&invoke.parser, &raw.stdout.clone(), &raw.stderr.clone())
+        }
         // Passed through rather than wrapped. The message already names the
         // tool and says what happened, and "could not run X: X gave no answer"
         // reports a timeout as a launch failure, which sends the reader to the
