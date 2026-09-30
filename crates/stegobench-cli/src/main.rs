@@ -1014,6 +1014,23 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
         }
     };
 
+    // Before anything about the corpus, because this asks whether the document
+    // is the one that was written rather than whether the bytes it names are
+    // the ones that were measured. A document edited after the fact cannot be
+    // trusted to say which corpus to go and look at.
+    if let Some(claimed) = result.content_digest.as_deref() {
+        let actual = result.compute_content_digest();
+        if claimed != actual {
+            return Output::err(
+                exit::VERIFY_MISMATCH,
+                format!(
+                    "{} does not match its own content digest. It declares \n                       {claimed}\nand its contents come to\n  {actual}\nEvery                      field except the two that record WHEN the run happened is                      covered, so something in this document changed after it                      was written. Re-run the measurement rather than trusting                      the number in it",
+                    file.display()
+                ),
+            );
+        }
+    }
+
     if result.corpus.digest.is_empty() {
         return Output::err(
             exit::VERIFY_MISMATCH,
@@ -1691,6 +1708,44 @@ fn unresolved_corpus(reg: Option<&Registry>, corpus: &Path) -> Output {
 ///
 /// `next` is the sentence that closes it, because the commands that take an id
 /// fail for one reason and want different things done about it.
+/// The per-arm breakdown, indented under the detector it belongs to.
+///
+/// Empty for a corpus of one arm, because `metrics.per_arm` is empty there
+/// and a breakdown of one row is the headline printed twice.
+///
+/// Every arm is shown rather than a best-and-worst summary. A Core tier is 39
+/// arms, which is about a screen, and the reader who is scoring one is not
+/// doing it casually; the arm they care about is as likely to be in the
+/// middle as at either end.
+fn per_arm_lines(arms: &[stegobench_core::result::ArmMetrics]) -> Vec<String> {
+    if arms.is_empty() {
+        return Vec::new();
+    }
+    // Widest name, so the numbers line up in a column a reader can scan down
+    // rather than hunting along ragged rows.
+    let width = arms.iter().map(|a| a.arm.len()).max().unwrap_or(0);
+    let mut out = vec![format!(
+        "{:<16} by arm, each against the same {} clean image(s):",
+        "",
+        arms.first().map(|a| a.n_clean).unwrap_or(0)
+    )];
+    for a in arms {
+        out.push(format!(
+            "{:<18}{:<width$}  AUC {:.4}{}  {} stego",
+            "",
+            a.arm,
+            a.auc,
+            match a.auc_ci95 {
+                Some([lo, hi]) => format!(" [{lo:.4}, {hi:.4}]"),
+                None => String::new(),
+            },
+            a.n_stego,
+            width = width
+        ));
+    }
+    out
+}
+
 fn unregistered_corpus_id(reg: &Registry, id: &str, next: &str) -> Output {
     let mut human = format!("no corpus with id {id:?} is registered.");
     if Path::new(id).is_dir() {
@@ -1709,7 +1764,13 @@ fn unregistered_corpus_id(reg: &Registry, id: &str, next: &str) -> Output {
     }
     human.push('\n');
     human.push_str(next);
-    Output::err(exit::USAGE, human)
+    // PREFLIGHT_REFUSED rather than USAGE, matching `--corpus` on a directory
+    // that is not there. The two codes divide on whether the command line was
+    // malformed or whether what it named is absent, and an id nobody has
+    // registered is the second: the flag took the kind of value it asked for.
+    // These two call sites answered USAGE until 2026-09-30 purely because
+    // nothing had made them agree with the path case.
+    Output::err(exit::PREFLIGHT_REFUSED, human)
 }
 
 /// Registered corpus ids close enough to what was typed to be worth naming.
@@ -2381,31 +2442,39 @@ fn summarise(
                 result,
                 tally,
                 written,
-            } => lines.push(format!(
-                "{name:<16} AUC {:.4}{}  {} clean / {} stego / {} unanswered{}{}",
-                result.metrics.auc,
-                // Printed beside the figure rather than under the table,
-                // because the interval is what stops two AUCs differing in
-                // the third decimal from being read as two different
-                // detectors, and a caveat a line away is a caveat nobody
-                // carries when they copy the number out.
-                match result.metrics.auc_ci95 {
-                    Some([lo, hi]) => format!(" [{lo:.4}, {hi:.4}]"),
-                    None => String::new(),
-                },
-                result.metrics.n_clean,
-                result.metrics.n_stego,
-                result.metrics.n_error,
-                if tally.resumed > 0 {
-                    format!("  {} resumed", tally.resumed)
-                } else {
-                    String::new()
-                },
-                match written {
-                    Some(p) => format!("  {}", p.display()),
-                    None => String::new(),
-                }
-            )),
+            } => {
+                lines.push(format!(
+                    "{name:<16} AUC {:.4}{}  {} clean / {} stego / {} unanswered{}{}",
+                    result.metrics.auc,
+                    // Printed beside the figure rather than under the table,
+                    // because the interval is what stops two AUCs differing in
+                    // the third decimal from being read as two different
+                    // detectors, and a caveat a line away is a caveat nobody
+                    // carries when they copy the number out.
+                    match result.metrics.auc_ci95 {
+                        Some([lo, hi]) => format!(" [{lo:.4}, {hi:.4}]"),
+                        None => String::new(),
+                    },
+                    result.metrics.n_clean,
+                    result.metrics.n_stego,
+                    result.metrics.n_error,
+                    if tally.resumed > 0 {
+                        format!("  {} resumed", tally.resumed)
+                    } else {
+                        String::new()
+                    },
+                    match written {
+                        Some(p) => format!("  {}", p.display()),
+                        None => String::new(),
+                    }
+                ));
+                // The pooled figure is the misleading one whenever a corpus
+                // holds several arms: it lands between them and describes
+                // none. Printed rather than left in the document, because a
+                // number a reader has to open a file to qualify is a number
+                // they will quote unqualified.
+                lines.extend(per_arm_lines(&result.metrics.per_arm));
+            }
             Outcome::Skipped { why } => {
                 lines.push(format!("{name:<16} NOT MEASURED, skipped: {why}"))
             }
@@ -3389,13 +3458,19 @@ mod tests {
     }
 
     /// The mirror image: a directory handed to `fetch`, which takes an id.
+    ///
+    /// PREFLIGHT_REFUSED, not USAGE, and the same code `--corpus` gives for a
+    /// directory that is not there. The two divide on whether the command
+    /// line was malformed or whether what it named is absent, and an
+    /// unregistered id is the second. These call sites disagreed with the
+    /// path case until 2026-09-30 for no reason anybody had chosen.
     #[test]
     fn an_unregistered_corpus_id_names_the_close_ones_and_spots_a_directory() {
         let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
 
         let typo =
             unregistered_corpus_id(&reg, "bossbas", "`stegobench list corpora` shows what is.");
-        assert_eq!(typo.code, exit::USAGE);
+        assert_eq!(typo.code, exit::PREFLIGHT_REFUSED);
         assert!(
             typo.human.contains("Did you mean") && typo.human.contains("bossbase"),
             "{}",
@@ -3408,7 +3483,7 @@ mod tests {
             &tmp.path().display().to_string(),
             "`stegobench list corpora` shows what is.",
         );
-        assert_eq!(as_path.code, exit::USAGE);
+        assert_eq!(as_path.code, exit::PREFLIGHT_REFUSED);
         assert!(
             as_path.human.contains("an id names a dataset")
                 && as_path.human.contains("score --corpus"),
@@ -4466,6 +4541,111 @@ mod tests {
     }
 
     #[test]
+    fn a_document_edited_after_it_was_written_is_refused() {
+        // The whole reason `content_digest` exists. Every field except the
+        // two recording WHEN the run happened is covered, so a changed
+        // number cannot survive the check, and a run edited to flatter a
+        // detector stops being something a reader has to spot by eye.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let mut sealed: Result1 =
+            serde_json::from_str(&std::fs::read_to_string(&doc).unwrap()).unwrap();
+        sealed.seal();
+        // Improve the number after sealing, which is what a tamper looks like.
+        sealed.metrics.auc = 0.99;
+        std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
+
+        let out = cmd_verify(&doc, &corpus, false);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
+        assert!(
+            out.human.contains("does not match its own content digest"),
+            "{}",
+            out.human
+        );
+    }
+
+    #[test]
+    fn a_document_whose_digest_matches_passes_the_check_it_used_to_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let mut sealed: Result1 =
+            serde_json::from_str(&std::fs::read_to_string(&doc).unwrap()).unwrap();
+        sealed.seal();
+        std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
+
+        let out = cmd_verify(&doc, &corpus, false);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+    }
+
+    #[test]
+    fn a_document_carrying_no_content_digest_is_not_accused_of_a_mismatch() {
+        // Absent means nobody offered one. A submitted or hand-written
+        // document is allowed to say nothing here, and refusing it would
+        // make the field mandatory by the back door.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+        assert!(!std::fs::read_to_string(&doc)
+            .unwrap()
+            .contains("content_digest"));
+
+        let out = cmd_verify(&doc, &corpus, false);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+    }
+
+    #[test]
+    fn the_per_arm_block_is_absent_for_a_corpus_of_one_arm() {
+        assert!(per_arm_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_per_arm_block_names_every_arm_and_omits_an_interval_it_does_not_have() {
+        use stegobench_core::result::ArmMetrics;
+        let arms = vec![
+            ArmMetrics {
+                arm: "lsb-0100".into(),
+                auc: 0.5,
+                auc_ci95: Some([0.1135, 0.8865]),
+                n_clean: 6,
+                n_stego: 6,
+            },
+            ArmMetrics {
+                arm: "a-much-longer-arm".into(),
+                auc: 0.6944,
+                auc_ci95: None,
+                n_clean: 6,
+                n_stego: 6,
+            },
+        ];
+        let text = per_arm_lines(&arms).join("\n");
+        assert!(text.contains("lsb-0100"), "{text}");
+        assert!(text.contains("a-much-longer-arm"), "{text}");
+        assert!(text.contains("0.5000"), "{text}");
+        assert!(text.contains("[0.1135, 0.8865]"), "{text}");
+        assert!(
+            !text.contains("0.6944 ["),
+            "an interval was fabricated for the arm that had none: {text}"
+        );
+        assert!(
+            text.contains("same 6 clean image(s)"),
+            "the shared clean set should be stated once: {text}"
+        );
+    }
+
+    #[test]
     fn verify_reads_the_images_and_says_so_when_they_match() {
         let dir = tempfile::tempdir().unwrap();
         let corpus = dir.path().join("corpus");
@@ -5372,15 +5552,18 @@ mod tests {
     ///
     /// The man page is only as good as the binary's agreement with it: a
     /// documented code the binary never actually returns is worse than no
-    /// table at all, because a script or an agent trusts the table. Codes 3
-    /// (pre-flight refusal) and 7 (licence refusal) genuinely have NO code
-    /// path yet, because nothing refuses a run on grounds of capacity and no
-    /// corpus-licence gate is built.
-    /// That is a true statement about this release, not a gap in the test:
-    /// asserting it here means the day one of those codes becomes reachable
-    /// without a test acknowledging it, this test starts failing to mention
-    /// it rather than silently staying quiet about a codepath nobody wrote a
-    /// test for.
+    /// table at all, because a script or an agent trusts the table.
+    ///
+    /// Code 3 (pre-flight refusal) IS reachable and this test drives it,
+    /// which it did not used to be. This comment claimed otherwise for
+    /// longer than it was true, which is the dangerous way round: a reader
+    /// trusts the prose and concludes a code they can see in the body is
+    /// dead. Code 7 (licence refusal) is the one still unreachable, because
+    /// no corpus-licence gate is built.
+    ///
+    /// Asserting the gap here means the day code 7 becomes reachable without
+    /// a test acknowledging it, this test starts failing and says so, rather
+    /// than staying quiet about a path nobody covered.
     #[test]
     fn the_exit_code_contract_is_driven_or_explicitly_not_yet_reachable() {
         // 0: success.
