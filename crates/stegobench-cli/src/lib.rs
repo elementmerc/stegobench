@@ -14,6 +14,42 @@
 /// obtaining it is theirs to arrange.
 pub const STARTER_ID: &str = "stegobench-starter";
 
+/// A path as somewhere a reader could go, rather than as it was typed.
+///
+/// `doctor` prints where its registry and its fixtures came from, and a
+/// relative answer is not one: `fixtures  fixtures` repeats its own key and
+/// tells nobody which directory on this machine was read. Resolved against
+/// the working directory without touching the filesystem, so a path that has
+/// since been removed still prints as the place it was looked for, and no
+/// platform gains a verbatim prefix it did not have.
+pub fn resolved_path(path: &std::path::Path) -> std::path::PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// An IO error as a sentence, without the operating system's error number.
+///
+/// `os error 2` names nothing a reader can act on and reads as a crash rather
+/// than an answer, which is the whole of why it never reaches a user here.
+///
+/// Here rather than in `main.rs` because `report` needs the same rendering:
+/// it is the one command whose own error type carried a `std::io::Error`
+/// straight into its message, and `stegobench report /tmp/nope` answered with
+/// `(os error 2)` while every other command had been saying "nothing is
+/// there" for as long as this function has existed.
+pub fn plain_io(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "nothing is there".to_string(),
+        std::io::ErrorKind::PermissionDenied => "permission was refused".to_string(),
+        _ => {
+            let text = e.to_string();
+            match text.split_once(" (os error") {
+                Some((head, _)) => head.to_string(),
+                None => text,
+            }
+        }
+    }
+}
+
 pub mod cli;
 pub mod fetch;
 pub mod fixtures;

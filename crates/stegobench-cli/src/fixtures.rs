@@ -44,6 +44,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::registry::{non_empty, system_data_dirs, user_data_dir};
+use crate::resolved_path;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_fixtures.rs"));
 
@@ -106,10 +107,15 @@ impl Fixtures {
 
     /// One line naming the fixtures that answered, for `doctor` to print above
     /// its table. The JSON block carries the tag and the path separately.
+    ///
+    /// The path is resolved against the working directory before it is
+    /// printed. A relative one found in a checkout rendered as
+    /// `fixtures  fixtures`, a value repeating its own key, which reads as a
+    /// bug rather than as an answer to "which images were these".
     pub fn line(&self) -> String {
         match &self.source {
             Source::BuiltIn => "fixtures  built in".to_string(),
-            _ => format!("fixtures  {}", self.dir.display()),
+            _ => format!("fixtures  {}", resolved_path(&self.dir).display()),
         }
     }
 }
@@ -380,5 +386,20 @@ mod tests {
         let g = resolve(Some(tmp.path())).expect("resolves");
         assert!(g.line().starts_with("fixtures  "));
         assert!(g.line().contains(&tmp.path().display().to_string()));
+    }
+
+    /// `fixtures  fixtures`: a value repeating its own key, which reads as a
+    /// bug rather than as an answer to "which images were these".
+    #[test]
+    fn a_relative_directory_is_printed_as_a_place_a_reader_can_go() {
+        let f = Fixtures {
+            source: Source::WorkingDirectory(PathBuf::from("fixtures")),
+            dir: PathBuf::from("fixtures"),
+            _scratch: None,
+        };
+        let line = f.line();
+        assert_ne!(line, "fixtures  fixtures", "{line}");
+        let path = line.strip_prefix("fixtures  ").expect("the usual shape");
+        assert!(Path::new(path).is_absolute(), "{line}");
     }
 }

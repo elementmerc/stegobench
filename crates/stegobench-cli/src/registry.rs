@@ -119,7 +119,10 @@ impl Source {
     /// somebody debugging two registries, not in front of everybody else.
     pub fn line(&self) -> String {
         match self.path() {
-            Some(p) => format!("registry  {}", p.display()),
+            // Resolved, for the reason `fixtures::Fixtures::line` gives: a
+            // relative path is not somewhere a reader can go, and these two
+            // lines are read as a pair.
+            Some(p) => format!("registry  {}", crate::resolved_path(p).display()),
             None => "registry  built in".to_string(),
         }
     }

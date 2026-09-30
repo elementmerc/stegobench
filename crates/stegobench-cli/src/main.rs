@@ -6,10 +6,12 @@
 //!
 //! THE TWO RULES THIS FILE EXISTS TO HOLD
 //! --------------------------------------
-//! **Machine output on stdout, human output on stderr.** This is the opposite
-//! of what most tools do and it is deliberate: it means `stegobench ... --json
-//! | jq` works while progress still reaches the terminal. A tool that mixes
-//! them forces every caller to choose between being readable and being usable.
+//! **Content on stdout, progress and refusals on stderr.** `--json` goes to
+//! stdout so `stegobench ... --json | jq` works, and so does the human text
+//! whenever that text IS the thing asked for: a listing, a table, a schema, a
+//! help topic, `doctor`'s report. See [`human_is_content`]. Everything else,
+//! the heartbeat of a long run and the reason a command refused, goes to
+//! stderr, so a pipe carries the answer and nothing else.
 //!
 //! **Every subcommand takes `--json`.** Not most of them. A caller that has to
 //! remember which commands speak JSON will parse the ones that do not, and
@@ -31,6 +33,9 @@ use stegobench_cli::fixtures;
 use stegobench_cli::help_topics;
 use stegobench_cli::metrics;
 use stegobench_cli::needs;
+// One rendering of an IO error for the whole binary, shared with `report`,
+// whose own error type used to print the operating system's number.
+use stegobench_cli::plain_io as plain;
 use stegobench_cli::registry;
 use stegobench_cli::registry::Resolved;
 use stegobench_cli::report;
@@ -887,9 +892,13 @@ fn corpus_facts(c: &stegobench_core::corpus::CorpusEntry) -> Vec<(&'static str, 
         ),
     ));
     let size = match (c.properties.base_images, c.properties.total_images) {
-        (Some(b), Some(t)) => format!("{b} covers, {t} files in all"),
+        // IMAGES, NOT FILES. `total_images` is what the field holds and
+        // "files" is what it used to print, so `describe` said 18 over a
+        // corpus `fetch` correctly reports as 39 files: the same eighteen
+        // images, their eighteen records, and three more beside them.
+        (Some(b), Some(t)) => format!("{b} covers, {t} images in all"),
         (Some(b), None) => format!("{b} covers"),
-        (None, Some(t)) => format!("{t} files"),
+        (None, Some(t)) => format!("{t} images"),
         (None, None) => match (&c.properties.size_mb, &c.properties.size_note) {
             (Some(mb), _) => format!("{mb} MB"),
             (None, Some(note)) => note.clone(),
@@ -984,7 +993,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
             Verified::Answered(why) => {
                 format!(
                     "{}  ({why})",
-                    check.summary().replace("not verified", "answering ")
+                    check.summary().replace("not verified", "responded ")
                 )
             }
             Verified::Skipped(why) if !no_selftest && check.presence.is_present() => {
@@ -1064,7 +1073,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
          {undetermined} undetermined, {unsupported} cannot run here."
     ));
     human.push(format!(
-        "Stegobench's own self-test: {passed} passed, {answered} answering, \
+        "Stegobench's own self-test: {passed} passed, {answered} responded, \
          {broken} failed, {skipped} not run. Passing says stegobench can \
          drive it, not that you can run it yourself."
     ));
@@ -1081,7 +1090,9 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
         ));
     }
     if answered > 0 {
-        human.push("answering: installed and responding, not proved accurate.".into());
+        human.push(
+            "responded: it answered without settling either fixture, so nothing is proved.".into(),
+        );
     }
     if skipped > 0 {
         // Never let "we did not look" read as "it is fine".
@@ -1110,7 +1121,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
         "unsupported_here": unsupported,
         "undetermined": undetermined,
         "not_checked": skipped,
-        "answering": answered,
+        "responded": answered,
         "tools": rows.iter().map(|(c, v, d, n, k)| serde_json::json!({
             "name": c.name,
             "kind": match k {
@@ -1122,7 +1133,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
             "status": match v {
                 Verified::Passed => "passed",
                 Verified::Failed(_) => "failed",
-                Verified::Answered(_) => "answering",
+                Verified::Answered(_) => "responded",
                 Verified::Skipped(_) => "not_checked",
             },
             "detail": d,
@@ -1134,6 +1145,11 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     });
 
     let mut out = Output::ok(json, human.join("\n"));
+    // The report IS the output, and it is the same report whether the verdict
+    // is fit or unfit, so it goes to stdout under either exit code. Routing it
+    // on the code instead sent `stegobench doctor > report.txt` to an empty
+    // file on exactly the machine whose report was worth keeping.
+    out.payload_on_stdout = true;
     // WHAT "UNFIT" MEANS, AND WHAT IT USED TO MEAN
     //
     // It used to mean any registered tool being absent, which no machine
@@ -1152,26 +1168,44 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     //
     // `--strict` keeps the old meaning for the caller that wants it, which is
     // a release gate rather than a person at a terminal.
+    // WITH `--no-selftest`, THE VERDICT IS ABOUT WHAT IS INSTALLED
+    //
+    // Fitness was read off the self-test results alone, and `--no-selftest`
+    // runs none, so every machine came out with nothing usable: a box where
+    // plain `doctor` exited 0 and four detectors had just scored was told it
+    // was unfit and handed exit 8. The flag promises a faster report, not a
+    // different answer, so what it cannot prove it does not judge, and the
+    // question falls back to the one it can still answer.
+    let strictly_short = strict && (missing > 0 || undetermined > 0);
     let usable = passed + answered;
-    let unfit = broken > 0 || usable == 0 || (strict && (missing > 0 || undetermined > 0));
+    let unfit = if no_selftest {
+        present == 0 || strictly_short
+    } else {
+        broken > 0 || usable == 0 || strictly_short
+    };
     if unfit {
         out.code = exit::ENVIRONMENT_UNFIT;
     }
     if out.code == exit::ENVIRONMENT_UNFIT {
-        let why = if broken > 0 {
+        let why = if !no_selftest && broken > 0 {
             format!("{broken} installed tool(s) failed their own self-test")
-        } else if usable == 0 {
+        } else if no_selftest && present == 0 {
+            "no tool here is installed, so nothing could be measured".to_string()
+        } else if !no_selftest && usable == 0 {
             "no tool here is usable, so nothing could be measured".to_string()
         } else {
             "--strict was given and something is missing or undetermined".to_string()
         };
-        out.human.push_str(&format!("\n\nUNFIT (exit 8): {why}."));
+        out.human.push_str(&format!("\n\nUNFIT: {why}."));
+    } else if no_selftest {
+        out.human.push_str(&format!(
+            "\n\nFIT: {present} tool(s) installed. The self-tests were \
+             skipped, so none of them is proved to work."
+        ));
     } else if missing > 0 || undetermined > 0 {
         out.human.push_str(
-            "\n\nFIT (exit 0): the tools above that are not installed are \
-             listed rather than treated as faults, because you can measure \
-             with the ones you have. `--strict` fails on any of them, which \
-             is what a release gate wants.",
+            "\n\nFIT: what is not installed is listed, not counted against \
+             you. `--strict` counts it.",
         );
     }
     out
@@ -1614,6 +1648,21 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         return Output::err_because(exit::PREFLIGHT_REFUSED, "corpus-unlabelled", why);
     }
 
+    // Asked before the corpus is walked, in the same position `score` asks
+    // it, so a plan over nothing that can run refuses with the same word and
+    // the same code rather than printing a table of zeroes.
+    let blocked: Vec<Option<String>> = entries
+        .iter()
+        .map(|e| unavailable_reason(e, resolved.adapter_roots()))
+        .collect();
+    if blocked.iter().all(Option::is_some) {
+        return Output::err_because(
+            exit::PREFLIGHT_REFUSED,
+            "nothing-available",
+            nothing_available(&entries, &blocked),
+        );
+    }
+
     // THE SAME PRE-FLIGHT `score` RUNS, RATHER THAN A COUNT OF ITS OWN
     //
     // This used to walk the corpus itself and count scorable samples, which
@@ -1646,10 +1695,14 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     // answered half the question somebody asks before committing six hours.
     let (configuration, why) = plan_configuration(reg, corpus_id.as_deref(), limit.is_some());
 
-    // One JSON line per answer, measured at roughly sixty bytes on the real
-    // records this writes, and one records file per detector.
-    let records_mb = (items as f64 * 60.0 * entries.len() as f64) / 1_048_576.0;
-
+    // WHAT `score` WOULD ACTUALLY RUN, NOT WHAT WAS ASKED FOR
+    //
+    // `plan ... --detector all` estimated seven detectors and `score` then
+    // ran four, because this never asked the availability question `score`
+    // asks. The three it could not run were not merely absent from the
+    // total: they were absent from the screen, so the one command whose job
+    // is to say what a run will cost overstated it and hid three blockers a
+    // reader could have fixed before starting.
     let mut per_detector = Vec::new();
     let mut lines = Vec::new();
     // Summed only over the detectors that declare a rate. A total that
@@ -1658,24 +1711,45 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     // carried beside the total rather than folded into it.
     let mut total_seconds = 0.0f64;
     let mut unestimated = 0usize;
-    for entry in &entries {
+    let mut unavailable = 0usize;
+    let mut runnable = 0usize;
+    for (entry, blocked) in entries.iter().zip(&blocked) {
         let per_image = entry.cost.seconds_per_image;
-        let seconds = per_image.map(|s| s * items as f64);
-        match seconds {
-            Some(s) => total_seconds += s,
-            None => unestimated += 1,
+        // A rate over a detector that will not start is arithmetic about
+        // nothing, so it is neither summed nor counted as unestimated.
+        let seconds = match blocked {
+            Some(_) => None,
+            None => per_image.map(|s| s * items as f64),
+        };
+        match blocked {
+            Some(_) => unavailable += 1,
+            None => {
+                runnable += 1;
+                match seconds {
+                    Some(s) => total_seconds += s,
+                    None => unestimated += 1,
+                }
+            }
         }
-        let duration = match seconds {
-            Some(s) => format!("at least {}", human_duration(s)),
-            None => "unknown: it declares no seconds_per_image".to_string(),
+        let duration = match (blocked, seconds) {
+            (Some(why), _) => format!("NOT AVAILABLE: {why}"),
+            (None, Some(s)) => format!("at least {}", human_duration(s)),
+            (None, None) => "unknown: it declares no seconds_per_image".to_string(),
         };
         lines.push(format!("{:<16} {duration}", entry.name));
         per_detector.push(serde_json::json!({
             "detector": entry.name,
+            "available": blocked.is_none(),
+            "unavailable_reason": blocked,
             "seconds_per_image": per_image,
             "estimated_seconds": seconds,
         }));
     }
+
+    // One JSON line per answer, measured at roughly sixty bytes on the real
+    // records this writes, and one records file per detector that will run.
+    let records_mb = (items as f64 * 60.0 * runnable as f64) / 1_048_576.0;
+    let worst_case_seconds = items * timeout * runnable as u64;
 
     let mut value = serde_json::Map::new();
     value.insert("items".into(), serde_json::json!(items));
@@ -1684,6 +1758,11 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         serde_json::json!(entries.iter().map(|e| &e.name).collect::<Vec<_>>()),
     );
     value.insert("per_detector".into(), serde_json::json!(per_detector));
+    value.insert("runnable_detectors".into(), serde_json::json!(runnable));
+    value.insert(
+        "unavailable_detectors".into(),
+        serde_json::json!(unavailable),
+    );
     value.insert("estimated_seconds".into(), serde_json::json!(total_seconds));
     value.insert(
         "unestimated_detectors".into(),
@@ -1693,7 +1772,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     value.insert("configuration".into(), serde_json::json!(configuration));
     value.insert(
         "worst_case_seconds".into(),
-        serde_json::json!(items * timeout * entries.len() as u64),
+        serde_json::json!(worst_case_seconds),
     );
     // So a caller cannot mistake the total for something this machine
     // measured. Nothing here times a detector, and nothing yet replaces a
@@ -1702,12 +1781,9 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     value.insert("estimate_is_a_lower_bound".into(), serde_json::json!(true));
     value.insert("corpus_notes".into(), serde_json::json!(notes));
 
-    let mut human = format!(
-        "{items} item(s) to score with each of {} detector(s):\n",
-        entries.len()
-    );
+    let mut human = format!("{items} item(s) to score with each of {runnable} detector(s):\n");
     human.push_str(&lines.join("\n"));
-    let estimated = entries.len() - unestimated;
+    let estimated = runnable - unestimated;
     if estimated == 0 {
         // "Total: about 0 seconds" over a set where nothing could be estimated
         // is a number that reads as free and means nothing was measured. No
@@ -1734,8 +1810,16 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     human.push_str(&format!(
         "\nRecords        about {records_mb:.1} MB\nWorst case     \
          {}\nConfiguration  {configuration}: {why}",
-        human_duration((items * timeout * entries.len() as u64) as f64)
+        human_duration(worst_case_seconds as f64)
     ));
+    if unavailable > 0 {
+        human.push_str(&format!(
+            "\n\n{unavailable} of {} asked for cannot run here and are left \
+             out of every figure above. `stegobench doctor` says what each \
+             one needs.",
+            entries.len()
+        ));
+    }
 
     // One line, because the reasoning behind it is on `plan --help` and a
     // reader who wants it can ask. What cannot be left out is the claim: a
@@ -2239,24 +2323,6 @@ fn output_inside_corpus(corpus: &Path, flag: &str, out: Option<&Path>) -> Option
     Some(why)
 }
 
-/// An IO error as a sentence, without the operating system's error number.
-///
-/// `os error 2` names nothing a reader can act on and reads as a crash rather
-/// than an answer, which is the whole of why it never reaches a user here.
-fn plain(e: &std::io::Error) -> String {
-    match e.kind() {
-        std::io::ErrorKind::NotFound => "nothing is there".to_string(),
-        std::io::ErrorKind::PermissionDenied => "permission was refused".to_string(),
-        _ => {
-            let text = e.to_string();
-            match text.split_once(" (os error") {
-                Some((head, _)) => head.to_string(),
-                None => text,
-            }
-        }
-    }
-}
-
 /// Whether this looks like a folder of unlabelled images rather than a corpus.
 ///
 /// WHY THE REFUSAL TEACHES RATHER THAN REPORTS
@@ -2446,57 +2512,16 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     // start which of the seven it can actually run, not discover the fourth is
     // missing after three hours. Presence only: the self-test is `doctor`'s
     // job and costs a container pull.
+    let blocked: Vec<Option<String>> = entries
+        .iter()
+        .map(|e| unavailable_reason(e, resolved.adapter_roots()))
+        .collect();
     let mut runnable = Vec::new();
     let mut outcomes: Vec<(String, Outcome)> = Vec::new();
-    for entry in &entries {
-        match availability::check(entry, resolved.adapter_roots()).presence {
-            // PRESENT IS NOT THE SAME AS DRIVABLE, AND `score` USED TO TREAT
-            // IT AS THE SAME.
-            //
-            // Availability answers whether the code is on this machine. An
-            // entry with no invoke block passes that and still says nothing
-            // about what command to launch, so there is nothing to run.
-            // `doctor` has reported this since it shipped and `score` did
-            // not: the run announced "1 of 1 that can run here", started the
-            // tool once per image, recorded "entry declares no invoke block"
-            // against every one of them, and then refused with "the corpus
-            // holds 0 clean and 0 stego image(s)" over a corpus holding six
-            // and twelve. A gap in this project's own registry was reported
-            // as a fault in the user's corpus, and it was classified as a
-            // plugin failure beside other detectors and a pre-flight refusal
-            // on its own. It is a skip, in both.
-            //
-            // Asked inside the Present arm rather than before the check, so a
-            // tool that is neither installed nor drivable is still answered
-            // with the half the reader can act on.
-            Presence::Present { .. } if entry.invoke.is_none() => outcomes.push((
-                entry.name.clone(),
-                Outcome::Skipped {
-                    why: "declares no invoke block, so nothing in its \
-                          registry entry says what command to launch and the \
-                          host has no way to drive it"
-                        .to_string(),
-                },
-            )),
-            Presence::Present { .. } => runnable.push(*entry),
-            Presence::Unsupported { reason } => outcomes.push((
-                entry.name.clone(),
-                Outcome::Skipped {
-                    why: format!("cannot run on this machine: {reason}"),
-                },
-            )),
-            Presence::Absent { reason } => outcomes.push((
-                entry.name.clone(),
-                Outcome::Skipped {
-                    why: format!("is registered but is not on this machine: {reason}"),
-                },
-            )),
-            Presence::Unknown { reason } => outcomes.push((
-                entry.name.clone(),
-                Outcome::Skipped {
-                    why: format!("whether it can run here could not be established: {reason}"),
-                },
-            )),
+    for (entry, why) in entries.iter().zip(&blocked) {
+        match why {
+            Some(why) => outcomes.push((entry.name.clone(), Outcome::Skipped { why: why.clone() })),
+            None => runnable.push(*entry),
         }
     }
 
@@ -2505,22 +2530,12 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     // always been, with the same exit code, rather than becoming a zero-result
     // "run" that happens to have skipped everything.
     if runnable.is_empty() {
-        let why = outcomes
-            .iter()
-            .map(|(name, o)| match o {
-                Outcome::Skipped { why } => format!("{name} {why}"),
-                _ => format!("{name} was not run"),
-            })
-            .collect::<Vec<_>>()
-            .join("\n  ");
         return Output::err_because(
             exit::PREFLIGHT_REFUSED,
             "nothing-available",
             format!(
-                "nothing was measured: not one of the {} detector(s) asked for \
-                 is available here.\n  {why}\n`stegobench doctor` checks every \
-                 registered tool at once and says what each one needs.",
-                entries.len()
+                "nothing was measured: {}",
+                nothing_available(&entries, &blocked)
             ),
         );
     }
@@ -2584,6 +2599,73 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         &out_dir,
         many,
         fetch::offer(&resolved.registry).as_ref(),
+    )
+}
+
+/// Why a detector would not be run here, in the words `score` reports it in.
+///
+/// `None` means it would run. One function rather than one per command,
+/// because `plan` answered this question by not asking it: a seven detector
+/// plan estimated a run that `score` then did with four, overstating the job
+/// and saying nothing at all about the three hard blockers. A pre-flight that
+/// disagrees with the run it previews is worse than no pre-flight.
+///
+/// PRESENT IS NOT THE SAME AS DRIVABLE, AND `score` USED TO TREAT IT AS THE
+/// SAME.
+///
+/// Availability answers whether the code is on this machine. An entry with no
+/// invoke block passes that and still says nothing about what command to
+/// launch, so there is nothing to run. `doctor` has reported this since it
+/// shipped and `score` did not: the run announced "1 of 1 that can run here",
+/// started the tool once per image, recorded "entry declares no invoke block"
+/// against every one of them, and then refused with "the corpus holds 0 clean
+/// and 0 stego image(s)" over a corpus holding six and twelve. A gap in this
+/// project's own registry was reported as a fault in the user's corpus. It is
+/// a skip.
+///
+/// Asked inside the Present arm rather than before the check, so a tool that
+/// is neither installed nor drivable is still answered with the half the
+/// reader can act on.
+fn unavailable_reason(
+    entry: &stegobench_core::registry::Entry,
+    adapter_roots: &[PathBuf],
+) -> Option<String> {
+    match availability::check(entry, adapter_roots).presence {
+        Presence::Present { .. } if entry.invoke.is_none() => Some(
+            "declares no invoke block, so nothing in its registry entry says \
+             what command to launch and the host has no way to drive it"
+                .to_string(),
+        ),
+        Presence::Present { .. } => None,
+        Presence::Unsupported { reason } => Some(format!("cannot run on this machine: {reason}")),
+        Presence::Absent { reason } => Some(format!(
+            "is registered but is not on this machine: {reason}"
+        )),
+        Presence::Unknown { reason } => Some(format!(
+            "whether it can run here could not be established: {reason}"
+        )),
+    }
+}
+
+/// The refusal `score` and `plan` share when not one detector can run.
+///
+/// `blocked` is positional against `entries`, and every entry in it has a
+/// reason by the time this is called.
+fn nothing_available(
+    entries: &[&stegobench_core::registry::Entry],
+    blocked: &[Option<String>],
+) -> String {
+    let why = entries
+        .iter()
+        .zip(blocked)
+        .filter_map(|(e, b)| b.as_ref().map(|w| format!("{} {w}", e.name)))
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    format!(
+        "not one of the {} detector(s) asked for is available here.\n  \
+         {why}\n`stegobench doctor` checks every registered tool at once and \
+         says what each one needs.",
+        entries.len()
     )
 }
 
@@ -2937,10 +3019,18 @@ fn summarise(
             ));
         }
     }
+    // TWO "Next:" LINES ARE NONE.
+    //
+    // A run of the shipped starter corpus into a directory printed both
+    // "Next: stegobench report ..." and "Next: stegobench describe
+    // pentimento-core", one under the other, and a reader with two next steps
+    // has no next step. They are gathered here and printed as an ordered
+    // pair instead, nearest first.
+    let mut next: Vec<String> = Vec::new();
     if many {
         if let Some(dir) = out_dir {
-            lines.push(format!(
-                "Next: stegobench report {} --format markdown",
+            next.push(format!(
+                "stegobench report {} --format markdown",
                 dir.display()
             ));
         }
@@ -2966,11 +3056,13 @@ fn summarise(
     if let Some(offer) = offer {
         if largest > 0 && largest < fetch::SMALL_RUN_IMAGES {
             lines.push(format!(
-                "{largest} images is a demonstration, not a measurement. \
-                 Next: {}",
-                offer.command()
+                "{largest} images is a demonstration, not a measurement."
             ));
+            next.push(offer.command().to_string());
         }
+    }
+    for (label, command) in ["Next: ", "Then: "].iter().zip(&next) {
+        lines.push(format!("{label}{command}"));
     }
 
     // The code says the same thing the count says, for a caller that is not a
@@ -3314,6 +3406,48 @@ fn wrong_direction(typed: &str) -> bool {
     WRONG_DIRECTION.contains(&typed.as_str())
 }
 
+/// Words that mean the right thing and are not the verb.
+///
+/// These are not the wrong direction: somebody typing them has understood
+/// what the tool measures and has only guessed the wrong word for it. They
+/// used to reach the generic "there is no `stegobench benchmark`" line, which
+/// says what is absent and nothing about what is present, and "benchmark" is
+/// the word in the product's own name and the likeliest first guess there is.
+const RIGHT_IDEA: &[&str] = &[
+    "assess",
+    "bench",
+    "benchmark",
+    "benchmarks",
+    "compare",
+    "eval",
+    "evaluate",
+    "grade",
+    "measure",
+    "rank",
+];
+
+fn right_idea(typed: &str) -> bool {
+    let typed = typed.to_lowercase();
+    RIGHT_IDEA.contains(&typed.as_str())
+}
+
+/// The redirect those words get: the verb they meant, and the two commands.
+fn cmd_right_idea(word: &str) -> Output {
+    Output::err(
+        exit::USAGE,
+        format!(
+            "there is no `stegobench {word}`. Measuring a detector against a \
+             labelled corpus is `score`.\n\n\
+             `stegobench plan score --corpus <dir> --detector <name>`  what \
+             it would cost\n\
+             `stegobench score --corpus <dir> --detector <name>`       the \
+             measurement\n\
+             `stegobench list detectors`                               what \
+             is registered here"
+        ),
+    )
+}
+
 /// The refusal those words get.
 ///
 /// The second clause names no verb of its own. "it does not run your own
@@ -3476,6 +3610,10 @@ fn parse_or_explain() -> Cli {
                 eprintln!("{}", cmd_wrong_direction(&typed).human);
                 std::process::exit(exit::USAGE);
             }
+            if right_idea(&typed) {
+                eprintln!("{}", cmd_right_idea(&typed).human);
+                std::process::exit(exit::USAGE);
+            }
             let nearest = nearest_command(&typed);
             eprintln!("there is no `stegobench {typed}`.");
             if let Some(nearest) = nearest {
@@ -3526,8 +3664,58 @@ fn parse_or_explain() -> Cli {
             eprintln!("\n`stegobench help scope` is the whole of why.");
             std::process::exit(exit::USAGE);
         }
+        Err(ref e) if misleading_suggestion(e).is_some() => {
+            let typed = misleading_suggestion(e).expect("matched");
+            let command = std::env::args().nth(1).unwrap_or_default();
+            eprintln!("there is no `{typed}` here.");
+            if command.is_empty() || command.starts_with('-') {
+                eprintln!("`stegobench --help` lists every flag.");
+            } else {
+                eprintln!("`stegobench {command} --help` lists every flag it takes.");
+            }
+            std::process::exit(exit::USAGE);
+        }
         Err(e) => e.exit(),
     }
+}
+
+/// Did clap offer a flag that has nothing to do with what was typed?
+///
+/// `Some(typed)` is the unknown flag, and the caller answers without the
+/// suggestion. clap's did-you-mean is looser than this tool's: `--threads`
+/// drew `--records`, five edits away and about writing files rather than
+/// about concurrency, which sends a reader down a road that does not go
+/// where they were headed. There is no concurrency flag, and no suggestion at
+/// all is a better answer than a confident wrong one.
+///
+/// A genuine near miss still gets clap's own message, which is the better one
+/// for it: `--corpu` is one edit from `--corpus` and passes.
+fn misleading_suggestion(e: &clap::Error) -> Option<String> {
+    if e.kind() != clap::error::ErrorKind::UnknownArgument {
+        return None;
+    }
+    let typed = e.get(clap::error::ContextKind::InvalidArg)?.to_string();
+    let suggested = e.get(clap::error::ContextKind::SuggestedArg)?.to_string();
+    // Every suggestion clap made has to be a poor one before this takes over,
+    // so a list holding one good match is still clap's to answer.
+    let bare = |s: &str| s.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+    let typed_bare = bare(&typed);
+    let any_close = suggested
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(bare)
+        .filter(|s| !s.is_empty())
+        .any(|s| near_enough(&typed_bare, &s));
+    if any_close {
+        return None;
+    }
+    Some(typed)
+}
+
+/// The same rule [`nearest_command`] applies: at most two edits, and no more
+/// than half the longer word.
+fn near_enough(typed: &str, candidate: &str) -> bool {
+    let d = edit_distance(typed, candidate);
+    d <= 2 && d * 2 <= candidate.len().max(typed.len())
 }
 
 /// Did somebody type `stegobench plan --corpus ...` and mean
@@ -3623,7 +3811,7 @@ fn nearest_command(typed: &str) -> Option<String> {
         // no more than half the word: `chek` is three edits from `schema`,
         // which clap was happy to offer and which is a worse answer than
         // silence, because it sends somebody to a command about JSON schemas.
-        .filter(|(d, name)| *d <= 2 && *d * 2 <= name.len().max(typed.len()))
+        .filter(|(_, name)| near_enough(&typed, name))
         .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
         .map(|(_, name)| name)
 }
@@ -3648,6 +3836,44 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Whether a succeeding command's human text is the thing the caller asked
+/// for, rather than a note about producing it.
+///
+/// A listing is content. `stegobench list detectors | grep zsteg` found
+/// nothing and `stegobench describe zsteg > notes.txt` wrote an empty file,
+/// because every one of these wrote its whole answer to stderr while
+/// `--help` promised stdout carried the content.
+///
+/// `doctor` is not here and reaches stdout by its own route: it prints the
+/// same report whether it ends in 0 or 8, so the decision cannot be made from
+/// the exit code the way it is for everything else.
+fn human_is_content(command: &Command) -> bool {
+    match command {
+        // An estimate and a set of figures are both the answer somebody ran
+        // the command to get, so `plan score ... > estimate.txt` and
+        // `metrics < scores.json | tee` work. Only reached on exit 0, so a
+        // refusal from either still goes to stderr.
+        Command::List { .. }
+        | Command::Describe { .. }
+        | Command::Help { .. }
+        | Command::Plan { .. }
+        | Command::Metrics { .. }
+        | Command::Completions { .. } => true,
+        // Named rather than caught by a wildcard, so adding a command is a
+        // decision about which stream it writes to instead of a default.
+        Command::Schema { .. }
+        | Command::Validate { .. }
+        | Command::Verify { .. }
+        | Command::Embed { .. }
+        | Command::Doctor { .. }
+        | Command::Score { .. }
+        | Command::Fetch { .. }
+        | Command::Report { .. }
+        | Command::Check { .. }
+        | Command::Scan { .. } => false,
+    }
+}
+
 fn main() {
     let cli = parse_or_explain();
     let out = run(&cli);
@@ -3669,10 +3895,7 @@ fn main() {
             let mut stdout = std::io::stdout().lock();
             let _ = serde_json::to_writer_pretty(&mut stdout, &out.json);
             let _ = writeln!(stdout);
-        } else if matches!(
-            cli.command,
-            Some(Command::Completions { .. } | Command::Help { .. })
-        ) {
+        } else if cli.command.as_ref().is_some_and(human_is_content) {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", out.human);
         } else {
@@ -7043,6 +7266,414 @@ mod tests {
             out.human
                 .contains("Every field except the two that record WHEN the run happened"),
             "the sentence did not survive rewrapping:\n{}",
+            out.human
+        );
+    }
+
+    /// `stegobench list detectors | grep zsteg` found nothing, and
+    /// `stegobench doctor > report.txt` wrote an empty file, because a
+    /// listing is content and every one of them was going to stderr.
+    #[test]
+    fn a_listing_is_content_and_a_refusal_is_not() {
+        for command in [
+            Command::List { kind: "all".into() },
+            Command::Describe {
+                name: "zsteg".into(),
+                toml: false,
+            },
+            Command::Help { topic: None },
+            Command::Completions {
+                shell: clap_complete::Shell::Bash,
+            },
+            Command::Plan {
+                command: vec!["score".into()],
+            },
+            Command::Metrics {
+                file: None,
+                at: vec![],
+            },
+        ] {
+            assert!(human_is_content(&command), "not routed to stdout");
+        }
+        for command in [
+            Command::Score {
+                corpus: PathBuf::from("c"),
+                detector: vec!["d".into()],
+                split: None,
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: None,
+                timeout: 60,
+                limit: None,
+            },
+            Command::Validate {
+                file: PathBuf::from("f"),
+            },
+            Command::Fetch {
+                corpus: "c".into(),
+                tier: "nano".into(),
+                dest: None,
+                max_bytes: None,
+                budget_minutes: 1,
+            },
+        ] {
+            assert!(!human_is_content(&command), "progress reached stdout");
+        }
+    }
+
+    /// `doctor` prints the same report whether it ends in 0 or 8, so the
+    /// report is not routed on the exit code: redirecting it on the machine
+    /// whose report was worth keeping wrote an empty file.
+    #[test]
+    fn doctors_report_goes_to_stdout_under_either_verdict() {
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        assert!(out.payload_on_stdout, "{}", out.human);
+    }
+
+    /// `--no-selftest` promises a faster report, not a different verdict. It
+    /// used to hand exit 8 to a machine where plain `doctor` exited 0, because
+    /// fitness was read off self-test results the flag had just skipped.
+    #[test]
+    fn skipping_the_self_tests_judges_what_is_installed() {
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        assert_eq!(
+            out.json["verified"].as_u64(),
+            Some(0),
+            "this test only means something when nothing was self-tested"
+        );
+        let present = out.json["present"].as_u64().expect("a count");
+        let expected = if present == 0 {
+            exit::ENVIRONMENT_UNFIT
+        } else {
+            exit::OK
+        };
+        assert_eq!(out.code, expected, "{present} installed:\n{}", out.human);
+        assert!(
+            !out.human.contains("no tool here is usable"),
+            "judged on a self-test it did not run:\n{}",
+            out.human
+        );
+        if present > 0 {
+            assert!(
+                out.human.contains("The self-tests were skipped"),
+                "the report claims more than it checked:\n{}",
+                out.human
+            );
+        }
+    }
+
+    /// A human reading "FIT" does not need the number and a script reads the
+    /// status. The documented contract stays under `--help`.
+    #[test]
+    fn the_verdict_line_carries_no_exit_code() {
+        for strict in [false, true] {
+            let out = cmd_doctor(&resolved_at(shipped_registry()), None, strict);
+            assert!(
+                out.human.contains("\nFIT:") || out.human.contains("\nUNFIT:"),
+                "no verdict at all:\n{}",
+                out.human
+            );
+            assert!(
+                !out.human.contains("(exit "),
+                "the verdict quotes its own exit code:\n{}",
+                out.human
+            );
+        }
+    }
+
+    /// "0 answering" was undefined anywhere a reader would meet it.
+    #[test]
+    fn the_self_test_summary_uses_a_word_the_help_defines() {
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let line = out
+            .human
+            .lines()
+            .find(|l| l.contains("Stegobench's own self-test:"))
+            .expect("a summary line");
+        assert!(line.contains("responded"), "{line}");
+        assert!(!line.contains("answering"), "{line}");
+
+        let mut doctor = Cli::command();
+        doctor.build();
+        let help = doctor
+            .get_subcommands()
+            .find(|s| s.get_name() == "doctor")
+            .expect("doctor is a command")
+            .get_long_about()
+            .expect("doctor explains itself")
+            .to_string();
+        assert!(help.contains("responded"), "the word is defined nowhere");
+        // The screen and the JSON say the same word, so a reader moving
+        // between them is not looking at two vocabularies.
+        assert_eq!(out.json["responded"], serde_json::json!(0));
+    }
+
+    /// `registry  plugins/registry` and `fixtures  fixtures`: the second is a
+    /// value repeating its own key, which reads as a bug rather than as an
+    /// answer to "which images were these".
+    #[test]
+    fn doctor_names_where_it_read_from_in_full() {
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let first = out.human.lines().next().expect("a registry line");
+        let path = first
+            .strip_prefix("registry  ")
+            .expect("the registry line comes first");
+        assert!(
+            Path::new(path).is_absolute(),
+            "a relative path is not somewhere a reader can go: {first}"
+        );
+    }
+
+    /// `plan score --detector all` estimated seven detectors and `score` then
+    /// ran four, because the plan never asked the availability question the
+    /// run asks. It overstated the job and hid three blockers.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_leaves_out_what_score_would_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_plan(
+            &resolved_at(&reg),
+            &[
+                "score".into(),
+                "--corpus".into(),
+                corpus.display().to_string(),
+                "--detector".into(),
+                "all".into(),
+            ],
+        );
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert_eq!(out.json["runnable_detectors"], serde_json::json!(1));
+        assert_eq!(out.json["unavailable_detectors"], serde_json::json!(1));
+        assert!(
+            out.human.contains("to score with each of 1 detector(s)"),
+            "the header counts what cannot run:\n{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("ghost") && out.human.contains("NOT AVAILABLE"),
+            "the blocker is not on the screen:\n{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("cannot run here and are left out"),
+            "nothing says the figures exclude it:\n{}",
+            out.human
+        );
+        let ghost = out.json["per_detector"]
+            .as_array()
+            .expect("per detector")
+            .iter()
+            .find(|d| d["detector"] == "ghost")
+            .expect("ghost is listed");
+        assert_eq!(ghost["available"], serde_json::json!(false));
+        assert!(ghost["estimated_seconds"].is_null(), "{ghost}");
+    }
+
+    /// A plan over nothing that can run refuses with the word and the code
+    /// `score` refuses with, rather than printing a table of zeroes.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_over_nothing_available_refuses_the_way_score_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_plan(
+            &resolved_at(&reg),
+            &[
+                "score".into(),
+                "--corpus".into(),
+                corpus.display().to_string(),
+                "--detector".into(),
+                "ghost".into(),
+            ],
+        );
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert_eq!(out.json["reason"], serde_json::json!("nothing-available"));
+    }
+
+    /// Zero parsed, and meant "kill it before it can answer": every item
+    /// recorded a timeout under a document that exited zero.
+    #[test]
+    fn a_timeout_of_zero_is_refused_rather_than_given_a_meaning() {
+        let Err(e) = Cli::try_parse_from([
+            "stegobench",
+            "score",
+            "--corpus",
+            "c",
+            "--detector",
+            "d",
+            "--timeout",
+            "0",
+        ]) else {
+            panic!("0 has no honest meaning here")
+        };
+        let said = e.to_string();
+        assert!(said.contains("kill the detector"), "{said}");
+        assert!(said.contains("no value meaning no timeout"), "{said}");
+
+        let ok = Cli::try_parse_from([
+            "stegobench",
+            "score",
+            "--corpus",
+            "c",
+            "--detector",
+            "d",
+            "--timeout",
+            "1",
+        ]);
+        assert!(ok.is_ok(), "one second is a real deadline");
+    }
+
+    /// clap offered `--records` for `--threads`: five edits apart, and about
+    /// writing files rather than about concurrency.
+    #[test]
+    fn an_unrelated_flag_is_not_offered_as_a_correction() {
+        let Err(e) = Cli::try_parse_from([
+            "stegobench",
+            "score",
+            "--corpus",
+            "c",
+            "--detector",
+            "d",
+            "--threads",
+            "4",
+        ]) else {
+            panic!("there is no --threads")
+        };
+        assert_eq!(
+            misleading_suggestion(&e).as_deref(),
+            Some("--threads"),
+            "clap's suggestion was let through: {e}"
+        );
+
+        // A genuine near miss still gets clap's own answer, which is better.
+        let Err(e) =
+            Cli::try_parse_from(["stegobench", "score", "--corpu", "c", "--detector", "d"])
+        else {
+            panic!("--corpu is a typo")
+        };
+        assert_eq!(misleading_suggestion(&e), None, "{e}");
+    }
+
+    /// "benchmark" is the word in the product's own name and the likeliest
+    /// first guess there is. It used to reach the generic unknown-command
+    /// line, which says what is absent and nothing about what is present.
+    #[test]
+    fn the_words_that_mean_score_are_redirected_to_score() {
+        for word in ["benchmark", "eval", "evaluate", "Benchmark"] {
+            assert!(right_idea(word), "{word} gets the generic message");
+            assert!(
+                !wrong_direction(word),
+                "{word} is not the wrong direction, only the wrong verb"
+            );
+        }
+        let out = cmd_right_idea("benchmark");
+        assert_eq!(out.code, exit::USAGE);
+        assert!(
+            out.human.contains("stegobench score --corpus"),
+            "{}",
+            out.human
+        );
+        assert!(
+            !out.human.contains("cannot tell you whether"),
+            "a reader who typed benchmark has understood the tool:\n{}",
+            out.human
+        );
+    }
+
+    /// `describe` said "18 files in all" over a corpus `fetch` correctly
+    /// reports as 39 files. The field holds images.
+    #[test]
+    fn the_starter_corpus_counts_the_same_thing_on_every_screen() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        let starter = reg.corpora.get(STARTER_ID).expect("the starter is listed");
+        let facts = corpus_facts(starter);
+        let size = facts
+            .iter()
+            .find(|(k, _)| *k == "Size")
+            .map(|(_, v)| v.clone())
+            .expect("a size fact");
+        assert_eq!(size, "6 covers, 18 images in all", "{size}");
+        assert_eq!(
+            EMBEDDED_STARTER.len(),
+            39,
+            "the count the quickstart quotes for `fetch` has moved"
+        );
+    }
+
+    /// TWO "Next:" LINES ARE NONE.
+    ///
+    /// A run of the shipped starter corpus into a directory closed with both
+    /// "Next: stegobench report ..." and "Next: stegobench describe
+    /// pentimento-core", one under the other.
+    #[test]
+    fn a_run_closes_with_one_next_step() {
+        let doc: Result1 = serde_json::from_value(serde_json::json!({
+            "schema": stegobench_core::result::RESULT_SCHEMA_ID,
+            "subject": {"name": "x", "version": "sha256:a", "kind": "detector"},
+            "corpus": {"name": "c", "source": "supplied", "digest": "sha256:a", "pairs": 2},
+            "arm": {"embedder": "wow", "domain": "spatial", "format": "png"},
+            "metrics": {"auc": 0.9, "tpr_at_fpr": {}, "n_clean": 1, "n_stego": 1, "n_error": 0},
+            "provenance": {
+                "plugins": [{"name": "x", "image": "sha256:a", "determinism": "nondeterministic", "pinned_by": "executable-hash", "isolation": "host"}],
+                "harness_version": "0.1.0",
+                "started_utc": "2026-09-25T00:00:00Z",
+                "elapsed_seconds": 1.0,
+                "network_reachable": true
+            },
+            "declarations": {
+                "split_discipline": "not-applicable",
+                "pairing": "unverified",
+                "configuration": "custom",
+                "self_reported": false
+            }
+        }))
+        .expect("the fixture document parses");
+
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        let offer = fetch::offer(&reg).expect("the registry offers a real corpus");
+        let outcomes = vec![
+            (
+                "one".to_string(),
+                Outcome::Measured {
+                    result: Box::new(doc.clone()),
+                    tally: stegobench_plugin::runner::Tally::default(),
+                    written: Some(dir.path().join("one.json")),
+                },
+            ),
+            (
+                "two".to_string(),
+                Outcome::Measured {
+                    result: Box::new(doc),
+                    tally: stegobench_plugin::runner::Tally::default(),
+                    written: Some(dir.path().join("two.json")),
+                },
+            ),
+        ];
+        let out = summarise(
+            &outcomes,
+            &Some(dir.path().to_path_buf()),
+            true,
+            Some(&offer),
+        );
+        let nexts = out.human.lines().filter(|l| l.starts_with("Next:")).count();
+        assert_eq!(nexts, 1, "two next steps is none:\n{}", out.human);
+        assert!(
+            out.human.contains("Then: "),
+            "the second suggestion was dropped rather than ordered:\n{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("is a demonstration, not a measurement."),
+            "{}",
             out.human
         );
     }
