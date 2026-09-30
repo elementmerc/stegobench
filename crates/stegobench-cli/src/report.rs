@@ -187,6 +187,14 @@ pub struct Row {
     pub domain: Domain,
     pub format: String,
     pub auc: f64,
+    /// The 95 per cent interval, in the same cell as the figure it qualifies.
+    ///
+    /// In the cell rather than in a column of its own, for the reason every
+    /// other condition is in a cell: a row somebody copies out of the middle
+    /// of a table takes its caveats with it whether they meant to or not,
+    /// and an AUC of 0.60 whose interval runs from 0.29 to 0.91 is a
+    /// different claim from one that runs from 0.59 to 0.61.
+    pub auc_ci95: Option<[f64; 2]>,
     pub tpr_at_fpr: BTreeMap<String, f64>,
     pub pairing: Pairing,
     pub split: SplitDiscipline,
@@ -548,6 +556,7 @@ fn to_row(source: &Path, r: Result1) -> Row {
         domain: r.arm.domain,
         format: r.arm.format,
         auc: r.metrics.auc,
+        auc_ci95: r.metrics.auc_ci95,
         tpr_at_fpr: r.metrics.tpr_at_fpr,
         pairing: r.declarations.pairing,
         split: r.declarations.split_discipline,
@@ -805,7 +814,10 @@ fn cells(row: &Row) -> [String; 12] {
         configuration_str(row.configuration).to_string(),
         row.arm(),
         domain_str(row.domain).to_string(),
-        format!("{:.4}", row.auc),
+        match row.auc_ci95 {
+            Some([lo, hi]) => format!("{:.4} [{lo:.3}, {hi:.3}]", row.auc),
+            None => format!("{:.4}", row.auc),
+        },
         tpr_cell(&row.tpr_at_fpr, 0.01),
         tpr_cell(&row.tpr_at_fpr, 0.10),
         pairing_str(row.pairing).to_string(),

@@ -188,6 +188,152 @@ fn rankable(scores: &[f64], labels: &[bool]) -> bool {
     scores.len() == labels.len() && scores.iter().all(|s| !s.is_nan())
 }
 
+/// An AUC with the uncertainty that belongs beside it.
+///
+/// A bare AUC printed to sixteen digits invites a reader to compare two
+/// numbers that differ in the third, on corpora small enough that one image
+/// moves the figure further than that. The interval is the tool saying how
+/// much of its own answer is real.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AucInterval {
+    /// The point estimate, identical to [`roc_auc`].
+    pub auc: f64,
+    /// DeLong's standard error.
+    pub standard_error: f64,
+    /// Lower bound, clamped into `[0, 1]` because AUC cannot leave it.
+    pub low: f64,
+    /// Upper bound, clamped the same way.
+    pub high: f64,
+    /// How many standard errors wide, so a reader knows what was asked for.
+    pub z: f64,
+}
+
+/// 1.959964, the two-sided normal quantile for 95 per cent.
+///
+/// Written out rather than computed: there is no inverse normal in the
+/// standard library, and this crate has no dependencies on purpose (a metric
+/// with a dependency graph is one somebody has to audit before trusting a
+/// number).
+pub const Z_95: f64 = 1.959_963_984_540_054;
+
+/// Average ranks of `values` among themselves, 1-based, ties sharing the mean
+/// of the positions they span.
+///
+/// Split out because DeLong needs the same computation three times over three
+/// different sets, and a second copy of a tie rule is how two of them come to
+/// disagree.
+fn midranks(values: &[f64]) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..values.len()).collect();
+    idx.sort_by(|&a, &b| cmp_f64(values[a], values[b]));
+    let mut ranks = vec![0.0f64; values.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i;
+        while j + 1 < idx.len() && values[idx[j + 1]] == values[idx[i]] {
+            j += 1;
+        }
+        let avg = ((i + 1) + (j + 1)) as f64 / 2.0;
+        for &k in &idx[i..=j] {
+            ranks[k] = avg;
+        }
+        i = j + 1;
+    }
+    ranks
+}
+
+/// AUC with a confidence interval, by DeLong's method.
+///
+/// WHY DELONG AND NOT HANLEY AND MCNEIL
+///
+/// The Hanley and McNeil standard error is two lines and assumes the scores
+/// are exponentially distributed within each class. Detector scores are not:
+/// several of the tools in this registry emit a bounded statistic, one emits
+/// a count, and one answers the same number to everything. Under those the
+/// parametric approximation is wrong in a direction nobody can predict from
+/// the output. DeLong's estimator makes no such assumption; it is computed
+/// from the data's own ranks and is what the statistical literature treats as
+/// the default for comparing classifiers.
+///
+/// Computed through midranks rather than the O(n_pos * n_neg) definition, so
+/// it stays O(n log n) and a Core tier run pays sorting rather than a hundred
+/// billion comparisons.
+///
+/// `z` is how many standard errors wide the interval is: [`Z_95`] for the
+/// usual 95 per cent.
+///
+/// Returns `None` for everything [`roc_auc`] returns `None` for, and also
+/// when either class has fewer than two members, because a variance over one
+/// observation is not an estimate of anything.
+pub fn roc_auc_interval(scores: &[f64], labels: &[bool], z: f64) -> Option<AucInterval> {
+    let auc = roc_auc(scores, labels)?;
+    if !z.is_finite() || z < 0.0 {
+        return None;
+    }
+
+    let pos: Vec<f64> = scores
+        .iter()
+        .zip(labels)
+        .filter(|(_, &l)| l)
+        .map(|(&s, _)| s)
+        .collect();
+    let neg: Vec<f64> = scores
+        .iter()
+        .zip(labels)
+        .filter(|(_, &l)| !l)
+        .map(|(&s, _)| s)
+        .collect();
+    let (m, n) = (pos.len(), neg.len());
+    if m < 2 || n < 2 {
+        return None;
+    }
+
+    // Ranks of each class within itself, and of everything within everything.
+    let t_x = midranks(&pos);
+    let t_y = midranks(&neg);
+    let mut all = Vec::with_capacity(m + n);
+    all.extend_from_slice(&pos);
+    all.extend_from_slice(&neg);
+    let t_z = midranks(&all);
+
+    // DeLong's structural components. V10 is, for each positive, the fraction
+    // of negatives it beats; V01 the mirror. Both fall out of the difference
+    // between a point's rank among everything and its rank among its own
+    // class, which is why this costs a sort rather than a product.
+    let v10: Vec<f64> = (0..m).map(|i| (t_z[i] - t_x[i]) / n as f64).collect();
+    let v01: Vec<f64> = (0..n)
+        .map(|j| 1.0 - (t_z[m + j] - t_y[j]) / m as f64)
+        .collect();
+
+    let s10 = sample_variance(&v10)?;
+    let s01 = sample_variance(&v01)?;
+    let var = s10 / m as f64 + s01 / n as f64;
+    if !var.is_finite() || var < 0.0 {
+        return None;
+    }
+    let se = var.sqrt();
+
+    Some(AucInterval {
+        auc,
+        standard_error: se,
+        // Clamped, because the normal interval runs past the ends of the
+        // scale near 1.0 and an upper bound of 1.03 is not a thing anybody
+        // should print beside a measurement.
+        low: (auc - z * se).clamp(0.0, 1.0),
+        high: (auc + z * se).clamp(0.0, 1.0),
+        z,
+    })
+}
+
+/// Unbiased sample variance, or `None` for fewer than two observations.
+fn sample_variance(v: &[f64]) -> Option<f64> {
+    if v.len() < 2 {
+        return None;
+    }
+    let n = v.len() as f64;
+    let mean = v.iter().sum::<f64>() / n;
+    Some(v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0))
+}
+
 /// Rank-based ROC AUC (equivalent to the Mann-Whitney U statistic), tie-aware
 /// via average ranks.
 ///
@@ -581,5 +727,152 @@ mod tests {
         // The ends of the range are budgets, not mistakes.
         assert_eq!(tpr_at_fpr(&scores, &labels, 0.0), Some(0.5));
         assert_eq!(tpr_at_fpr(&scores, &labels, 1.0), Some(1.0));
+    }
+}
+
+#[cfg(test)]
+mod delong_tests {
+    use super::*;
+
+    /// Hanley and McNeil's 1982 worked example, which is the one every
+    /// implementation is checked against.
+    ///
+    /// Ratings 1 to 5 for 58 normal and 51 abnormal cases. The published AUC
+    /// is 0.893 and the published standard error 0.029, computed by their own
+    /// parametric method; DeLong on the same data gives an SE close to but
+    /// not identical with it, which is the point of preferring DeLong. The
+    /// assertion is therefore that the AUC matches to three places and the SE
+    /// lands in the range every published DeLong implementation agrees on.
+    fn hanley_mcneil() -> (Vec<f64>, Vec<bool>) {
+        // (rating, n_normal, n_abnormal)
+        let table = [
+            (1.0, 33, 3),
+            (2.0, 6, 2),
+            (3.0, 6, 2),
+            (4.0, 11, 11),
+            (5.0, 2, 33),
+        ];
+        let mut scores = Vec::new();
+        let mut labels = Vec::new();
+        for (rating, n_norm, n_abn) in table {
+            for _ in 0..n_norm {
+                scores.push(rating);
+                labels.push(false);
+            }
+            for _ in 0..n_abn {
+                scores.push(rating);
+                labels.push(true);
+            }
+        }
+        (scores, labels)
+    }
+
+    #[test]
+    fn the_published_worked_example_comes_out_where_it_is_published() {
+        let (scores, labels) = hanley_mcneil();
+        let got = roc_auc_interval(&scores, &labels, Z_95).expect("both classes, enough of each");
+        assert!(
+            (got.auc - 0.893).abs() < 0.001,
+            "AUC {} is not the published 0.893",
+            got.auc
+        );
+        assert!(
+            (0.025..0.035).contains(&got.standard_error),
+            "standard error {} is outside what every DeLong implementation gives here",
+            got.standard_error
+        );
+        assert!(got.low < got.auc && got.auc < got.high);
+    }
+
+    #[test]
+    fn a_perfect_separation_has_a_zero_width_interval() {
+        // Every positive above every negative. There is no sampling noise in
+        // the ordering, so DeLong's variance is exactly zero, and the
+        // interval must not be reported as wider than the measurement.
+        let scores = vec![1.0, 2.0, 3.0, 10.0, 11.0, 12.0];
+        let labels = vec![false, false, false, true, true, true];
+        let got = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
+        assert_eq!(got.auc, 1.0);
+        assert_eq!(got.standard_error, 0.0);
+        assert_eq!((got.low, got.high), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_detector_answering_one_number_to_everything_has_no_spread_either() {
+        // AUC 0.5 by construction. Every comparison is a tie, so every
+        // structural component is 0.5 and the variance is zero: the tool is
+        // not uncertain about this AUC, it is certain the detector said
+        // nothing. The warning about that lives in `score`, not here.
+        let scores = vec![7.0; 8];
+        let labels = vec![true, false, true, false, true, false, true, false];
+        let got = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
+        assert_eq!(got.auc, 0.5);
+        assert_eq!(got.standard_error, 0.0);
+    }
+
+    #[test]
+    fn the_interval_is_clamped_to_the_scale_it_is_measured_on() {
+        // Near 1.0 the normal interval runs off the end, and an upper bound
+        // of 1.04 beside a measurement is nonsense a reader would quote.
+        let mut scores: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let mut labels = vec![false; 20];
+        scores.extend((0..20).map(|i| 100.0 + i as f64));
+        labels.extend(vec![true; 20]);
+        scores[0] = 200.0; // one negative above everything, so AUC is high but not 1
+        let got = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
+        assert!(got.high <= 1.0, "upper bound {} left the scale", got.high);
+        assert!(got.low >= 0.0, "lower bound {} left the scale", got.low);
+    }
+
+    #[test]
+    fn one_of_a_class_is_refused_because_a_variance_needs_two() {
+        let scores = vec![1.0, 2.0, 3.0];
+        let labels = vec![true, false, false];
+        assert_eq!(roc_auc_interval(&scores, &labels, Z_95), None);
+        // And the point estimate is still available, because that one IS
+        // defined with a single positive.
+        assert!(roc_auc(&scores, &labels).is_some());
+    }
+
+    #[test]
+    fn everything_roc_auc_refuses_this_refuses_too() {
+        assert_eq!(roc_auc_interval(&[1.0, 2.0], &[true], Z_95), None);
+        assert_eq!(
+            roc_auc_interval(
+                &[1.0, f64::NAN, 3.0, 4.0],
+                &[true, true, false, false],
+                Z_95
+            ),
+            None
+        );
+        assert_eq!(roc_auc_interval(&[1.0, 2.0], &[true, true], Z_95), None);
+    }
+
+    #[test]
+    fn a_nonsense_width_is_refused_rather_than_producing_a_nonsense_interval() {
+        let scores = vec![1.0, 2.0, 3.0, 4.0];
+        let labels = vec![false, false, true, true];
+        assert_eq!(roc_auc_interval(&scores, &labels, f64::NAN), None);
+        assert_eq!(roc_auc_interval(&scores, &labels, -1.0), None);
+    }
+
+    #[test]
+    fn a_wider_z_gives_a_wider_interval_around_the_same_point() {
+        let (scores, labels) = hanley_mcneil();
+        let narrow = roc_auc_interval(&scores, &labels, 1.0).expect("valid");
+        let wide = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
+        assert_eq!(narrow.auc, wide.auc);
+        assert_eq!(narrow.standard_error, wide.standard_error);
+        assert!(wide.high - wide.low > narrow.high - narrow.low);
+    }
+
+    #[test]
+    fn the_point_estimate_is_the_same_number_roc_auc_gives() {
+        // Two implementations of one metric is the thing this crate exists to
+        // avoid, so the interval must not quietly compute its own AUC.
+        let (scores, labels) = hanley_mcneil();
+        let plain = roc_auc(&scores, &labels).expect("valid");
+        let with_ci = roc_auc_interval(&scores, &labels, Z_95).expect("valid");
+        assert_eq!(plain, with_ci.auc);
     }
 }

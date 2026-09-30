@@ -188,6 +188,12 @@ impl MetricsError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub auc: f64,
+    /// DeLong's 95 per cent interval, where both classes have two or more.
+    ///
+    /// `None` rather than a fabricated range for a run too small to estimate
+    /// one: a variance over a single observation is not an estimate, and an
+    /// invented interval beside a real AUC is worse than no interval.
+    pub auc_ci95: Option<[f64; 2]>,
     /// Detection rate keyed by the budget TEXT the caller typed.
     ///
     /// Keyed by the text rather than by a reformatted number so a caller can
@@ -204,6 +210,7 @@ impl Report {
         serde_json::json!({
             "ok": true,
             "auc": self.auc,
+            "auc_ci95": self.auc_ci95,
             "tpr_at_fpr": self.tpr_at_fpr,
             "n_clean": self.n_clean,
             "n_stego": self.n_stego,
@@ -215,11 +222,17 @@ impl Report {
     /// whoever is writing the report and this is not that.
     pub fn human(&self) -> String {
         let mut text = format!(
-            "{} answer(s): {} clean, {} stego\nAUC            {}",
+            "{} answer(s): {} clean, {} stego\nAUC            {}{}",
             self.n_clean + self.n_stego,
             self.n_clean,
             self.n_stego,
-            self.auc
+            self.auc,
+            match self.auc_ci95 {
+                Some([lo, hi]) => format!("\n95% interval   {lo} to {hi}"),
+                None => "\n95% interval   not estimated: one class has fewer \
+                         than two members"
+                    .to_string(),
+            }
         );
         for (budget, tpr) in &self.tpr_at_fpr {
             text.push_str(&format!("\nTPR at {budget:<7} {tpr}"));
@@ -385,6 +398,8 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
     let n_stego = labels.iter().filter(|l| **l).count();
     let n_clean = labels.len() - n_stego;
 
+    let auc_ci95 = stegobench_metrics::roc_auc_interval(&scores, &labels, stegobench_metrics::Z_95)
+        .map(|ci| [ci.low, ci.high]);
     let auc = stegobench_metrics::roc_auc(&scores, &labels)
         .ok_or_else(|| why_unrankable(&scores, &labels, ""))?;
     let mut tpr_at_fpr = BTreeMap::new();
@@ -400,6 +415,7 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
     }
     Ok(Report {
         auc,
+        auc_ci95,
         tpr_at_fpr,
         n_clean,
         n_stego,

@@ -1891,8 +1891,17 @@ fn summarise(
                 tally,
                 written,
             } => lines.push(format!(
-                "{name:<16} AUC {:.4}  {} clean / {} stego / {} unanswered{}{}",
+                "{name:<16} AUC {:.4}{}  {} clean / {} stego / {} unanswered{}{}",
                 result.metrics.auc,
+                // Printed beside the figure rather than under the table,
+                // because the interval is what stops two AUCs differing in
+                // the third decimal from being read as two different
+                // detectors, and a caveat a line away is a caveat nobody
+                // carries when they copy the number out.
+                match result.metrics.auc_ci95 {
+                    Some([lo, hi]) => format!(" [{lo:.4}, {hi:.4}]"),
+                    None => String::new(),
+                },
                 result.metrics.n_clean,
                 result.metrics.n_stego,
                 result.metrics.n_error,

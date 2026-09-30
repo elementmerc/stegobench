@@ -664,6 +664,13 @@ where
         }
     };
 
+    // The uncertainty beside the number, where there is enough of each class
+    // to estimate one. `None` is honest for a run with a single clean or a
+    // single stego image: a variance over one observation is not an
+    // estimate, and a fabricated interval there would be worse than none.
+    let auc_ci95 = stegobench_metrics::roc_auc_interval(&scores, &labels, stegobench_metrics::Z_95)
+        .map(|ci| [ci.low, ci.high]);
+
     // A detector that gave ONE answer to everything scores exactly 0.5, and so
     // does a coin flip. The number is correctly computed in both cases and it
     // means completely different things: one detector could not tell these
@@ -754,7 +761,7 @@ where
         arm: checks.arm.clone(),
         metrics: Metrics {
             auc,
-            auc_ci95: None,
+            auc_ci95,
             tpr_at_fpr,
             verdict_rate: None,
             n_clean,
