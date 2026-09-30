@@ -34,7 +34,15 @@ stegobench-plugin = { path = "crates/stegobench-plugin", version = "0.1.0" }
 # reviewed like any other design decision (baseline Section 5). Anything that
 # three lines of our own code would replace does not get added.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` is load-bearing, not a tuning knob. Without it serde_json
+# parses with a fast algorithm that is not bit-exact: `0.9065609581885931`
+# comes back as a float that re-serialises to `...932`. The content digest is
+# computed over the PARSED document, so a result carrying such a value sealed
+# correctly, was written correctly, and then failed its own seal the moment
+# anything read it back. Only about one float in a few hundred is affected,
+# which is why it presented as "documents with interesting numbers are
+# corrupt and documents with round numbers are fine".
+serde_json = { version = "1", features = ["float_roundtrip"] }
 schemars = "0.8"
 thiserror = "2"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

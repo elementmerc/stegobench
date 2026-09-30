@@ -1002,6 +1002,62 @@ mod tests {
         assert_eq!(d.validate(), Ok(()));
     }
 
+    /// The seal has to survive the journey it is actually made for, which is
+    /// disk, not memory.
+    ///
+    /// Every other seal test sealed and validated the same in-memory value,
+    /// so all of them passed while every written document with an awkward
+    /// number in it failed the moment a reader opened it. The digest is
+    /// computed over the PARSED document, so the round trip through text is
+    /// the thing under test and leaving it out tested nothing.
+    ///
+    /// `0.9065609581885931` is not decoration. serde_json's default parser
+    /// is not bit-exact, and this is one of the values it returns a
+    /// neighbouring float for, so without `float_roundtrip` this document
+    /// seals correctly, writes correctly and then fails its own seal.
+    #[test]
+    fn a_sealed_document_survives_being_written_and_read_back() {
+        let mut d = sample();
+        d.metrics.auc = 0.9722222222222222;
+        d.metrics.auc_ci95 = Some([0.9065609581885931, 1.0]);
+        d.provenance.elapsed_seconds = 18.179600147000002;
+        d.seal();
+
+        let text = serde_json::to_string_pretty(&d).expect("serialises");
+        let read: Result1 = serde_json::from_str(&text).expect("parses");
+
+        assert_eq!(
+            read.content_digest, d.content_digest,
+            "the seal did not survive the write"
+        );
+        assert_eq!(
+            read.compute_content_digest(),
+            d.compute_content_digest(),
+            "the document re-read hashes differently from the one written"
+        );
+        assert_eq!(read.validate(), Ok(()));
+    }
+
+    /// Every float the document can carry has to mean the same number after
+    /// a round trip, because the seal is a digest over all of them.
+    #[test]
+    fn a_float_the_parser_rounds_would_break_every_seal_that_carries_it() {
+        for x in [
+            0.9065609581885931f64,
+            18.179600147000002,
+            0.8156077410606579,
+            0.9722222222222222,
+        ] {
+            let back: f64 = serde_json::from_str(&serde_json::to_string(&x).unwrap()).unwrap();
+            assert_eq!(
+                back.to_bits(),
+                x.to_bits(),
+                "{x} did not survive a JSON round trip, so any document \
+                 carrying it cannot be sealed"
+            );
+        }
+    }
+
     #[test]
     fn the_two_timing_fields_may_change_after_a_seal_without_breaking_it() {
         // They are the two fields the digest deliberately leaves out, so a
