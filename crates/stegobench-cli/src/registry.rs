@@ -203,13 +203,11 @@ pub enum Error {
     // A named registry is never quietly swapped for another one, which is why
     // this is a failure rather than a fall back to the built-in copy. The
     // reader needs the path and the two ways out, not the reasoning.
-    #[error(
-        "{source}\n\
-         {path} was named with --registry or STEGOBENCH_REGISTRY. Fix the \
-         path, or drop the flag to let stegobench find one."
-    )]
+    #[error("{source}{}", registry_footer(.path, *.explicit, .source))]
     Named {
         path: String,
+        /// Whether this directory was named on the command line or found.
+        explicit: bool,
         #[source]
         source: Box<stegobench_core::registry::RegistryError>,
     },
@@ -233,9 +231,32 @@ impl Error {
     }
 }
 
+/// The line under a registry refusal, which is not the same line every time.
+///
+/// "Fix the path" is advice for the one refusal the path itself caused. Under
+/// a malformed entry it is wrong twice over: the path was right, and dropping
+/// the flag loads a different registry in which the entry being repaired does
+/// not appear at all. Every other case gets the registry named and nothing
+/// else, the same way the commands that succeed name it.
+fn registry_footer(
+    path: &str,
+    explicit: bool,
+    source: &stegobench_core::registry::RegistryError,
+) -> String {
+    use stegobench_core::registry::RegistryError;
+    match source {
+        RegistryError::Read { .. } if explicit => format!(
+            "\n{path} was named with --registry or STEGOBENCH_REGISTRY. Fix \
+             the path, or drop the flag to let stegobench find one."
+        ),
+        _ => format!("\nregistry  {path}"),
+    }
+}
+
 fn load(dir: &Path) -> Result<Registry, Error> {
     Registry::load(dir).map_err(|source| Error::Named {
         path: dir.display().to_string(),
+        explicit: true,
         source: Box::new(source),
     })
 }
@@ -271,6 +292,7 @@ pub fn resolve_with(explicit: Option<&Path>, from_env: Option<&str>) -> Result<R
         if dir.is_dir() {
             let registry = Registry::load(dir).map_err(|source| Error::Named {
                 path: dir.display().to_string(),
+                explicit: false,
                 source: Box::new(source),
             })?;
             return Ok(Resolved {
@@ -856,5 +878,43 @@ mod tests {
             assert!(source.how().len() > 10, "{:?} has no explanation", source);
             assert!(!source.line().is_empty());
         }
+    }
+
+    /// "Fix the path" is advice for one refusal only.
+    ///
+    /// Every malformed entry used to end on it, and on an offer to drop the
+    /// flag, which would load a different registry in which the entry being
+    /// repaired does not appear at all. The path was right every time; the
+    /// line above it had already said what was wrong.
+    #[test]
+    fn only_a_path_refusal_tells_the_reader_to_fix_the_path() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("reg");
+        std::fs::create_dir_all(dir.join("detectors")).expect("dirs");
+        std::fs::write(
+            dir.join("detectors/broken.toml"),
+            "name = \"broken\"\nkind = \"detector\"\nlicence = \"MIT\"\nthis is not toml\n",
+        )
+        .expect("write");
+
+        let bad_entry = resolve_with(Some(&dir), None).expect_err("a malformed entry refuses");
+        let text = bad_entry.to_string();
+        assert!(
+            !text.contains("Fix the path") && !text.contains("drop the flag"),
+            "a malformed entry was blamed on the path:\n{text}"
+        );
+        assert!(
+            text.contains(&format!("registry  {}", dir.display())),
+            "the refusal does not name the registry it read:\n{text}"
+        );
+
+        // And the refusal the advice was written for still carries it.
+        let missing = tmp.path().join("nope");
+        let bad_path = resolve_with(Some(&missing), None).expect_err("a missing path refuses");
+        let text = bad_path.to_string();
+        assert!(
+            text.contains("Fix the path") && text.contains("drop the flag"),
+            "the path advice went missing from the refusal it answers:\n{text}"
+        );
     }
 }

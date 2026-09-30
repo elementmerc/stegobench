@@ -90,8 +90,14 @@ pub struct Entry {
     pub image: Option<Image>,
     #[serde(default)]
     pub binary: Option<Binary>,
-    #[serde(default)]
-    pub emits: Emits,
+    /// What the tool prints, and whether the entry actually said so.
+    ///
+    /// Absent is a distinct state from declared, because the assumption made
+    /// in its place (a score, read high for stego) is one of the two ways a
+    /// measurement comes out with the sign reversed, and `describe` used to
+    /// read that assumption back as though somebody had written it down.
+    #[serde(default, skip_serializing_if = "DeclaredEmits::is_absent")]
+    pub emits: DeclaredEmits,
     #[serde(default)]
     pub accepts: Accepts,
     #[serde(default)]
@@ -303,10 +309,51 @@ fn default_true() -> bool {
 
 impl Default for Emits {
     fn default() -> Self {
-        Emits {
-            output: Output::Score,
-            higher_means_stego: true,
-        }
+        ASSUMED_EMITS
+    }
+}
+
+/// What is assumed of a tool whose entry declares nothing.
+///
+/// Only reachable for an entry the host cannot drive: [`Entry::validate`]
+/// refuses a detector that declares an `[invoke]` block without an `[emits]`
+/// block, so nothing that a run can actually launch is scored against a guess.
+const ASSUMED_EMITS: Emits = Emits {
+    output: Output::Score,
+    higher_means_stego: true,
+};
+
+/// An `[emits]` block, and the fact of whether one was written.
+///
+/// Derefs to the block it holds, or to [`ASSUMED_EMITS`] when the entry had
+/// none, so every reader that only wants the values keeps working. A reader
+/// that has to tell an assumption from a declaration asks [`Self::declared`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeclaredEmits(Option<Emits>);
+
+impl DeclaredEmits {
+    /// Whether the entry wrote an `[emits]` block.
+    pub fn declared(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn is_absent(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl From<Emits> for DeclaredEmits {
+    fn from(emits: Emits) -> Self {
+        DeclaredEmits(Some(emits))
+    }
+}
+
+impl std::ops::Deref for DeclaredEmits {
+    type Target = Emits;
+
+    fn deref(&self) -> &Emits {
+        self.0.as_ref().unwrap_or(&ASSUMED_EMITS)
     }
 }
 
@@ -927,6 +974,21 @@ impl Entry {
             );
         }
 
+        // Required of a detector the host can drive, because that is exactly
+        // the entry whose answers get turned into a curve. Which way round the
+        // number reads cannot be inferred from the number, so an entry that
+        // does not say has the assumption made for it, and a tool that scores
+        // the other way round is then measured with the sign reversed.
+        if self.kind == Kind::Detector && self.invoke.is_some() && !self.emits.declared() {
+            bad.push(
+                "declares an [invoke] block but no [emits] block, so nothing \
+                 says whether this tool prints a score or a verdict, or which \
+                 way round a score reads. Add [emits] with output = \"score\" \
+                 or \"verdict\", and higher_means_stego = true or false"
+                    .into(),
+            );
+        }
+
         if let Some(inv) = &self.invoke {
             if inv.output_file.is_some() && !inv.writable_workdir {
                 bad.push(
@@ -1295,6 +1357,77 @@ must_clear = "b.png"
 
     const A_REAL_DIGEST: &str = "59710f7b5fbaeb7c3b1d4333e64654c1721a3ddb60b489d8e54d5d0e8b269bfb";
 
+    /// A detector the host can actually drive has to say what it prints.
+    ///
+    /// Without the rule the entry loads, the assumed block (a score, read high
+    /// for stego) is read back by `describe` as though somebody wrote it, and a
+    /// tool that scores the other way round is measured with the sign reversed.
+    #[test]
+    fn a_detector_the_host_can_drive_is_refused_without_an_emits_block() {
+        let without = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        assert!(!without.emits.declared());
+        let problems = without.validate().expect_err("no [emits] is refused");
+        assert!(
+            problems.iter().any(|p| p.contains("[emits]")),
+            "refused for the wrong reason: {problems:?}"
+        );
+
+        // The same entry that does say is refused for nothing here, so the arm
+        // above cannot be passing because every entry is refused.
+        let with = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        assert!(with.emits.declared());
+        assert_eq!(with.emits.output, Output::Verdict);
+        let remaining = with.validate().err().unwrap_or_default();
+        assert!(
+            !remaining.iter().any(|p| p.contains("[emits]")),
+            "an entry that declares [emits] was still asked for one: {remaining:?}"
+        );
+    }
+
+    /// An entry nothing here launches keeps its silence, and the silence stays
+    /// legible: the values fall back so every reader keeps working, and
+    /// `declared` still says nobody wrote them down.
+    #[test]
+    fn an_entry_with_no_invoke_block_may_stay_silent_about_what_it_emits() {
+        let e = parse("[image]\nreference = \"x@sha256:a\"");
+        assert!(!e.emits.declared());
+        assert_eq!(e.emits.output, Output::Score);
+        assert!(e.emits.higher_means_stego);
+        let problems = e.validate().err().unwrap_or_default();
+        assert!(
+            !problems.iter().any(|p| p.contains("[emits]")),
+            "an entry nothing can drive was asked for [emits]: {problems:?}"
+        );
+    }
+
+    /// An undeclared block is absent from the serialised entry rather than
+    /// published as a value somebody could quote back.
+    #[test]
+    fn an_undeclared_emits_block_is_not_written_out_as_though_it_were_declared() {
+        let e = parse("[image]\nreference = \"x@sha256:a\"");
+        let json = serde_json::to_value(&e).expect("an entry serialises");
+        assert!(
+            json.get("emits").is_none(),
+            "an assumption was published as a declaration: {json}"
+        );
+        let declared = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = false",
+        );
+        let json = serde_json::to_value(&declared).expect("an entry serialises");
+        assert_eq!(
+            json["emits"]["higher_means_stego"],
+            serde_json::json!(false)
+        );
+    }
+
     #[test]
     fn an_entry_that_says_nothing_about_determinism_says_nothing() {
         // The absence has to survive parsing as an absence. It used to be
@@ -1493,6 +1626,7 @@ version_args = ["-v"]"#,
         let e = parse(&format!(
             "[image]\nreference = \"ghcr.io/x/y@sha256:{A_REAL_DIGEST}\"\nsize_mb = 1250\n\
              bundled = false\n\
+             [emits]\noutput = \"score\"\n\
              [invoke]\nhost = true\nadapter = \"plugins/adapters/x.py\"\n\
              argv = [\"{{adapter}}\", \"{{file}}\"]\nparser = \"number\"\n\
              endpoint_env = \"X_ENDPOINT\""
@@ -1597,6 +1731,9 @@ licence = "MIT"
 [binary]
 command = ["x"]
 version_args = ["--version"]
+
+[emits]
+output = "score"
 
 [invoke]
 host = true

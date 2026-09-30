@@ -812,18 +812,25 @@ fn tool_facts(
             }
         }
     }
+    // An entry with no [emits] block gets the honest line rather than the
+    // assumed one. A detector the host can drive is refused at load without
+    // one, so this only reaches an entry nothing here launches.
     facts.push((
         "Answers",
-        match e.emits.output {
-            stegobench_core::registry::Output::Score => {
-                if e.emits.higher_means_stego {
-                    "a score, higher means more like stego".to_string()
-                } else {
-                    "a score, lower means more like stego".to_string()
+        if !e.emits.declared() {
+            "not declared: this entry has no [emits] block".to_string()
+        } else {
+            match e.emits.output {
+                stegobench_core::registry::Output::Score => {
+                    if e.emits.higher_means_stego {
+                        "a score, higher means more like stego".to_string()
+                    } else {
+                        "a score, lower means more like stego".to_string()
+                    }
                 }
-            }
-            stegobench_core::registry::Output::Verdict => {
-                "a verdict, yes or no, so it gives one point and not a curve".to_string()
+                stegobench_core::registry::Output::Verdict => {
+                    "a verdict, yes or no, so it gives one point and not a curve".to_string()
+                }
             }
         },
     ));
@@ -937,6 +944,85 @@ fn corpus_facts(c: &stegobench_core::corpus::CorpusEntry) -> Vec<(&'static str, 
 /// ones answered: a stale `./fixtures` beside a checkout and the copy compiled
 /// into the binary are different bytes, and a self-test result is about the
 /// ones it actually read.
+/// A sha256 digest written as lowercase hexadecimal.
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The longest a version string is allowed to be before it stops being one.
+const VERSION_MAX_CHARS: usize = 40;
+
+/// What a tool printed when asked for its version, or the fact that it did not.
+///
+/// The probe runs whatever `version_args` says and keeps the first line of the
+/// output, so a tool that does not understand those arguments answers with its
+/// own error. A Python tool answered `Traceback (most recent call last):` and
+/// that sat in the column every other row uses for a digest, under the word
+/// `present`, with nothing saying the probe had failed. A version is short, on
+/// one line, printable, and carries a digit; anything else is wreckage.
+fn version_column(version: &str) -> String {
+    let v = version.trim();
+    let plausible = !v.is_empty()
+        && v.chars().count() <= VERSION_MAX_CHARS
+        && !v.chars().any(char::is_control)
+        && v.chars().any(|c| c.is_ascii_digit());
+    if plausible {
+        v.to_string()
+    } else {
+        "version probe failed".to_string()
+    }
+}
+
+/// The pin a presence check carries, rendered as the facts it actually holds.
+///
+/// Two different things arrive here. A container's pin is the image id, which
+/// is a digest already. A binary's is the version the tool printed followed by
+/// the sha256 of the bytes on disk, and those are a claim and a measurement
+/// respectively. The `sha256:` prefix is what tells a reader which is which.
+fn pin_columns(pin: &str) -> String {
+    if let Some((version, hash)) = pin.rsplit_once(' ') {
+        if let Some(short) = short_sha256(hash) {
+            return format!("{}  {short}", version_column(version));
+        }
+    }
+    short_sha256(pin).unwrap_or_else(|| pin.chars().take(23).collect())
+}
+
+/// A `sha256:...` digest cut to a length a person can compare by eye.
+fn short_sha256(text: &str) -> Option<String> {
+    let hex = text.strip_prefix("sha256:")?;
+    is_sha256_hex(hex).then(|| format!("sha256:{}", &hex[..12]))
+}
+
+/// One `doctor` row, with the name padded to the widest in the table.
+///
+/// Rendered here rather than by `Availability::summary`, whose pad is a
+/// constant sixteen: a name of exactly sixteen characters ate the gap and ran
+/// into the word beside it, and no single row can know how wide the table is.
+fn doctor_row(check: &availability::Availability, width: usize) -> String {
+    let state = match &check.presence {
+        Presence::Present { pin } => format!("present   {}", pin_columns(pin)),
+        Presence::Absent { reason } => format!("MISSING   {reason}"),
+        Presence::Unknown { reason } => format!("unknown   {reason}"),
+        Presence::Unsupported { reason } => format!("n/a       {reason}"),
+    };
+    let verified = match check.verified {
+        Some(true) => "  verified",
+        Some(false) => "  SELF TEST FAILED",
+        None => "  not verified",
+    };
+    let secrets = if check.missing_secrets.is_empty() {
+        String::new()
+    } else {
+        format!("  needs {}", check.missing_secrets.join(", "))
+    };
+    format!(
+        "{:<width$} {state}{verified}{secrets}",
+        check.name,
+        width = width
+    )
+}
+
 fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict: bool) -> Output {
     let reg = &resolved.registry;
     let no_selftest = fixtures.is_none();
@@ -951,6 +1037,15 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     // one is a real state rather than a soft no. See the match below.
     let mut undetermined = 0;
     let mut present = 0;
+    // The whole table's widest name, plus one, so the column after it always
+    // has a gap. A constant pad closed up entirely on a name that reached it.
+    let width = reg
+        .entries
+        .values()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
 
     for entry in reg.entries.values() {
         let mut check = availability::check(entry, resolved.adapter_roots());
@@ -988,18 +1083,16 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
             Verified::Answered(_) => answered += 1,
             Verified::Skipped(_) => skipped += 1,
         }
+        let row = doctor_row(&check, width);
         let detail = match &verdict {
-            Verified::Failed(why) => format!("{}  ({why})", check.summary()),
+            Verified::Failed(why) => format!("{row}  ({why})"),
             Verified::Answered(why) => {
-                format!(
-                    "{}  ({why})",
-                    check.summary().replace("not verified", "responded ")
-                )
+                format!("{}  ({why})", row.replace("not verified", "responded "))
             }
             Verified::Skipped(why) if !no_selftest && check.presence.is_present() => {
-                format!("{}  ({why})", check.summary())
+                format!("{row}  ({why})")
             }
-            _ => check.summary(),
+            _ => row,
         };
         // Computed from the availability answer already paid for, so nothing
         // here asks the container runtime a second time.
@@ -2173,7 +2266,8 @@ fn per_arm_lines(arms: &[stegobench_core::result::ArmMetrics]) -> Vec<String> {
     out
 }
 
-fn unregistered_corpus_id(reg: &Registry, id: &str, next: &str) -> Output {
+fn unregistered_corpus_id(resolved: &Resolved, id: &str, next: &str) -> Output {
+    let reg = &resolved.registry;
     let mut human = format!("no corpus with id {id:?} is registered.");
     if Path::new(id).is_dir() {
         // The mirror image of `unresolved_corpus`, and the other half of the
@@ -2191,6 +2285,12 @@ fn unregistered_corpus_id(reg: &Registry, id: &str, next: &str) -> Output {
     }
     human.push('\n');
     human.push_str(next);
+    // Which registry was searched, because "not registered" is a statement
+    // about one directory and there is more than one it could have been. A
+    // reader whose STEGOBENCH_REGISTRY points somewhere with no corpora at all
+    // is looking at a true sentence and the wrong conclusion.
+    human.push('\n');
+    human.push_str(&resolved.source.line());
     // PREFLIGHT_REFUSED rather than USAGE, matching `--corpus` on a directory
     // that is not there. The two codes divide on whether the command line was
     // malformed or whether what it named is absent, and an id nobody has
@@ -2473,7 +2573,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
             Some(entry) => Some(entry),
             None => {
                 return unregistered_corpus_id(
-                    reg,
+                    resolved,
                     id,
                     "`stegobench list corpora` shows what is. Leaving \
                      --corpus-id out scores the directory anyway, and marks \
@@ -2606,8 +2706,29 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         &outcomes,
         &out_dir,
         many,
-        fetch::offer(&resolved.registry).as_ref(),
+        offer_for_run(&resolved.registry, corpus, corpus_id).as_ref(),
     )
+}
+
+/// The corpus offer, for the runs it is actually an offer to.
+///
+/// It is for somebody whose run was too small to quote and who has no real
+/// corpus yet. Somebody who just scored that corpus has one. And a directory
+/// that happens to carry its name made the line read as recognition of the
+/// bytes it was pointed at, which nothing here does: a path is not an id.
+fn offer_for_run(reg: &Registry, corpus: &Path, corpus_id: Option<&str>) -> Option<fetch::Offer> {
+    let named_it = |name: &str| name == fetch::OFFERED_CORPUS;
+    if corpus_id.is_some_and(named_it) {
+        return None;
+    }
+    if corpus
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(named_it)
+    {
+        return None;
+    }
+    fetch::offer(reg)
 }
 
 /// Why a detector would not be run here, in the words `score` reports it in.
@@ -2669,11 +2790,18 @@ fn nothing_available(
         .filter_map(|(e, b)| b.as_ref().map(|w| format!("{} {w}", e.name)))
         .collect::<Vec<_>>()
         .join("\n  ");
+    let subject = if entries.len() == 1 {
+        "the one detector you asked for is not available here".to_string()
+    } else {
+        format!(
+            "not one of the {} detectors you asked for is available here",
+            entries.len()
+        )
+    };
     format!(
-        "not one of the {} detector(s) asked for is available here.\n  \
+        "{subject}.\n  \
          {why}\n`stegobench doctor` checks every registered tool at once and \
-         says what each one needs.",
-        entries.len()
+         says what each one needs."
     )
 }
 
@@ -3278,7 +3406,7 @@ fn cmd_fetch(
 ) -> Output {
     let Some(entry) = resolved.registry.corpora.get(id) else {
         return unregistered_corpus_id(
-            &resolved.registry,
+            resolved,
             id,
             "`stegobench list corpora` shows what is registered.",
         );
@@ -4212,20 +4340,31 @@ mod tests {
     /// path case until 2026-09-30 for no reason anybody had chosen.
     #[test]
     fn an_unregistered_corpus_id_names_the_close_ones_and_spots_a_directory() {
-        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        let dir = shipped_registry();
+        let resolved = resolved_at(&dir);
 
-        let typo =
-            unregistered_corpus_id(&reg, "bossbas", "`stegobench list corpora` shows what is.");
+        let typo = unregistered_corpus_id(
+            &resolved,
+            "bossbas",
+            "`stegobench list corpora` shows what is.",
+        );
         assert_eq!(typo.code, exit::PREFLIGHT_REFUSED);
         assert!(
             typo.human.contains("Did you mean") && typo.human.contains("bossbase"),
             "{}",
             typo.human
         );
+        // The registry it searched, named the way every other command names
+        // it. "Not registered" is a claim about one directory.
+        assert!(
+            typo.human.lines().last() == Some(resolved.source.line().as_str()),
+            "the refusal does not end by naming the registry:\n{}",
+            typo.human
+        );
 
         let tmp = tempfile::tempdir().expect("tmp");
         let as_path = unregistered_corpus_id(
-            &reg,
+            &resolved,
             &tmp.path().display().to_string(),
             "`stegobench list corpora` shows what is.",
         );
@@ -7782,5 +7921,108 @@ mod tests {
             "{}",
             out.human
         );
+    }
+
+    /// A version probe answers with whatever the tool prints, and a tool that
+    /// does not understand `--version` prints something else entirely.
+    ///
+    /// A Python stand-in answered `Traceback (most recent call last):`, which
+    /// landed in the column every other row fills with a digest, under the word
+    /// `present`, with nothing saying the probe had failed.
+    #[test]
+    fn a_version_probe_that_printed_wreckage_is_reported_as_a_failed_probe() {
+        let hash = "a".repeat(64);
+        let digest = format!("sha256:{hash}");
+        let short = format!("sha256:{}", &hash[..12]);
+
+        let wreck = pin_columns(&format!("Traceback (most recent call last): {digest}"));
+        assert_eq!(wreck, format!("version probe failed  {short}"));
+
+        let good = pin_columns(&format!("stegcore 0.9.1 {digest}"));
+        assert_eq!(good, format!("stegcore 0.9.1  {short}"));
+
+        // A container's pin is a digest already, and keeps its marker.
+        assert_eq!(pin_columns(&digest), short);
+
+        // A probe that could not run at all is the same answer, not a version.
+        assert_eq!(
+            pin_columns(&format!("unknown version {digest}")),
+            format!("version probe failed  {short}")
+        );
+    }
+
+    /// A name exactly as wide as the pad ate the gap and ran into the word
+    /// beside it: `stegashield-edge present`, against `stegcore         MISSING`.
+    #[test]
+    fn a_doctor_row_keeps_its_gap_however_long_the_longest_name_is() {
+        let names = ["stegcore", "stegashield-edge"];
+        let width = names.iter().map(|n| n.len()).max().expect("names") + 1;
+        let rows: Vec<String> = names
+            .iter()
+            .map(|name| {
+                doctor_row(
+                    &availability::Availability {
+                        name: (*name).to_string(),
+                        presence: Presence::Absent {
+                            reason: "not on PATH".into(),
+                        },
+                        verified: None,
+                        missing_secrets: Vec::new(),
+                    },
+                    width,
+                )
+            })
+            .collect();
+        let columns: Vec<usize> = rows
+            .iter()
+            .map(|r| r.find("MISSING").expect("a state column"))
+            .collect();
+        assert_eq!(columns[0], columns[1], "ragged columns: {rows:?}");
+        for (name, row) in names.iter().zip(&rows) {
+            assert!(
+                row[name.len()..].starts_with("  "),
+                "no gap after the name: {row:?}"
+            );
+        }
+    }
+
+    /// One detector is one detector, not `the 1 detector(s) asked for`.
+    #[test]
+    fn the_nothing_available_refusal_reads_as_english_for_one_detector() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        let all: Vec<&stegobench_core::registry::Entry> = reg.entries.values().collect();
+
+        let one = nothing_available(&all[..1], &[Some("not pulled".to_string())]);
+        assert!(
+            one.starts_with("the one detector you asked for is not available here."),
+            "{one}"
+        );
+
+        let two = nothing_available(
+            &all[..2],
+            &[
+                Some("not pulled".to_string()),
+                Some("not pulled".to_string()),
+            ],
+        );
+        assert!(
+            two.starts_with("not one of the 2 detectors you asked for is available here."),
+            "{two}"
+        );
+    }
+
+    /// The offer is for somebody who has no real corpus, so it is dropped for
+    /// the run that just scored one, and for the directory whose name collides
+    /// with its id: a path is not an id and the line read as recognition.
+    #[test]
+    fn the_corpus_offer_is_dropped_for_a_run_it_does_not_apply_to() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        let elsewhere = Path::new("/tmp/my-samples");
+        assert!(
+            offer_for_run(&reg, elsewhere, None).is_some(),
+            "the offer never fires at all"
+        );
+        assert!(offer_for_run(&reg, elsewhere, Some(fetch::OFFERED_CORPUS)).is_none());
+        assert!(offer_for_run(&reg, Path::new("/tmp/pentimento-core"), None).is_none());
     }
 }
