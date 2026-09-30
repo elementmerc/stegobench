@@ -42,7 +42,7 @@ pub mod parsers;
 pub mod runner;
 pub mod selftest;
 
-pub use availability::{Availability, Presence};
+pub use availability::{registry_reach, Availability, Presence, Reach};
 pub use parsers::Reading;
 pub use selftest::Verified;
 

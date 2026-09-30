@@ -425,8 +425,17 @@ pub struct PluginRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum PinnedBy {
-    /// `image` is a container image digest. Anybody can pull those exact bytes,
-    /// so two people's runs are comparable by construction.
+    /// `image` is a container image digest, and the runtime started the
+    /// container by it, so the bytes that ran here are named exactly.
+    ///
+    /// WHAT THIS DOES NOT SAY IS THAT YOU CAN OBTAIN THEM. It said so for
+    /// months: "anybody can pull those exact bytes, so two people's runs are
+    /// comparable by construction". Every image this project pins was built
+    /// locally and pushed nowhere, so a reader following that sentence got
+    /// `denied: requested access to the resource is denied` and a measurement
+    /// they could not reproduce or disclose. Nothing here checks a registry,
+    /// and a run with no network could not. `stegobench doctor --registry-reach`
+    /// asks, and records the answer where it can be read.
     ImageDigest,
     /// `image` is the SHA-256 of an executable on the machine that ran it. Two
     /// people who both built the tool from source get different hashes for the

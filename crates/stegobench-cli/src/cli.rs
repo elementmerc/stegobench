@@ -361,6 +361,20 @@ pub enum Command {
         // Not clap's `env`, for the reason given on `--registry`.
         #[arg(long, value_name = "DIR")]
         fixtures: Option<std::path::PathBuf>,
+        /// Ask each registry whether the pinned images are actually there.
+        ///
+        /// A digest names bytes exactly and says nothing about where they
+        /// are. An image built on this machine and pushed nowhere pins the
+        /// run perfectly and reproduces for nobody, and a result document
+        /// looks identical either way. This is the check that tells the two
+        /// apart, and it is the one to run before quoting a number to
+        /// somebody who will want to repeat it.
+        ///
+        /// Needs a network, so it is off by default: scoring runs sandboxed
+        /// with none. A tool it cannot ask is reported as not asked rather
+        /// than as absent.
+        #[arg(long)]
+        registry_reach: bool,
         /// Report what is installed without running the self-tests. Faster,
         /// and cannot tell a working tool from a broken one.
         ///

@@ -1023,7 +1023,12 @@ fn doctor_row(check: &availability::Availability, width: usize) -> String {
     )
 }
 
-fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict: bool) -> Output {
+fn cmd_doctor(
+    resolved: &Resolved,
+    fixtures: Option<&fixtures::Fixtures>,
+    strict: bool,
+    registry_reach: bool,
+) -> Output {
     let reg = &resolved.registry;
     let no_selftest = fixtures.is_none();
 
@@ -1037,6 +1042,9 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     // one is a real state rather than a soft no. See the match below.
     let mut undetermined = 0;
     let mut present = 0;
+    // Only ever non-zero with --registry-reach, and counted apart because a
+    // registry that refused and a registry nobody asked are different states.
+    let (mut unfetchable, mut unasked) = (0, 0);
     // The whole table's widest name, plus one, so the column after it always
     // has a gap. A constant pad closed up entirely on a name that reached it.
     let width = reg
@@ -1093,6 +1101,37 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
                 format!("{row}  ({why})")
             }
             _ => row,
+        };
+        // Off by default because it crosses a network, and a registry with
+        // thirteen images to ask about is thirteen round trips. Only asked
+        // where there is an image to ask about: a locally installed binary
+        // has no registry and reporting "not asked" against it would be noise
+        // about a question that does not apply.
+        // Only where the image names the bytes that RAN. An entry with
+        // `invoke.host` names a third party's public image and scores against
+        // an instance somebody else started, so "fetchable" would be true and
+        // would still invite the wrong inference: that fetching it gets you
+        // what answered. `pinning` already calls that one unpinned.
+        let detail = match (registry_reach, &entry.image) {
+            (true, Some(image)) if needs::runs_in_container(entry) => {
+                let said = match stegobench_plugin::registry_reach(&image.reference) {
+                    stegobench_plugin::Reach::Fetchable => "fetchable".to_string(),
+                    // Loud, because this is the one a reader is about to rely
+                    // on without knowing. The whole check exists because the
+                    // document said the digest could be pulled and it could
+                    // not.
+                    stegobench_plugin::Reach::Absent { reason } => {
+                        unfetchable += 1;
+                        format!("NOT FETCHABLE: {reason}")
+                    }
+                    stegobench_plugin::Reach::NotRun { reason } => {
+                        unasked += 1;
+                        format!("not asked: {reason}")
+                    }
+                };
+                format!("{detail}\n    registry  {said}")
+            }
+            _ => detail,
         };
         // Computed from the availability answer already paid for, so nothing
         // here asks the container runtime a second time.
@@ -1301,6 +1340,25 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
              you. `--strict` counts it.",
         );
     }
+    // After the fitness verdict, because it is a different question. A tool
+    // can be installed, pass its self-test and produce a perfectly good
+    // number that nobody else can ever reproduce, and that is not a fault in
+    // this machine.
+    if registry_reach && (unfetchable > 0 || unasked > 0) {
+        if unfetchable > 0 {
+            out.human.push_str(&format!(
+                "\n\nNOT REPRODUCIBLE ELSEWHERE: {unfetchable} pinned image(s) \
+                 are not in their registry. A result naming one pins the bytes \
+                 that ran here and gives a reader no way to obtain them."
+            ));
+        }
+        if unasked > 0 {
+            out.human.push_str(&format!(
+                "\n\n{unasked} image(s) could not be asked about. That is not \
+                 the same as their being absent, and each line says why."
+            ));
+        }
+    }
     out
 }
 
@@ -1332,7 +1390,10 @@ fn cmd_validate(file: &Path) -> Output {
     let schema_field = sniff.get("schema").and_then(|v| v.as_str());
 
     macro_rules! validate_as {
-        ($ty:ty, $label:literal) => {{
+        ($ty:ty, $label:literal) => {
+            validate_as!($ty, $label, |_| None)
+        };
+        ($ty:ty, $label:literal, $seal:expr) => {{
             let parsed: $ty = match serde_json::from_str(&text) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1343,10 +1404,17 @@ fn cmd_validate(file: &Path) -> Output {
                 }
             };
             match parsed.validate() {
-                Ok(()) => Output::ok(
-                    serde_json::json!({ "ok": true, "schema": parsed.schema }),
-                    format!("{} is a valid {} document", file.display(), $label),
-                ),
+                Ok(()) => {
+                    let mut json = serde_json::json!({ "ok": true, "schema": parsed.schema });
+                    let mut human = format!("{} is a valid {} document", file.display(), $label);
+                    let seal: Option<(&'static str, serde_json::Value)> = ($seal)(&parsed);
+                    if let Some((line, detail)) = seal {
+                        json["seal"] = detail;
+                        human.push('\n');
+                        human.push_str(line);
+                    }
+                    Output::ok(json, human)
+                }
                 Err(problems) => {
                     let mut out = Output::err(
                         exit::SCHEMA_INVALID,
@@ -1363,8 +1431,34 @@ fn cmd_validate(file: &Path) -> Output {
         }};
     }
 
+    // A result's seal deliberately leaves the two timing fields out, so that
+    // two runs differing only in when they happened seal identically. The
+    // consequence is that an unqualified "valid" would be read as vouching for
+    // a date this command never checked, which is the reading a forensic
+    // examiner acts on. So the success line names the gap instead.
+    let seal_note = |r: &Result1| -> Option<(&'static str, serde_json::Value)> {
+        Some(if r.content_digest.is_some() {
+            (
+                "Its seal leaves out started_utc and elapsed_seconds, so a \
+                 changed timestamp wouldn't show up here.",
+                serde_json::json!({
+                    "sealed": true,
+                    "excluded": ["provenance.started_utc", "provenance.elapsed_seconds"],
+                }),
+            )
+        } else {
+            (
+                "It carries no content digest, so nothing here checked whether \
+                 it changed after it was written.",
+                serde_json::json!({ "sealed": false }),
+            )
+        })
+    };
+
     match schema_field {
-        Some(s) if s.starts_with("stegobench/result-v") => validate_as!(Result1, "result-v1"),
+        Some(s) if s.starts_with("stegobench/result-v") => {
+            validate_as!(Result1, "result-v1", seal_note)
+        }
         Some(s) if s.starts_with("stegobench/run-v") => validate_as!(RunV1, "run-v1"),
         Some(s) if s.starts_with("stegobench/manifest-v") => {
             validate_as!(ManifestV1, "manifest-v1")
@@ -3735,17 +3829,18 @@ fn run(cli: &Cli) -> Output {
             fixtures,
             no_selftest,
             strict,
+            registry_reach,
         } => with_registry(cli, |r| {
             if *no_selftest {
                 // Nothing will read the fixtures, so nothing looks for them.
                 // Unpacking the built-in copy here would be work done to
                 // satisfy a parameter rather than a question.
-                return cmd_doctor(r, None, *strict);
+                return cmd_doctor(r, None, *strict, *registry_reach);
             }
             match fixtures::resolve(fixtures.as_deref()) {
                 // Held for the whole call: for the built-in copy this owns the
                 // scratch directory the images were unpacked into.
-                Ok(found) => cmd_doctor(r, Some(&found), *strict),
+                Ok(found) => cmd_doctor(r, Some(&found), *strict, *registry_reach),
                 Err(e) => Output::err(exit::PREFLIGHT_REFUSED, e.to_string()),
             }
         }),
@@ -5501,7 +5596,7 @@ mod tests {
     /// every list that can be summed has to sum.
     #[test]
     fn every_count_doctor_prints_adds_up_to_the_total_beside_it() {
-        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false, false);
         let total = out.json["checked"].as_u64().expect("a total");
         assert!(total > 1, "a registry of one proves nothing here");
 
@@ -5539,7 +5634,7 @@ mod tests {
     #[test]
     fn doctor_and_the_listing_both_say_which_kind_each_tool_is() {
         let dir = shipped_registry();
-        let doctor = cmd_doctor(&resolved_at(&dir), None, false);
+        let doctor = cmd_doctor(&resolved_at(&dir), None, false, false);
         let listing = cmd_list(&resolved_at(&dir), "all");
         let detectors = doctor.json["detectors"].as_u64().expect("a count");
         let embedders = doctor.json["embedders"].as_u64().expect("a count");
@@ -5801,7 +5896,7 @@ mod tests {
             shipped_registry().display().to_string()
         );
 
-        let doctor = cmd_doctor(&resolved, None, false);
+        let doctor = cmd_doctor(&resolved, None, false, false);
         assert!(
             doctor.human.starts_with("registry  "),
             "doctor does not open by naming the registry: {}",
@@ -6001,6 +6096,58 @@ mod tests {
 
         let out = cmd_verify(&doc, &corpus, false);
         assert_eq!(out.code, exit::OK, "{}", out.human);
+    }
+
+    #[test]
+    fn a_changed_timestamp_is_not_silently_blessed() {
+        // A reviewer moved a sealed document's date back five years and
+        // `validate` answered an unqualified "is a valid result-v1 document".
+        // The exclusion is right: two runs differing only in when they ran
+        // must seal identically. The sentence was wrong, because for casework
+        // the date is read as inside the envelope unless the output says
+        // otherwise.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let mut sealed: Result1 =
+            serde_json::from_str(&std::fs::read_to_string(&doc).unwrap()).unwrap();
+        sealed.seal();
+        sealed.provenance.started_utc = "2021-01-01T00:00:00Z".into();
+        std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
+
+        let out = cmd_validate(&doc);
+        // Still valid, because the seal genuinely does not cover this field.
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(out.human.contains("started_utc"), "{}", out.human);
+        assert!(out.human.contains("elapsed_seconds"), "{}", out.human);
+        assert_eq!(out.json["seal"]["sealed"], serde_json::json!(true));
+        assert_eq!(
+            out.json["seal"]["excluded"],
+            serde_json::json!(["provenance.started_utc", "provenance.elapsed_seconds"])
+        );
+        // The continuation-stripped literal must not leave runs of spaces.
+        assert!(!out.human.contains("   "), "{}", out.human);
+    }
+
+    #[test]
+    fn an_unsealed_result_says_so_rather_than_claiming_a_timing_gap() {
+        // Without a digest nothing was checked for tampering at all, so the
+        // sealed document's caveat would understate it.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let out = cmd_validate(&doc);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(out.human.contains("no content digest"), "{}", out.human);
+        assert_eq!(out.json["seal"]["sealed"], serde_json::json!(false));
     }
 
     #[test]
@@ -7000,7 +7147,7 @@ mod tests {
     #[test]
     fn doctor_and_describe_both_say_what_a_tool_needs_and_agree() {
         let dir = shipped_registry();
-        let doctor = cmd_doctor(&resolved_at(&dir), None, false);
+        let doctor = cmd_doctor(&resolved_at(&dir), None, false, false);
         assert!(
             doctor.json["needing_action"].is_number(),
             "doctor does not report how many tools need something"
@@ -7684,7 +7831,7 @@ mod tests {
     /// whose report was worth keeping wrote an empty file.
     #[test]
     fn doctors_report_goes_to_stdout_under_either_verdict() {
-        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false, false);
         assert!(out.payload_on_stdout, "{}", out.human);
     }
 
@@ -7693,7 +7840,7 @@ mod tests {
     /// fitness was read off self-test results the flag had just skipped.
     #[test]
     fn skipping_the_self_tests_judges_what_is_installed() {
-        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false, false);
         assert_eq!(
             out.json["verified"].as_u64(),
             Some(0),
@@ -7725,7 +7872,7 @@ mod tests {
     #[test]
     fn the_verdict_line_carries_no_exit_code() {
         for strict in [false, true] {
-            let out = cmd_doctor(&resolved_at(shipped_registry()), None, strict);
+            let out = cmd_doctor(&resolved_at(shipped_registry()), None, strict, false);
             assert!(
                 out.human.contains("\nFIT:") || out.human.contains("\nUNFIT:"),
                 "no verdict at all:\n{}",
@@ -7742,7 +7889,7 @@ mod tests {
     /// "0 answering" was undefined anywhere a reader would meet it.
     #[test]
     fn the_self_test_summary_uses_a_word_the_help_defines() {
-        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false, false);
         let line = out
             .human
             .lines()
@@ -7771,7 +7918,7 @@ mod tests {
     /// answer to "which images were these".
     #[test]
     fn doctor_names_where_it_read_from_in_full() {
-        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false, false);
         let first = out.human.lines().next().expect("a registry line");
         let path = first
             .strip_prefix("registry  ")

@@ -80,9 +80,31 @@ far the number travels:
 
 | Value | What it means for reproducing it |
 |---|---|
-| `image-digest` | The digest names container bytes you can pull. Run the same command and you're running identical code |
+| `image-digest` | The digest names the container bytes that ran. Run the same command against the same image and you're running identical code, IF you can get the image: see below |
 | `executable-hash` | The digest names a file on their machine. If you both built from source you'll have different hashes for the same version, and neither of you is wrong |
 | `unpinned` | Nothing in the document ties the number to particular bytes. You'd be running whatever answers to that name today, which may not be what they ran |
+
+### `image-digest` pins the run, not your ability to repeat it
+
+A digest names bytes exactly. It doesn't mean those bytes are anywhere you can
+reach. An image built on somebody's laptop and pushed to no registry pins their
+run perfectly and reproduces for nobody, and the result document looks identical
+either way, because nothing in a scoring run contacts a registry and a run with
+no network couldn't.
+
+This guide used to say the digest "names container bytes you can pull", and
+every image this project ships was built locally and pushed nowhere. Anybody
+following that sentence got an access denied error.
+
+So if you need to reproduce somebody's number, or hand somebody else what they'd
+need to reproduce yours, check that the image is actually fetchable:
+
+```
+stegobench doctor --registry-reach
+```
+
+It asks each registry whether the pinned digest is there, and says so plainly
+when it can't ask, rather than passing a check it didn't perform.
 
 `provenance.plugins[].isolation` says what that code could reach while it ran:
 

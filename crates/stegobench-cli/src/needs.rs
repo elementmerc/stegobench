@@ -152,7 +152,14 @@ impl Needs {
 /// identifies the subject and an adapter on this machine is what runs. Telling
 /// a user to pull that image would be sending them to fetch something no run
 /// will ever execute.
-fn runs_in_container(entry: &Entry) -> bool {
+/// Does the IMAGE name the bytes that actually run?
+///
+/// An entry can name an image and still not run it: `invoke.host` means an
+/// adapter runs here against an instance somebody else started, and the image
+/// then names the subject rather than the executor. The distinction decides
+/// whether the digest pins the run, so `pinning` and the registry reach check
+/// both turn on it.
+pub fn runs_in_container(entry: &Entry) -> bool {
     entry.image.is_some() && !entry.invoke.as_ref().is_some_and(|i| i.host)
 }
 

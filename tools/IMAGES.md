@@ -37,8 +37,35 @@ under us. It does not make a rebuild byte-identical, because:
   same input and the same payload.
 
 So the Dockerfile is the recipe and the image is the artefact. For a corpus to
-be checkable, the artefact is what has to be reachable, which is why the images
-are published rather than only described.
+be checkable, the artefact is what has to be reachable.
+
+**None of these images is published yet, and that is the gap.** This file said
+they were. So did the result schema, `stegobench help results` and the reading
+guide, all of which told a reader that a pinned digest meant they could pull
+those bytes. Every image in the table above was built on one machine and pushed
+nowhere, so anybody who followed that got:
+
+```
+$ docker manifest inspect stegobench/stegexpose@sha256:70c545a890a0...
+unauthorized: authentication required
+```
+
+A result document naming one of these digests pins the bytes that ran and gives
+its reader no way to obtain them, which is the difference between a measurement
+somebody can check and one they have to take on trust. It was found by a
+reviewer reading the reproduction instructions as a disclosure package, which is
+what they are.
+
+The check is now in the tool, because a claim nobody can test is how this got
+four releases in:
+
+```
+stegobench doctor --registry-reach
+```
+
+It asks each registry for the manifest, costs a few kilobytes rather than the
+gigabytes a pull would, and distinguishes a registry that answered no from one
+it could not ask.
 
 ## Where the definitions used to live
 

@@ -158,6 +158,75 @@ fn image_present(reference: &str) -> Presence {
     }
 }
 
+/// Longer than the local one, because this one crosses a network and a
+/// registry behind a slow link is a different thing from one that is down.
+const REGISTRY_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Whether a pinned image is actually obtainable, and how we know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// The registry served a manifest for this exact digest.
+    Fetchable,
+    /// The registry answered and does not have it. The reason is the runtime's
+    /// own words, because "no such repository" and "you are not authorised"
+    /// are different problems for whoever has to fix them.
+    Absent { reason: String },
+    /// Nobody asked, or the asking failed for a reason that isn't an answer:
+    /// no runtime, no network, a timeout. Distinguished from `Absent` because
+    /// a check that could not run must never read as a check that passed.
+    NotRun { reason: String },
+}
+
+/// Can a third party obtain the bytes this run was pinned to?
+///
+/// A digest names bytes exactly and says nothing about where they are. Every
+/// image this project pins was built locally and pushed nowhere, while the
+/// result document, the help topic and the guide all told readers the digest
+/// meant they could pull it. Anybody who tried got an access denied error, and
+/// the run they were trying to reproduce was the one being quoted at them.
+///
+/// Scoring never asks this: it needs a network, and a sandboxed run has none
+/// by design. So it's a separate question, asked when somebody needs the
+/// answer, which is when they're about to disclose or publish a number.
+///
+/// `docker manifest inspect` fetches the manifest and nothing else, so this
+/// costs a few kilobytes rather than the gigabytes a pull would.
+pub fn registry_reach(reference: &str) -> Reach {
+    if which("docker").is_none() {
+        return Reach::NotRun {
+            reason: "no container runtime: docker is not on PATH".to_string(),
+        };
+    }
+    let mut cmd = Command::new("docker");
+    cmd.args(["manifest", "inspect", reference]);
+    match crate::exec::captured(cmd, "docker manifest inspect", REGISTRY_TIMEOUT) {
+        Ok(o) if o.status.success() => Reach::Fetchable,
+        Ok(o) => Reach::Absent {
+            reason: refusal_reason(&String::from_utf8_lossy(&o.stderr)),
+        },
+        Err(e) => Reach::NotRun {
+            reason: format!("could not ask the registry: {e}"),
+        },
+    }
+}
+
+/// The useful line out of a registry refusal.
+///
+/// The runtime prints a login hint above the actual answer, and the answer is
+/// the last line: "denied: requested access to the resource is denied" or
+/// "unauthorized: authentication required". Those distinguish a repository
+/// that isn't there from one you can't see, which are different problems for
+/// whoever has to fix them, so the line is kept rather than replaced with a
+/// sentence of ours.
+fn refusal_reason(stderr: &str) -> String {
+    stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| "the registry refused and gave no reason".to_string())
+}
+
 /// Is a binary on PATH, and what exactly is it?
 ///
 /// The pin is the hash of the bytes that would run, not the version string.
@@ -378,6 +447,55 @@ fn present_here(entry: &Entry, adapter_roots: &[PathBuf]) -> Presence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real refusal a reader hit when they followed the guide's promise
+    /// that a pinned digest meant they could pull it. The login hint above it
+    /// is noise; the last line is the answer.
+    #[test]
+    fn a_registry_refusal_keeps_the_line_that_says_why() {
+        let said = "Get \"https://registry-1.docker.io/v2/\": unauthorized\n\
+                    unauthorized: authentication required\n";
+        assert_eq!(
+            refusal_reason(said),
+            "unauthorized: authentication required"
+        );
+    }
+
+    #[test]
+    fn a_missing_repository_reads_differently_from_a_forbidden_one() {
+        // Different problems for whoever has to fix them: one is "publish the
+        // image", the other is "log in". Collapsing both into a sentence of
+        // ours would lose that.
+        assert_eq!(
+            refusal_reason("denied: requested access to the resource is denied\n"),
+            "denied: requested access to the resource is denied"
+        );
+    }
+
+    #[test]
+    fn a_runtime_that_refused_silently_still_gives_a_reason() {
+        // An empty stderr would otherwise produce an empty explanation, which
+        // reads as though nothing was wrong.
+        assert!(!refusal_reason("").is_empty());
+        assert!(!refusal_reason("   \n\n  \n").is_empty());
+    }
+
+    /// The distinction the whole check exists for. `NotRun` means nobody
+    /// asked; `Absent` means the registry answered no. A check that could not
+    /// run must never be readable as a check that passed, which is the defect
+    /// that put an unreproducible measurement into a disclosure package.
+    #[test]
+    fn a_check_that_could_not_run_is_not_a_check_that_passed() {
+        let could_not = Reach::NotRun {
+            reason: "no container runtime: docker is not on PATH".into(),
+        };
+        let answered_no = Reach::Absent {
+            reason: "denied: requested access to the resource is denied".into(),
+        };
+        assert_ne!(could_not, answered_no);
+        assert_ne!(could_not, Reach::Fetchable);
+        assert_ne!(answered_no, Reach::Fetchable);
+    }
 
     /// These tests are about PRESENCE, not about where an adapter lives, so
     /// they ask with no roots. That falls back to the directory the test runs

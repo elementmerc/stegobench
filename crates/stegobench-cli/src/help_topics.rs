@@ -363,7 +363,9 @@ and a detector scored on what it trained on is not being measured.
 5. WOULD YOU GET THE SAME NUMBER?
 
 `provenance.plugins[].pinned_by` decides how far it travels. `image-digest` \
-names bytes you can pull, so running the same command runs identical code. \
+names the container bytes that ran, which is not the same as bytes you can \
+get: an image built locally and pushed nowhere pins the run and reproduces \
+for nobody. `stegobench doctor --registry-reach` is what asks. \
 `executable-hash` names a file on their machine, and two people who both \
 built from source get different hashes for the same version. `unpinned` says \
 nothing in the document ties the number to particular bytes.
