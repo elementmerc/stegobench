@@ -462,9 +462,166 @@ pub fn tpr_at_fpr(scores: &[f64], labels: &[bool], max_fpr: f64) -> Option<f64> 
     Some(if best.is_finite() { best } else { 0.0 })
 }
 
+/// The point on the curve that [`tpr_at_fpr`] actually reported.
+///
+/// WHY THIS EXISTS, AND IT IS NOT A CONVENIENCE
+///
+/// A false-alarm budget finer than one clean image cannot be spent. With six
+/// clean images the only false-alarm rates that exist are 0, 1/6, 2/6 and so
+/// on, so a budget of 0.01 buys exactly what a budget of 0 buys, and
+/// `tpr_at_fpr` correctly returns the zero-budget answer. What it cannot do
+/// is say so, and the caller then prints that number under the heading
+/// "TPR@1%FA", which claims a resolution the measurement never had.
+///
+/// An engineer picking a review threshold reads that column and nothing else.
+/// So this returns the rate that was actually achieved beside the one that
+/// was asked for, and the two differing is the signal that the corpus is too
+/// small for the question.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OperatingPoint {
+    /// The detection rate at this point.
+    pub tpr: f64,
+    /// The false-alarm rate this point actually sits at, which is a multiple
+    /// of `1 / n_clean` and is never above `requested`.
+    pub achieved_fpr: f64,
+    /// The budget the caller asked for.
+    pub requested_fpr: f64,
+}
+
+impl OperatingPoint {
+    /// Whether the corpus could express the budget that was asked for.
+    ///
+    /// False means the answer is real but the label is not: the figure is the
+    /// detection rate at `achieved_fpr`, not at `requested_fpr`.
+    pub fn budget_was_expressible(&self, n_clean: usize) -> bool {
+        n_clean > 0 && fpr_resolution(n_clean) <= self.requested_fpr + 1e-12
+    }
+}
+
+/// The smallest false-alarm rate a corpus of this many clean images can show.
+///
+/// One clean image wrongly flagged out of `n_clean`. Anything finer is a
+/// budget the sample cannot spend.
+pub fn fpr_resolution(n_clean: usize) -> f64 {
+    if n_clean == 0 {
+        return f64::INFINITY;
+    }
+    1.0 / n_clean as f64
+}
+
+/// [`tpr_at_fpr`], plus the rate the answer actually came from.
+pub fn operating_point(scores: &[f64], labels: &[bool], max_fpr: f64) -> Option<OperatingPoint> {
+    if !(0.0..=1.0).contains(&max_fpr) {
+        return None;
+    }
+    let curve = roc_curve(scores, labels);
+    if curve.is_empty() {
+        return None;
+    }
+    // The same point `tpr_at_fpr` picks: highest detection rate inside the
+    // budget. Ties on tpr take the lowest fpr, because two points with the
+    // same detection rate are the same answer bought more or less cheaply,
+    // and reporting the dearer one would overstate what the budget cost.
+    let mut best: Option<(f64, f64)> = None;
+    for &(fpr, tpr) in curve.iter().filter(|&&(f, _)| f <= max_fpr + 1e-12) {
+        best = Some(match best {
+            None => (fpr, tpr),
+            Some((bf, bt)) if tpr > bt || (tpr == bt && fpr < bf) => (fpr, tpr),
+            Some(b) => b,
+        });
+    }
+    let (achieved_fpr, tpr) = best.unwrap_or((0.0, 0.0));
+    Some(OperatingPoint {
+        tpr,
+        achieved_fpr,
+        requested_fpr: max_fpr,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_budget_finer_than_one_clean_image_is_reported_as_not_expressible() {
+        // The finding this exists for. Six clean images, a 1% budget, and the
+        // honest answer is the zero-budget answer: 1/6 is 16.7%, so 1% buys
+        // nothing that 0% did not already buy. The figure is correct and the
+        // label "TPR@1%FA" is not.
+        let scores = [
+            0.9, 0.8, 0.7, 0.6, 0.1, 0.2, 0.3, 0.4, 0.5, 0.05, 0.06, 0.07,
+        ];
+        let labels = [
+            true, true, true, true, true, true, false, false, false, false, false, false,
+        ];
+        let p = operating_point(&scores, &labels, 0.01).expect("a point");
+        assert_eq!(p.requested_fpr, 0.01);
+        assert_eq!(
+            p.achieved_fpr, 0.0,
+            "1% cannot be spent on six clean images"
+        );
+        assert!(!p.budget_was_expressible(6));
+        // And the same corpus CAN express a budget of one image in six.
+        let coarse = operating_point(&scores, &labels, 1.0 / 6.0).expect("a point");
+        assert!(coarse.budget_was_expressible(6));
+    }
+
+    #[test]
+    fn a_budget_the_corpus_can_spend_is_reported_as_expressible() {
+        // Two hundred clean images make 1% a real budget: two of them.
+        assert!(fpr_resolution(200) <= 0.01);
+        let mut scores = Vec::new();
+        let mut labels = Vec::new();
+        for i in 0..200 {
+            scores.push(i as f64 / 200.0);
+            labels.push(false);
+        }
+        for i in 0..200 {
+            scores.push(1.0 + i as f64);
+            labels.push(true);
+        }
+        let p = operating_point(&scores, &labels, 0.01).expect("a point");
+        assert!(p.budget_was_expressible(200));
+        assert_eq!(p.tpr, 1.0);
+    }
+
+    #[test]
+    fn the_operating_point_agrees_with_the_figure_tpr_at_fpr_reports() {
+        // Two ways of asking one question must not drift apart.
+        let scores = [0.9, 0.4, 0.5, 0.1];
+        let labels = [true, true, false, false];
+        for budget in [0.0, 0.25, 0.5, 1.0] {
+            let a = tpr_at_fpr(&scores, &labels, budget);
+            let b = operating_point(&scores, &labels, budget).map(|p| p.tpr);
+            assert_eq!(a, b, "at a budget of {budget}");
+        }
+    }
+
+    #[test]
+    fn the_achieved_rate_never_exceeds_the_budget_that_was_asked_for() {
+        let scores = [0.9, 0.4, 0.5, 0.1];
+        let labels = [true, true, false, false];
+        for budget in [0.0, 0.1, 0.25, 0.4, 0.5, 0.75, 1.0] {
+            let p = operating_point(&scores, &labels, budget).expect("a point");
+            assert!(
+                p.achieved_fpr <= budget + 1e-12,
+                "spent {} of a {budget} budget",
+                p.achieved_fpr
+            );
+        }
+    }
+
+    #[test]
+    fn the_resolution_of_a_corpus_with_no_clean_images_is_not_a_number_to_divide_by() {
+        assert!(fpr_resolution(0).is_infinite());
+        // Which means no budget is ever expressible, rather than all of them.
+        let p = OperatingPoint {
+            tpr: 1.0,
+            achieved_fpr: 0.0,
+            requested_fpr: 0.5,
+        };
+        assert!(!p.budget_was_expressible(0));
+    }
 
     #[test]
     fn tpr_at_fpr_perfect_separation_is_one_at_zero_budget() {

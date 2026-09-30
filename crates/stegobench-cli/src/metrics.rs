@@ -201,6 +201,15 @@ pub struct Report {
     /// `--at 0.10` answers under "0.10" and `--at 0.1` under "0.1". Both are
     /// the same budget and both are honoured; neither is silently renamed.
     pub tpr_at_fpr: BTreeMap<String, f64>,
+    /// The false-alarm rate each figure above actually came from.
+    ///
+    /// Keyed identically to `tpr_at_fpr`. A value below its key means the
+    /// budget could not be spent: with six clean images the only rates that
+    /// exist are multiples of 1/6, so a request for 0.01 is answered at 0.0
+    /// and calling the result "TPR at 1% FA" claims a resolution this sample
+    /// never had. The figure is right; the label would be wrong without this
+    /// beside it.
+    pub achieved_fpr: BTreeMap<String, f64>,
     pub n_clean: usize,
     pub n_stego: usize,
 }
@@ -212,6 +221,8 @@ impl Report {
             "auc": self.auc,
             "auc_ci95": self.auc_ci95,
             "tpr_at_fpr": self.tpr_at_fpr,
+            "achieved_fpr": self.achieved_fpr,
+            "fpr_resolution": stegobench_metrics::fpr_resolution(self.n_clean),
             "n_clean": self.n_clean,
             "n_stego": self.n_stego,
             "n": self.n_clean + self.n_stego,
@@ -236,6 +247,19 @@ impl Report {
         );
         for (budget, tpr) in &self.tpr_at_fpr {
             text.push_str(&format!("\nTPR at {budget:<7} {tpr}"));
+            // Only where the two differ, so an adequate sample reads exactly
+            // as it did before and the note means something when it appears.
+            if let Some(got) = self.achieved_fpr.get(budget) {
+                if let Ok(asked) = budget.parse::<f64>() {
+                    if *got + 1e-12 < asked {
+                        text.push_str(&format!(
+                            "  (actually at a false-alarm rate of {got}: {} clean \
+                             image(s) cannot express {budget})",
+                            self.n_clean
+                        ));
+                    }
+                }
+            }
         }
         text
     }
@@ -403,6 +427,7 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
     let auc = stegobench_metrics::roc_auc(&scores, &labels)
         .ok_or_else(|| why_unrankable(&scores, &labels, ""))?;
     let mut tpr_at_fpr = BTreeMap::new();
+    let mut achieved_fpr = BTreeMap::new();
     for (text, value) in budgets {
         let tpr = stegobench_metrics::tpr_at_fpr(&scores, &labels, *value).ok_or_else(|| {
             why_unrankable(
@@ -412,11 +437,15 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
             )
         })?;
         tpr_at_fpr.insert(text.clone(), tpr);
+        if let Some(point) = stegobench_metrics::operating_point(&scores, &labels, *value) {
+            achieved_fpr.insert(text.clone(), point.achieved_fpr);
+        }
     }
     Ok(Report {
         auc,
         auc_ci95,
         tpr_at_fpr,
+        achieved_fpr,
         n_clean,
         n_stego,
     })
