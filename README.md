@@ -534,6 +534,48 @@ Read `docs/design/pentimento.md` for what it is; the sentence to say first
 about it is that it's a JPEG-decompressed spatial corpus and is not
 comparable to BOSSbase.
 
+## Citing this work
+
+There are two things here and they're cited differently, so pick by what your
+sentence is claiming.
+
+**If you're citing a number, cite the corpus.** A measurement belongs to the
+images it was taken on. The harness is the instrument, and naming the
+instrument doesn't tell a reader which bytes produced the figure. Pentimento
+lives in [its own repository](https://github.com/elementmerc/pentimento) for
+exactly this reason.
+
+```bibtex
+@misc{pentimento,
+  author       = {Daniel Iwugo},
+  title        = {Pentimento: a matched-pair steganalysis corpus},
+  howpublished = {\url{https://github.com/elementmerc/pentimento}},
+  note         = {JPEG-decompressed spatial covers. Not comparable to BOSSbase.
+                  State the tier and the arm alongside any figure}
+}
+```
+
+Say which tier (Nano, Lite or Core) and which arm the number came from. A
+figure without them isn't reproducible, and the tiers are strict prefixes of
+one another, so the tier is part of what was measured.
+
+**If you're citing the tool itself**, because you used it, extended it or are
+comparing methodologies, cite Stegobench. `CITATION.cff` at the repository root
+carries the machine-readable version, and GitHub renders a "Cite this
+repository" button from it.
+
+```bibtex
+@misc{stegobench,
+  author       = {Daniel Iwugo},
+  title        = {Stegobench: a reproducible benchmark for steganalysis},
+  howpublished = {\url{https://github.com/elementmerc/stegobench}}
+}
+```
+
+Neither entry carries a version, a date or a DOI, and that's deliberate:
+nothing has been tagged and no archive has minted an identifier yet, so every
+one of those fields would be a guess. They go in when they're true.
+
 ## Running the test suites
 
 ```sh
