@@ -4,11 +4,16 @@ Forty-six programs that fetch covers, build arms, check licences, pack a
 release and verify it before it leaves the machine.
 
 This file used to describe three of them and claim to describe all of them,
-which is how a directory grows to forty-five without anybody noticing. The
-table below is hand-written, so `test_readme.py` fails when a module is added
-without a row: the claim that it goes stale loudly is only true if something
-checks, and the first version of this file made that claim while two modules
-were already missing from it.
+which is how a directory grows to forty-odd programs without anybody noticing.
+The table below is hand-written, so `test_readme.py` fails when a module is
+added without a row: the claim that it goes stale loudly is only true if
+something checks, and the first version of this file made that claim while two
+modules were already missing from it.
+
+Not all forty-six are commands. Seven are libraries the others import, and the
+forty-sixth is `cli.py` itself, which is the way in rather than a step, so
+`pentimento` offers thirty-eight subcommands. The `CLI` and `lib` column below
+says which is which.
 
 ## The pairing rule, which is the whole method
 
@@ -133,7 +138,7 @@ because a measurement was once wrong in exactly the way it detects.
 
 | Module | | What it does |
 |---|---|---|
-| `cli.py` | CLI | `pentimento`, one entry point to all of these, found by import not by a list |
+| `cli.py` | CLI | `pentimento`, one entry point to all of these, found by import not by a list. Also `--version`, the default in every subcommand's help, and the lock warning before a build |
 
 ## Two pieces of the corpus pipeline that are deliberately NOT here
 
@@ -228,6 +233,6 @@ the corpus" was true rather than merely claimed:
 
     python3 -m unittest discover -s generators -p 'test_*.py'
 
-Twenty test modules, 551 tests. They run without containers, without network
-and without the corpus: anything needing a real embedder skips with a reason
-rather than passing vacuously.
+Twenty-five test modules, 648 tests. They run without containers, without
+network and without the corpus: anything needing a real embedder skips with a
+reason rather than passing vacuously.

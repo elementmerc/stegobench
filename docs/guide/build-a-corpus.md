@@ -6,40 +6,67 @@ one.
 ## The shape of a run
 
 ```
-    fetch_commons.py         covers + manifest.jsonl, one row per photograph
-            │                with its licence, credit line and digest
+    fetch-commons          covers + manifest.jsonl, one row per photograph
+            │              with its licence, credit line and digest
             ▼
-    build_jpeg_arms.py       the end-user tool arms, and the clean JPEG pool
-            │                the DCT arms are built from
+    manifest-repair        the tier order, assigned once over the finished
+            │              cover set. Nothing below this line runs without it
             ▼
-    build_adaptive_arms.py   the academic scheme arms, spatial and DCT
+    build-jpeg-arms        the end-user tool arms, and the clean JPEG pool
+            │              the DCT arms are built from
+            ▼
+    build-adaptive-arms    the academic scheme arms, spatial and DCT
             │
             ▼
-    pack_arms.py             WebDataset shards, each sample joined to its
-            │                cover's licence
+    pack-arms              WebDataset shards, each sample joined to its
+            │              cover's licence
             ▼
-    release_metadata.py      README, CITATION.cff, Croissant, datasheet, splits
+    release-metadata       README, CITATION.cff, Croissant, datasheet, splits
 ```
 
-`build_core_tier.py` runs the builders as bounded, resumable jobs. Use it for
-anything larger than a few hundred covers: the full tier is roughly six days of
-single-core CPU, and each worker is one busy core and about half a gigabyte.
+**`manifest-repair` is a step, not a repair.** A tier is a prefix of one
+ordering over the whole corpus, and no single fetch can know that ordering, so
+`fetch-commons` deliberately does not write `tier_order`. Skip this step and
+every builder below it refuses, which is the right answer and an easy one to
+read as a broken install.
+
+`build-core-tier` runs the builders as bounded, resumable jobs. Use it for
+anything larger than a few hundred covers: the Core tier is about 160 CPU-hours
+of embedding, which is roughly 16 hours at the default 10 workers or 54 hours
+at 3. Each worker is one busy core and about half a gigabyte, so memory decides
+the number rather than core count. Run `pentimento build-core-tier --dry-run`
+for your own tier and worker count, and budget the cover fetch separately: it's
+the larger of the two.
 
 ## Building a small one
 
+Four commands, in this order, with the same `--count` everywhere it appears. A
+tier size that disagrees between two of them is the most common way this goes
+wrong: `pack-arms` defaults to 10,000, which is right for the published corpus
+and refuses anything smaller that forgets to say so.
+
 ```sh
-python3 generators/fetch_commons.py --out covers/ --count 200 \
+pentimento fetch-commons --out covers/ --count 200 \
     --dedup-db dedup.sqlite3 --licences permissive
 
-python3 generators/build_adaptive_arms.py --covers covers/ --out arms/adaptive \
+pentimento manifest-repair covers/manifest.jsonl
+
+pentimento build-adaptive-arms --covers covers/ --out arms/adaptive \
     --count 200 --schemes wow --rates 0.4
 
-python3 generators/pack_arms.py --arms arms/ \
-    --covers-manifest covers/manifest.jsonl --out packed/
+pentimento pack-arms --arms arms/ \
+    --covers-manifest covers/manifest.jsonl --out packed/ --count 200
 ```
 
-`tools/ci/tier_smoke.py` runs exactly this against synthetic covers and asserts
-every packed sample carries a cover licence and names its cover.
+The fetch is the slow one: Commons is rate limited to one request per second
+and roughly four and a half candidates are drawn per cover kept, so 200 covers
+is about twenty minutes. It prints a count and a rate every thirty seconds, and
+re-running the same command resumes rather than starting again.
+
+`tools/ci/tier_smoke.py` runs the build and the pack against synthetic covers,
+writing their manifest with the tier order already in it rather than fetching
+and repairing, and asserts every packed sample carries a cover licence and
+names its cover.
 
 ## Tiers are prefixes
 

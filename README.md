@@ -24,7 +24,7 @@ the tool that produced the number. Stegobench is an attempt at fixing both.
 | | What it does | Language | Install |
 |---|---|---|---|
 | **`stegobench`** | the harness: runs detectors over a labelled corpus and scores them | Rust | `cargo install --path crates/stegobench-cli` |
-| **`pentimento`** | the generators: build, audit, pack and verify a labelled corpus in the first place | Python | `pip install -e .` |
+| **`pentimento`** | the generators: build, audit, pack and verify a labelled corpus in the first place | Python | `pip install -r requirements.lock && pip install -e . --no-deps` |
 
 They're deliberately not given one name. Two different programs sharing one
 name on one PATH is a worse problem than the one a single entry point would
@@ -359,22 +359,55 @@ starts.
 separate question. A corpus you may use is not always one you may publish,
 and republication is refused outright on terms nobody has read.
 
-## Building a corpus (the Python half)
+## Installing the Python half
+
+One recipe. Use this one:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install -e . --no-deps
+```
 
+`requirements.lock` is every package that was installed on the machine that
+built the published corpus, including `numba` and `llvmlite`. Those two
+compile the `conseal` code that decides which pixels carry the payload, so a
+different version of either can change the bytes a build produces. `--no-deps`
+stops pip resolving round the lock it was just given.
+
+Two shorter recipes exist and both float that compiler stack:
+
+| Recipe | What you get |
+|---|---|
+| `pip install -e .` | the `pentimento` command, with `numba` and `llvmlite` resolved to whatever is newest today |
+| `pip install -r requirements.txt` | the seven packages this project chose, and no `pentimento` command |
+
+Neither is wrong; neither reproduces a published number either. A build
+command run outside the locked set says so on stderr before it starts.
+
+The lock records one machine, Python 3.14 on Linux x86_64. Elsewhere, install
+`requirements.txt` and read that warning as a real caveat rather than noise:
+your build will be internally consistent and will not be byte-identical to the
+published one.
+
+## Building a corpus (the Python half)
+
+```sh
 # 1. covers, with provenance and licence recorded per file
-python3 generators/fetch_commons.py --out covers/ --count 1000 \
+.venv/bin/pentimento fetch-commons --out covers/ --count 1000 \
     --dedup-db dedup.sqlite3 --licences permissive
 
-# 2. an embedding arm
-python3 generators/build_adaptive_arms.py --covers covers/ --out arms/ \
+# 2. assign the tier order. A tier is a prefix of one ordering over the
+#    whole corpus, which no single fetch can know, so it is assigned once
+#    the cover set is complete. Nothing downstream runs without it.
+.venv/bin/pentimento manifest-repair covers/manifest.jsonl
+
+# 3. an embedding arm
+.venv/bin/pentimento build-adaptive-arms --covers covers/ --out arms/adaptive \
     --count 1000 --schemes suniward --rates 0.4
 
-# 3. score it against a detector you're testing
-python3 generators/score_arms.py --corpus arms/ \
+# 4. score it against a detector you're testing
+.venv/bin/pentimento score-arms --corpus arms/adaptive \
     --endpoint http://HOST:PORT/your-detector-api
 ```
 
@@ -395,8 +428,10 @@ absent.
 **Measured and working:** the corpus generators (deduplication, licence
 tracking, embedding, packing), and the scoring loop against an HTTP endpoint.
 The first corpus tier is complete: 35 stego arms and 4 clean ones, 344,357
-pairs, built in a single 22 hour run with every arm resumable and every file
-checksummed.
+pairs, built in a single 22 hour run from covers already on disk, with every
+arm resumable and every file checksummed. To size a build of your own, run
+`pentimento build-core-tier --dry-run`: fetching the covers is a separate
+budget and the larger one.
 
 **Built and tested, Rust side:** the tool registry and its validation
 (a mutable image tag is refused, not merely discouraged), the three

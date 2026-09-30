@@ -220,23 +220,46 @@ on the processor and spend their time allocating, so the worker count is set by
 free memory rather than by core count. Three workers peak around 1.6 GB
 together; pick a number that leaves the machine room to breathe rather than one
 that fills it, because a worker pushed into swap is slower than not having
-started it.
+started it. `--jobs` defaults to 10, which wants about 5.5 GB free at the MiPOD
+peak. That is the number the published build used, not a recommendation for
+every machine.
 
-At three workers the whole v1 corpus is about **40 hours of work**, which fits a
-four-day window with deliberate slack. The long pole is cover acquisition and
-deduplication, not embedding: Commons at one polite request per second is the
-floor, and dedup has to run inline rather than as a later pass.
+The embedding work itself is **160.8 CPU-hours** for the whole v1 corpus.
+What that costs in wall clock depends entirely on the worker count, so the
+three figures this project quotes are all the same measurement divided
+differently:
+
+| Figure | What it is |
+|---|---|
+| 160.8 CPU-hours | the work itself, independent of any machine. About 6.7 days on one core |
+| about 53.6 hours | wall clock at 3 workers, which peak around 1.6 GB together |
+| about 16.1 hours | wall clock at 10 workers, which is what `--jobs` defaults to |
+
+`pentimento build-core-tier --dry-run` prints the CPU-hours and the wall clock
+for the tier and the worker count you actually asked for, so budget from that
+rather than from this table.
+
+The published v1 arms were built in a single 22 hour run against covers that
+had already been fetched. That sits beside the 16.1 hour row rather than the
+53.6 hour one, the difference being the overhead an estimate leaves out.
+
+Fetching is a separate budget and the larger one. Commons at one polite request
+per second is the floor, roughly four and a half candidates are drawn per cover
+kept, and dedup runs inline rather than as a later pass, so 10,000 covers is
+over a day on its own. Plan the two phases separately; that is why they are two
+commands.
 
 ## Publication
 
-The dataset goes to HuggingFace, Kaggle and Zenodo from **one release process**,
-not three upload scripts, with the per-file licence manifest feeding each
-platform's licence field so they cannot drift apart. That drift is exactly what
-produced Dresden-as-CC0 and UCID-as-MIT, and it is the single most likely way
-this corpus becomes the thing it was built to correct.
+The dataset goes to the Internet Archive, HuggingFace and Kaggle from **one
+release process**, not three upload scripts, with the per-file licence manifest
+feeding each platform's licence field so they cannot drift apart. That drift is
+exactly what produced Dresden-as-CC0 and UCID-as-MIT, and it is the single most
+likely way this corpus becomes the thing it was built to correct.
 
-Zenodo matters beyond reach: it issues a DOI and supports tombstoned withdrawal,
-which is the only honest failure mode if anything ever has to come down.
+Every one of those three can actually be withdrawn, which is the property that
+decided the list. There is no torrent for the same reason: a torrent cannot be
+recalled once it is seeded.
 
 ## Calibrating Stegcore against REVEAL first
 

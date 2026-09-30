@@ -25,9 +25,15 @@ names because they're two different programs:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install -e . --no-deps
 .venv/bin/pentimento --help
 ```
+
+The lock rather than `requirements.txt` because `conseal` compiles its cost
+maps with `numba`, so the code deciding which pixels carry a payload is
+JIT-compiled machine code and a different compiler can change which pixel is
+chosen. A build command run outside the locked set warns before it starts.
 
 ## Branches
 
@@ -162,6 +168,10 @@ python3 -m venv .venv
 
 Python tests that need something from `requirements-optional.txt` skip rather
 than fail when it isn't installed.
+
+`requirements.txt` here and not `requirements.lock`, deliberately: the tests
+run on Linux, macOS and Windows and the lock records one Linux machine. The
+lock is for reproducing a corpus, not for running a suite.
 
 Before you push, the same checks CI runs:
 

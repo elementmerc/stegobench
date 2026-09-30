@@ -190,17 +190,34 @@ Python 3.12 or newer, which is what `pyproject.toml` requires; CI runs 3.14.
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install -e . --no-deps
 ```
+
+That's the one recipe. `requirements.lock` is every package that was installed
+on the machine that built the published corpus, `numba` and `llvmlite`
+included. Those two compile the code that decides which pixels carry the
+payload, so a different version of either can change the bytes a build
+produces. `--no-deps` stops pip resolving round the lock it was just given.
+
+`pip install -e .` on its own also works and gives you the same command, but it
+floats that compiler stack. A build run outside the locked set warns on stderr
+before it starts.
+
+The lock records one machine, Python 3.14 on Linux x86_64. On macOS or Windows,
+install `requirements.txt` instead: your build will be internally consistent
+and will not be byte-identical to the published corpus.
 
 | | |
 |---|---|
-| `requirements.txt` | Everything the core needs, pinned to the versions that produced the published numbers |
+| `requirements.lock` | Every package the published build actually had. Install this one |
+| `requirements.txt` | The seven packages this project chose, without the compiler stack underneath them |
 | `requirements-optional.txt` | matplotlib for charts, `lir` for the likelihood-ratio cross check, `mlcroissant` for validating the dataset record, `webdataset` for reading a packed shard, the Hansken SDK for the extraction plugin, and a note on where to get Aletheia, the reference detector, which isn't on PyPI under that name. Tests that need any of them skip rather than fail |
 
 ### Check it works
 
 ```sh
+.venv/bin/pentimento --version             # record this beside any corpus you build
 .venv/bin/python -m unittest discover -s generators -p "test_*.py"
 cargo test --workspace                     # the Rust side, if you want it too
 ```
@@ -209,15 +226,19 @@ cargo test --workspace                     # the Rust side, if you want it too
 
 ```sh
 # 1. covers, with provenance and a licence per file
-python3 generators/fetch_commons.py --out covers/ --count 1000 \
+.venv/bin/pentimento fetch-commons --out covers/ --count 1000 \
     --dedup-db dedup.sqlite3 --licences permissive
 
-# 2. one arm
-python3 generators/build_adaptive_arms.py --covers covers/ --out arms/ \
+# 2. assign the tier order over the finished cover set. Nothing below
+#    this line runs without it
+.venv/bin/pentimento manifest-repair covers/manifest.jsonl
+
+# 3. one arm
+.venv/bin/pentimento build-adaptive-arms --covers covers/ --out arms/adaptive \
     --count 1000 --schemes suniward --rates 0.4
 
-# 3. score, against whichever detector you are testing
-python3 generators/score_arms.py --corpus arms/ \
+# 4. score, against whichever detector you are testing
+.venv/bin/pentimento score-arms --corpus arms/adaptive \
     --endpoint http://HOST:PORT/your-detector-api
 ```
 
