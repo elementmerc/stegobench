@@ -538,6 +538,132 @@ pub fn operating_point(scores: &[f64], labels: &[bool], max_fpr: f64) -> Option<
     })
 }
 
+/// Something about a set of scores that makes the number beside it misleading.
+///
+/// A finding carries the facts and no wording. This crate has no dependencies
+/// and no opinion about presentation: two callers print in two registers, and a
+/// sentence baked in here would be the one that is wrong in both. The caller
+/// writes the sentence; the enum is what stops the two callers disagreeing
+/// about when to write one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Finding {
+    /// Every score was the same number, so the AUC is 0.5 by construction.
+    ///
+    /// A detector that answers one thing to everything and a coin flip produce
+    /// the identical figure, and they mean completely different things: one
+    /// could not tell the images apart, the other ranked them no better than
+    /// chance.
+    EveryScoreIdentical {
+        /// How many answers were the same.
+        count: usize,
+    },
+    /// The AUC is below 0.5, which is a sign-flipped adapter far more often
+    /// than it is a detector that sees nothing.
+    ///
+    /// A ranking that is wrong this consistently carries as much signal as one
+    /// that is right; it is being read upside down. The commonest way to wire
+    /// a new detector into this benchmark incorrectly.
+    ScoresRunBackwards {
+        /// The AUC as measured.
+        auc: f64,
+        /// What the same ranking would score read the other way round, which
+        /// is the figure that says how much signal is actually there.
+        inverted: f64,
+    },
+}
+
+/// Every [`Finding`] that applies to these scores and labels.
+///
+/// Empty for a healthy detector, and empty for anything [`roc_auc`] refuses:
+/// a set that cannot be ranked has no AUC to describe, and the caller is
+/// already refusing it for a named reason it would only muddy.
+pub fn findings(scores: &[f64], labels: &[bool]) -> Vec<Finding> {
+    let Some(auc) = roc_auc(scores, labels) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if scores.len() > 1 && scores.windows(2).all(|w| w[0] == w[1]) {
+        out.push(Finding::EveryScoreIdentical {
+            count: scores.len(),
+        });
+    }
+    if auc < 0.5 {
+        out.push(Finding::ScoresRunBackwards {
+            auc,
+            inverted: 1.0 - auc,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod finding_tests {
+    use super::*;
+
+    #[test]
+    fn a_detector_that_separates_the_images_is_not_flagged() {
+        // The half that stops the check being made to pass by always firing.
+        assert!(findings(&[0.1, 0.2, 0.8, 0.9], &[false, false, true, true]).is_empty());
+        // And a genuine chance-level ranking, which is 0.5 by measurement
+        // rather than by construction, is a result and not a finding.
+        assert_eq!(
+            roc_auc(&[0.1, 0.2, 0.8, 0.9], &[true, false, false, true]),
+            Some(0.5)
+        );
+        assert!(findings(&[0.1, 0.2, 0.8, 0.9], &[true, false, false, true]).is_empty());
+    }
+
+    #[test]
+    fn one_answer_to_everything_is_flagged_with_its_count() {
+        let got = findings(
+            &[7.0; 8],
+            &[true, false, true, false, true, false, true, false],
+        );
+        assert_eq!(got, vec![Finding::EveryScoreIdentical { count: 8 }]);
+    }
+
+    #[test]
+    fn an_inverted_ranking_is_flagged_with_both_figures() {
+        let got = findings(&[0.9, 0.8, 0.2, 0.1], &[false, false, true, true]);
+        assert_eq!(
+            got,
+            vec![Finding::ScoresRunBackwards {
+                auc: 0.0,
+                inverted: 1.0
+            }]
+        );
+        // And a ranking only slightly the wrong way round is flagged too: the
+        // sign error is the same one whether or not it is total.
+        let got = findings(&[0.3, 0.4, 0.35, 0.2], &[false, false, true, true]);
+        assert_eq!(
+            got,
+            vec![Finding::ScoresRunBackwards {
+                auc: 0.25,
+                inverted: 0.75
+            }]
+        );
+    }
+
+    #[test]
+    fn a_single_score_is_not_an_identical_set() {
+        // One answer cannot be inconsistent with itself, and calling it
+        // degenerate would fire on every one-image run.
+        assert!(findings(&[0.5, 0.5], &[true, false])
+            .contains(&Finding::EveryScoreIdentical { count: 2 }));
+        assert!(findings(&[0.5], &[true]).is_empty());
+    }
+
+    #[test]
+    fn a_set_that_cannot_be_ranked_produces_nothing() {
+        // Each of these is refused by name somewhere above; a finding here
+        // would describe an AUC that was never computed.
+        assert!(findings(&[0.5, 0.5], &[true, true]).is_empty());
+        assert!(findings(&[0.5, 0.5, 0.5], &[true, false]).is_empty());
+        assert!(findings(&[f64::NAN, f64::NAN], &[true, false]).is_empty());
+        assert!(findings(&[], &[]).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

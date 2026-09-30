@@ -212,12 +212,49 @@ pub struct Report {
     pub achieved_fpr: BTreeMap<String, f64>,
     pub n_clean: usize,
     pub n_stego: usize,
+    /// What the metrics crate found wrong with these scores, if anything.
+    ///
+    /// Held rather than printed, so the caller decides where it goes: a
+    /// diagnostic belongs on stderr beside human output and inside the
+    /// document in `--json`, and a function that printed it would get one of
+    /// those two wrong.
+    pub findings: Vec<stegobench_metrics::Finding>,
 }
 
 impl Report {
+    /// The findings as sentences, in the register `score` uses for the same
+    /// two conditions.
+    ///
+    /// `metrics` is the documented way to bring your own detector, so it is
+    /// the path most likely to be carrying a sign-flipped adapter, and it used
+    /// to print `AUC 0` with nothing beside it. The wording lives here rather
+    /// than in the metrics crate because that crate has no dependencies and no
+    /// opinion about presentation.
+    pub fn warnings(&self) -> Vec<String> {
+        self.findings
+            .iter()
+            .map(|f| match *f {
+                stegobench_metrics::Finding::EveryScoreIdentical { count } => format!(
+                    "every one of the {count} answers was identical, so this AUC is \
+                     0.5 by construction and not by measurement: nothing separated \
+                     these images"
+                ),
+                stegobench_metrics::Finding::ScoresRunBackwards { auc, inverted } => format!(
+                    "this scored {auc:.4}, which is below the 0.5 a coin flip gets. \
+                     That usually means the scores run the wrong way round rather \
+                     than that the detector cannot see anything: at {inverted:.4} \
+                     they separate these images about as well inverted as they \
+                     would upright. Check the adapter's sign before reading this as \
+                     a measurement"
+                ),
+            })
+            .collect()
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "ok": true,
+            "warnings": self.warnings(),
             "auc": self.auc,
             "auc_ci95": self.auc_ci95,
             "tpr_at_fpr": self.tpr_at_fpr,
@@ -282,7 +319,15 @@ pub fn run(file: Option<&Path>, at: &[String]) -> Result<Report, MetricsError> {
         path: label,
         source,
     })?;
-    compute(input, &budgets)
+    let report = compute(input, &budgets)?;
+    // Said here rather than by the caller because the caller renders either
+    // the human text or the JSON and never both, and a warning that only
+    // appears in one of the two modes is one somebody integrating a detector
+    // will not see. The numbers stay on stdout; this is a diagnostic.
+    for warning in report.warnings() {
+        eprintln!("{warning}");
+    }
+    Ok(report)
 }
 
 /// The budgets to report at, as `(text the caller typed, value)`.
@@ -454,6 +499,7 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
         achieved_fpr,
         n_clean,
         n_stego,
+        findings: stegobench_metrics::findings(&scores, &labels),
     })
 }
 
@@ -729,6 +775,60 @@ mod tests {
         .map(|e| e.reason())
         .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(reasons.len(), 10);
+    }
+
+    /// The path a stranger's detector arrives on used to print `AUC 0` with
+    /// nothing beside it, while `score` said at length that an AUC that low
+    /// means an adapter wired up backwards.
+    #[test]
+    fn an_inverted_detector_is_warned_about_the_way_score_warns_about_it() {
+        let report = compute(
+            input(&[0.1, 0.2, 0.8, 0.9], &[true, true, false, false]),
+            &[],
+        )
+        .expect("ranked");
+        assert_eq!(report.auc, 0.0);
+        let said = report.warnings();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("wrong way round"), "{said:?}");
+        assert!(said[0].contains("0.0000"), "{said:?}");
+        assert!(said[0].contains("1.0000"), "{said:?}");
+        // And the JSON carries it, because a caller reading `--json` reads
+        // nothing else.
+        assert_eq!(
+            report.to_json()["warnings"],
+            serde_json::json!(said),
+            "the warning is missing from the machine-readable output"
+        );
+    }
+
+    #[test]
+    fn one_answer_to_everything_is_warned_about_rather_than_read_as_chance() {
+        let report = compute(
+            input(&[0.5, 0.5, 0.5, 0.5], &[true, true, false, false]),
+            &[],
+        )
+        .expect("ranked");
+        assert_eq!(report.auc, 0.5);
+        let said = report.warnings();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("identical"), "{said:?}");
+        assert!(said[0].contains("by construction"), "{said:?}");
+        assert!(said[0].contains('4'), "{said:?}");
+    }
+
+    /// A warning that fires every time is one a reader stops seeing.
+    #[test]
+    fn a_detector_that_separates_the_images_is_not_warned_about() {
+        let report = compute(
+            input(&[0.9, 0.8, 0.2, 0.1], &[true, true, false, false]),
+            &budgets(&["0.5"]),
+        )
+        .expect("ranked");
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        assert_eq!(report.to_json()["warnings"], serde_json::json!([]));
+        // The numbers are the payload and stay clear of the diagnostics.
+        assert!(!report.human().contains("way round"), "{}", report.human());
     }
 
     /// `metrics` printed `AUC 1` and `95% interval 0.5 to 0.5` where `score`
