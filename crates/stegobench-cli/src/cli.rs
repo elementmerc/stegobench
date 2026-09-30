@@ -441,11 +441,15 @@ pub enum Command {
         /// joins the corpus and the next run measures a different set.
         #[arg(long, value_name = "FILE")]
         records: Option<std::path::PathBuf>,
-        /// Where to write the result-v1 document. Defaults to stdout.
+        /// Where to write the result-v1 document.
         ///
-        /// With more than one detector this is a DIRECTORY, created if it is
-        /// not there, and each document is written to <dir>/<detector>.json.
-        /// With no --out they go to <corpus>.results/ beside the corpus.
+        /// With no --out it goes to <corpus>.results/<detector>.json beside
+        /// the corpus, whether you named one detector or several. The run
+        /// says where it put it.
+        ///
+        /// A path that is already a directory is treated as one, and each
+        /// document is written to <dir>/<detector>.json. Naming several
+        /// detectors and a single file is refused before anything runs.
         ///
         /// Refused when it lands inside the corpus: a file written there
         /// joins the corpus and the next run measures a different set.

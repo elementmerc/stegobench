@@ -2700,10 +2700,22 @@ fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<P
     if let Some(dir) = out.filter(|p| p.is_dir()) {
         return Ok(Some(dir.to_path_buf()));
     }
-    if !many {
-        return Ok(None);
-    }
+    // NAMING NO DESTINATION USED TO MEAN THROWING THE DOCUMENT AWAY
+    //
+    // This returned `Ok(None)` for a single detector whatever `--out` said,
+    // and the caller reads `None` as "write to the file the caller named".
+    // With no file named there was nothing to write to, so the run printed
+    // its AUC, wrote its records, exited 0 and discarded the versioned
+    // document the whole tool exists to produce. A ten hour run over Core
+    // lost the only artefact anybody could check, silently.
+    //
+    // So the default destination is decided by whether a path was given, not
+    // by how many detectors were asked for. One detector and no `--out` now
+    // lands in the same directory several detectors would.
     let dir = match out {
+        // A path was named and it is not an existing directory, so it is the
+        // file this one detector writes to. Still `None`; the caller owns it.
+        Some(_) if !many => return Ok(None),
         Some(p) => p.to_path_buf(),
         // Beside the corpus and named after it, so two corpora scored on one
         // machine cannot write over each other's documents.
@@ -3912,6 +3924,36 @@ fn main() {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// Naming no destination is not the same as asking for the document to
+    /// be thrown away.
+    ///
+    /// One detector and no `--out` used to resolve to "nowhere", and the
+    /// caller reads that as "write to the file the caller named", so with no
+    /// file named the document was silently discarded under exit 0.
+    #[test]
+    fn a_run_that_names_no_destination_still_keeps_its_document() {
+        let tmp = tempfile::tempdir().expect("a temporary directory");
+        let corpus = tmp.path().join("starter");
+        let expected = tmp.path().join("starter.results");
+
+        for many in [false, true] {
+            assert_eq!(
+                resolve_out(&corpus, None, many).expect("a destination"),
+                Some(expected.clone()),
+                "a run of {} detector(s) with no --out lost its document",
+                if many { "several" } else { "one" }
+            );
+        }
+
+        // And naming a file for one detector still means that file, which is
+        // the case the old early return existed to serve.
+        let file = tmp.path().join("one.json");
+        assert_eq!(
+            resolve_out(&corpus, Some(&file), false).expect("a file"),
+            None
+        );
+    }
 
     #[test]
     fn a_half_corpus_run_keeps_its_own_records_file() {
