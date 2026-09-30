@@ -212,7 +212,12 @@ def emit(corpus_dir: pathlib.Path, out_dir: pathlib.Path, corpus_name: str,
                     # whose digest anybody declared in advance. The number is
                     # comparable with itself rather than with somebody else's.
                     "configuration": "custom",
-                    "self_reported": False,
+                    # True because we ran it. The harness writes the same,
+                    # and the two halves of this project disagreeing about a
+                    # published field is the failure this project keeps
+                    # finding in other people's corpora. The submission path
+                    # is what clears it.
+                    "self_reported": True,
                 },
             }
             name = f"{corpus_name}-{embedder}-{parts[1] if len(parts) > 1 else '0000'}-{subject}.json"

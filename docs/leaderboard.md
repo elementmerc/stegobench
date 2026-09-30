@@ -89,9 +89,12 @@ image we can pull and run under the same sandboxing (`--network=none`,
   schema level: a tag can move under the submitter without them noticing, and
   a result naming one cannot be reproduced by anyone, including the person
   who submitted it.
-- **A detector declaring `trained_on` the same corpus and split it was scored
-  against**, without an explicit contamination flag. A detector scored on
-  what it trained on is not being measured.
+- **A detector declaring `trained_on` the same corpus it was scored against.**
+  A detector scored on what it trained on is not being measured. The harness
+  sets `declarations.contaminated` when it sees this, from what the run
+  actually did rather than from what the submitter says, so a contaminated
+  result arrives already carrying the fact. Send it anyway if the number is
+  interesting: it will be listed as contaminated rather than ranked.
 - **A claim to the Reproducible division that we could not actually re-run.**
   Demoted to Reported with a stated reason, not silently dropped, so the
   submitter knows what to fix rather than wondering why their entry

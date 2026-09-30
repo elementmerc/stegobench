@@ -867,7 +867,14 @@ mod tests {
                 // Deliberately overlapping: one stego image scores below
                 // two clean ones, so the classes do not separate and the
                 // estimator has something to measure.
-                scores: vec![Some(0.9), Some(0.5), Some(0.4), Some(0.2), Some(0.8), Some(0.7)],
+                scores: vec![
+                    Some(0.9),
+                    Some(0.5),
+                    Some(0.4),
+                    Some(0.2),
+                    Some(0.8),
+                    Some(0.7),
+                ],
                 labels: vec![true, false, true, false, true, false],
             },
             &[],

@@ -745,14 +745,15 @@ where
     // the document can say whether the thing it measured was working. Doing
     // it here rather than trusting a `doctor` from an hour ago is the point:
     // the claim is about this run.
-    let selftest = fixtures.map(|dir| {
-        match stegobench_plugin::selftest::run(entry, dir, adapter_roots) {
-            stegobench_plugin::selftest::Verified::Passed => SelfTest::Passed,
-            stegobench_plugin::selftest::Verified::Failed(_) => SelfTest::Failed,
-            stegobench_plugin::selftest::Verified::Skipped(_) => SelfTest::Skipped,
-            stegobench_plugin::selftest::Verified::Answered(_) => SelfTest::Answered,
-        }
-    });
+    let selftest =
+        fixtures.map(
+            |dir| match stegobench_plugin::selftest::run(entry, dir, adapter_roots) {
+                stegobench_plugin::selftest::Verified::Passed => SelfTest::Passed,
+                stegobench_plugin::selftest::Verified::Failed(_) => SelfTest::Failed,
+                stegobench_plugin::selftest::Verified::Skipped(_) => SelfTest::Skipped,
+                stegobench_plugin::selftest::Verified::Answered(_) => SelfTest::Answered,
+            },
+        );
     refuse_embedder(entry)?;
 
     // The scoring pass. Streams, and every answer is on disk before the next
