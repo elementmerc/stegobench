@@ -212,6 +212,30 @@ impl ScoreError {
             ScoreError::Corpus(_) | ScoreError::Records { .. } => exit::FAILURE,
         }
     }
+
+    /// A stable word for why this failed, for a caller branching in a script.
+    ///
+    /// The exit code says how bad it was and the message says what happened
+    /// in English, and neither is something to branch on: there are more
+    /// failures than codes, and the prose is written to be read by a person
+    /// and will be reworded when a person is confused by it. `metrics`
+    /// already publishes one of these and `score` did not, so automating
+    /// against `score` meant matching English that nothing promised to keep.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            ScoreError::Corpus(_) => "corpus-unreadable",
+            ScoreError::Run(_) => "plugin-failed",
+            ScoreError::Records { .. } => "records-unreadable",
+            ScoreError::NotADetector { .. } => "not-a-detector",
+            ScoreError::UnknownSplit { .. } => "unknown-split",
+            ScoreError::NoSplitLabels { .. } => "no-split-labels",
+            ScoreError::NotThatCorpus { .. } => "not-that-corpus",
+            ScoreError::ImageChanged { .. } => "image-changed",
+            ScoreError::SplitLeaks { .. } => "split-leaks",
+            ScoreError::OneSided { .. } => "one-sided",
+            ScoreError::NoAuc { .. } => "no-auc",
+        }
+    }
 }
 
 /// Everything about the corpus that does not depend on which detector is asked.
@@ -788,11 +812,41 @@ where
             entry.name
         ));
     }
+    // An AUC at or near zero is not a bad detector, it is a detector wired up
+    // backwards: every stego image scored BELOW every clean one, which takes
+    // as much signal as getting it right. A run that reports 0.0000 and exits
+    // 0 is a green build over an adapter whose sign is inverted, and the
+    // number reads in a table as "this tool is useless" rather than "nobody
+    // has read this tool's output correctly yet".
+    if auc < 0.5 {
+        progress(&format!(
+            "{} scored {auc:.4}, which is below the 0.5 a coin flip gets. That \
+             usually means its scores run the wrong way round rather than that \
+             it cannot see anything: at {:.4} it separates these images about as \
+             well inverted as it would upright. Check the adapter's sign before \
+             reading this as a measurement",
+            entry.name,
+            1.0 - auc
+        ));
+    }
+
     let mut tpr_at_fpr = BTreeMap::new();
+    let mut tpr_at_fpr_achieved = BTreeMap::new();
+    // A budget finer than one clean image cannot be spent, and the figure
+    // then belongs to a rate nobody asked for. Collected so it is said once
+    // with all three rates rather than three times.
+    let mut unspendable: Vec<String> = Vec::new();
     for fpr in [0.01, 0.05, 0.10] {
         match stegobench_metrics::tpr_at_fpr(&scores, &labels, fpr) {
             Some(tpr) => {
-                tpr_at_fpr.insert(format!("{fpr:.2}"), tpr);
+                let key = format!("{fpr:.2}");
+                tpr_at_fpr.insert(key.clone(), tpr);
+                if let Some(point) = stegobench_metrics::operating_point(&scores, &labels, fpr) {
+                    tpr_at_fpr_achieved.insert(key, point.achieved_fpr);
+                    if !point.budget_was_expressible(n_clean as usize) {
+                        unspendable.push(format!("{:.0}%", fpr * 100.0));
+                    }
+                }
             }
             // Unreachable given the AUC above succeeded: these three budgets
             // are constants inside [0, 1], and the only other way this answers
@@ -813,6 +867,21 @@ where
                 })
             }
         }
+    }
+    if !unspendable.is_empty() {
+        // The figure is right and the heading is not, which is the shape of
+        // fault a reader cannot catch: they copy the cell out, and "TPR at a
+        // 1% false-alarm rate" travels with it as a claim nobody made.
+        progress(&format!(
+            "{} clean image(s) cannot express a false-alarm budget finer than \
+             {:.1}%, so the figure(s) reported at {} are the figure at the \
+             nearest rate this corpus can actually show. The number is real; \
+             the heading over it is finer than the measurement. More clean \
+             images is the only fix",
+            n_clean,
+            stegobench_metrics::fpr_resolution(n_clean as usize) * 100.0,
+            unspendable.join(", ")
+        ));
     }
 
     let (version, pinned_by) = pinning(entry);
@@ -862,6 +931,7 @@ where
             auc,
             auc_ci95,
             tpr_at_fpr,
+            tpr_at_fpr_achieved,
             verdict_rate: None,
             n_clean,
             n_stego,
@@ -2499,6 +2569,67 @@ mod tests {
         assert_eq!(table.len(), 2, "None must not become an arm");
     }
 
+    /// Collects what `score_one` said, so a test can assert on the words a
+    /// user actually reads rather than on a field they never see.
+    #[cfg(unix)]
+    fn said(entry: &Entry, prepared: &Prepared, records: &Path) -> String {
+        let mut lines = Vec::new();
+        let _ = score_one(entry, prepared, records, Duration::from_secs(5), &[], |m| {
+            lines.push(m.to_string())
+        });
+        lines.join("\n")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_budget_the_corpus_cannot_express_is_said_out_loud() {
+        // The finding: `TPR@1%FA` over six clean images is `TPR@0%FA` wearing
+        // a better name, and an engineer picking a review threshold reads
+        // that column and nothing else. The figure stays; the claim over it
+        // gets qualified where the reader meets it.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let prepared = prepare(&root, None, None, None, None, |_| {}).expect("prepared");
+        let entry = sizing_detector(tmp.path());
+        let text = said(&entry, &prepared, &root.with_extension("u.jsonl"));
+        assert!(
+            text.contains("cannot express a false-alarm budget finer than"),
+            "{text}"
+        );
+        assert!(text.contains("1%"), "the budgets should be named: {text}");
+        assert!(
+            text.contains("The number is real"),
+            "it must not read as the figure being wrong: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_corpus_large_enough_for_the_budget_is_not_warned_about() {
+        // A warning that fires every time is one a reader stops seeing, which
+        // is the fault this whole journey kept turning up.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 120, 120);
+        let prepared = prepare(&root, None, None, None, None, |_| {}).expect("prepared");
+        let entry = sizing_detector(tmp.path());
+        let text = said(&entry, &prepared, &root.with_extension("v.jsonl"));
+        assert!(
+            !text.contains("cannot express a false-alarm budget"),
+            "120 clean images can express 1%: {text}"
+        );
+    }
+
+    #[test]
+    fn a_budget_is_expressible_exactly_when_one_clean_image_fits_inside_it() {
+        // The rule itself, without a corpus in the way. One image in a
+        // hundred is 1%, so a hundred clean images can just express it and
+        // ninety-nine cannot.
+        assert!(stegobench_metrics::fpr_resolution(100) <= 0.01);
+        assert!(stegobench_metrics::fpr_resolution(99) > 0.01);
+    }
+
     #[test]
     fn a_whole_corpus_run_records_no_split_rather_than_guessing_one() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -3683,5 +3814,71 @@ mod tests {
         corpus(&root, 1, 1);
         let err = score(&entry, &request(&root, None), |_| {}).expect_err("refused");
         assert!(err.to_string().contains("cannot be asked"), "{err}");
+    }
+
+    /// Every variant answers, and no two answer the same, so a variant added
+    /// later cannot quietly inherit somebody else's word.
+    ///
+    /// The list is built by hand rather than derived, and that is the point:
+    /// `reason()` matches without a wildcard, so a new variant breaks the
+    /// build there and whoever fixes it comes here next. Every variant is
+    /// present, including the two that wrap another crate's error, because
+    /// leaving those out is exactly how a twelfth variant would be given a
+    /// word one of them already owns.
+    #[test]
+    fn every_score_error_has_its_own_stable_word() {
+        let every: Vec<ScoreError> = vec![
+            ScoreError::Corpus(stegobench_core::samples::SampleError::TooManySamples),
+            ScoreError::Run(runner::RunError::BadRecord {
+                path: "p".into(),
+                reason: "r".into(),
+            }),
+            ScoreError::Records {
+                path: "p".into(),
+                source: std::io::Error::other("x"),
+            },
+            ScoreError::NotADetector { name: "n".into() },
+            ScoreError::SplitLeaks {
+                path: "p".into(),
+                count: 1,
+                examples: "e".into(),
+            },
+            ScoreError::NotThatCorpus {
+                path: "p".into(),
+                id: "i".into(),
+                want: "w".into(),
+                got: "g".into(),
+            },
+            ScoreError::UnknownSplit {
+                asked: "sideways".into(),
+            },
+            ScoreError::NoSplitLabels { path: "p".into() },
+            ScoreError::OneSided {
+                path: "p".into(),
+                clean: 1,
+                stego: 0,
+            },
+            ScoreError::NoAuc {
+                name: "n".into(),
+                answered: 1,
+                why: "w".into(),
+            },
+            ScoreError::ImageChanged {
+                id: "i".into(),
+                want: "w".into(),
+                got: "g".into(),
+            },
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &every {
+            let word = e.reason();
+            assert!(!word.is_empty(), "a variant answered with nothing");
+            assert!(
+                word.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "{word:?} is not the kebab-case vocabulary the others use"
+            );
+            assert!(seen.insert(word), "{word:?} is claimed by two variants");
+        }
+        assert_eq!(seen.len(), every.len());
     }
 }
