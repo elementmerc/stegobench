@@ -18,6 +18,24 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// A per-image deadline that can actually bound something.
+///
+/// Zero parsed and meant "kill it before it can answer": every item recorded
+/// a timeout and the run produced a document full of errors under exit zero.
+/// It is refused rather than redefined as "no timeout", because the runner
+/// below has no way to express an unbounded wait and inventing one here would
+/// be a flag that lies about what happens.
+pub fn positive_seconds(text: &str) -> Result<u64, String> {
+    match text.parse::<u64>() {
+        Ok(0) => Err("0 would kill the detector before it could answer. \
+                      Give the number of seconds one image is worth; there is \
+                      no value meaning no timeout."
+            .to_string()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("{text:?} is not a whole number of seconds")),
+    }
+}
+
 /// How `report` renders a table.
 ///
 /// Defined here rather than beside the renderer because `build.rs` includes
@@ -90,8 +108,11 @@ pub enum ReportFormat {
     ),
     after_long_help = concat!(
         "OUTPUT STREAMS\n  \
-                  --json writes machine-readable output to stdout. Progress and \
-                  diagnostics go to stderr.\n\n\
+                  Content goes to stdout: a listing, a table, a schema, a \
+                  completion script, a help topic, `doctor`'s report, and \
+                  everything `--json` writes. Progress, warnings and refusals \
+                  go to stderr, so a pipe carries the answer and nothing \
+                  else.\n\n\
                   EXIT CODES\n  \
                   0    success\n  \
                   1    generic failure\n  \
@@ -291,14 +312,26 @@ pub enum Command {
     /// Reports what is installed, what is missing, and which tools passed
     /// their self-test. "Present" is never reported as "working".
     ///
-    /// Exits 8 when something needed is missing.
+    /// Exits 8 when nothing here is usable, or an installed tool fails its
+    /// own self-test. A tool you have not installed is reported and is not a
+    /// fault. `--strict` fails on that too.
+    ///
+    /// THE WORDS IN THE SELF-TEST SUMMARY
+    ///   passed     flagged the planted signal and cleared the clean image
+    ///   responded  ran and answered, without settling either fixture, so
+    ///              nothing was proved about its accuracy
+    ///   failed     got one of the two wrong
+    ///   not run    was not asked, and its line says why
     ///
     /// Example:
     ///   stegobench doctor
     Doctor {
-        /// Where the self-test fixtures live. Defaults to the checkout, then
-        /// beside the executable, then your data directories, then the copy
-        /// compiled into this binary.
+        /// Where the self-test fixtures live: the two known images every
+        /// self-test is run against, one with a planted signal and one clean.
+        ///
+        /// Defaults to the checkout, then beside the executable, then your
+        /// data directories, then the copy compiled into this binary. The
+        /// first line of `doctor` names the directory that answered.
         ///
         /// Setting STEGOBENCH_FIXTURES does the same thing. An empty value
         /// counts as not set.
@@ -307,6 +340,10 @@ pub enum Command {
         fixtures: Option<std::path::PathBuf>,
         /// Report what is installed without running the self-tests. Faster,
         /// and cannot tell a working tool from a broken one.
+        ///
+        /// The verdict is then about what is INSTALLED, because nothing was
+        /// proved: a machine with a tool on it is fit, and exit 8 is reserved
+        /// for one with none.
         #[arg(long)]
         no_selftest: bool,
         /// Fail unless every registered tool is installed and working.
@@ -346,9 +383,11 @@ pub enum Command {
         /// A directory of samples: images with a JSON record beside each.
         ///
         /// A PATH, never a registered id. An id names a dataset somebody
-        /// publishes; this names the unpacked bytes on this machine. Get
-        /// those with `stegobench fetch <id> --tier <tier>`, unpack them,
-        /// then name the directory here and the id under --corpus-id.
+        /// publishes; this names the bytes on this machine. Get those with
+        /// `stegobench fetch <id> --tier <tier>`, which writes the starter
+        /// corpus out as a directory and leaves a downloaded archive for you
+        /// to unpack, then name the directory here and the id under
+        /// --corpus-id.
         #[arg(long, value_name = "DIR")]
         corpus: std::path::PathBuf,
         /// Which registered detector to ask. See `stegobench list detectors`.
@@ -414,7 +453,16 @@ pub enum Command {
         out: Option<std::path::PathBuf>,
         /// Seconds any single image is given before the detector is killed and
         /// that item is recorded as an error.
-        #[arg(long, value_name = "SECONDS", default_value = "60")]
+        ///
+        /// At least 1. There is no value meaning "no timeout": a detector
+        /// that never answers would hang the run for ever, and nothing under
+        /// this flag can tell that apart from one that is merely slow.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value = "60",
+            value_parser = positive_seconds
+        )]
         timeout: u64,
         /// Score the first this many items, for a smoke test.
         ///
@@ -493,7 +541,10 @@ pub enum Command {
     /// next run continues from them; nothing that looks complete is ever left
     /// behind half written.
     ///
-    /// It does not unpack. It reports the verified file and what it is.
+    /// A downloaded archive is not unpacked: the verified file is reported
+    /// and left as it arrived. The starter corpus is the exception, because
+    /// it is carried inside this binary rather than downloaded, and it is
+    /// written out as a directory ready to score.
     ///
     /// EXIT CODES here: 2 the tier is not one this corpus declares, or the
     /// route is larger than --max-bytes allows; 3 there is nothing to fetch;

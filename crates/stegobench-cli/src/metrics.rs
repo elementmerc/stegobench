@@ -229,24 +229,30 @@ impl Report {
         })
     }
 
-    /// What a person reads. Full precision, because rounding belongs to
-    /// whoever is writing the report and this is not that.
+    /// What a person reads.
+    ///
+    /// Four decimals and a bracketed interval, which is what `score` prints
+    /// for the identical arithmetic. The two used to disagree: `AUC 1` and
+    /// `95% interval 0.5 to 0.5` here against `AUC 1.0000 [1.0000, 1.0000]`
+    /// there, so the same number read as two different measurements
+    /// depending on which command produced it. Full precision is in `--json`,
+    /// which is where a caller doing arithmetic on it should be reading.
     pub fn human(&self) -> String {
         let mut text = format!(
-            "{} answer(s): {} clean, {} stego\nAUC            {}{}",
+            "{} answer(s): {} clean, {} stego\nAUC            {:.4}{}",
             self.n_clean + self.n_stego,
             self.n_clean,
             self.n_stego,
             self.auc,
             match self.auc_ci95 {
-                Some([lo, hi]) => format!("\n95% interval   {lo} to {hi}"),
+                Some([lo, hi]) => format!("\n95% interval   [{lo:.4}, {hi:.4}]"),
                 None => "\n95% interval   not estimated: one class has fewer \
                          than two members"
                     .to_string(),
             }
         );
         for (budget, tpr) in &self.tpr_at_fpr {
-            text.push_str(&format!("\nTPR at {budget:<7} {tpr}"));
+            text.push_str(&format!("\nTPR at {budget:<7} {tpr:.4}"));
             // Only where the two differ, so an adequate sample reads exactly
             // as it did before and the note means something when it appears.
             if let Some(got) = self.achieved_fpr.get(budget) {
@@ -723,5 +729,25 @@ mod tests {
         .map(|e| e.reason())
         .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(reasons.len(), 10);
+    }
+
+    /// `metrics` printed `AUC 1` and `95% interval 0.5 to 0.5` where `score`
+    /// printed `AUC 1.0000 [1.0000, 1.0000]` for the identical arithmetic, so
+    /// the same number read as two different measurements depending on which
+    /// command produced it.
+    #[test]
+    fn a_number_is_rendered_the_way_score_renders_it() {
+        let input = Input {
+            scores: vec![Some(0.9), Some(0.1), Some(0.8), Some(0.2)],
+            labels: vec![true, false, true, false],
+        };
+        let report = compute(input, &[("0.50".to_string(), 0.5)]).expect("rankable");
+        let text = report.human();
+        assert!(text.contains("AUC            1.0000"), "{text}");
+        assert!(text.contains("95% interval   [1.0000, 1.0000]"), "{text}");
+        assert!(text.contains("TPR at 0.50    1.0000"), "{text}");
+        // Full precision is still one flag away, for anybody doing
+        // arithmetic on it.
+        assert_eq!(report.to_json()["auc"], serde_json::json!(1.0));
     }
 }

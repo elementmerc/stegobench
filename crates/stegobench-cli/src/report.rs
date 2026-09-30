@@ -108,12 +108,27 @@ pub const MAX_ARM_LINES_SHOWN: usize = 200;
 /// These are the cases where there is no honest table to print at all.
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
-    #[error("cannot read {path}: {source}")]
+    #[error("cannot read {path}: {}", crate::plain_io(.source))]
     Read {
         path: String,
         #[source]
         source: std::io::Error,
     },
+    /// A path named on the command line that is not there, or cannot be
+    /// opened at all.
+    ///
+    /// Kept apart from [`ReportError::Read`] because it is the same fault
+    /// `score --corpus /nope` answers, and the two disagreed: `score` crafted
+    /// an explanation and returned a refusal, while `report` handed back
+    /// `No such file or directory (os error 2)` under exit 1. One kind of
+    /// mistake, two exit codes and two registers.
+    #[error(
+        "{path} cannot be read: {why}.\n\
+         `report` takes result documents, or the directories `score --out` \
+         wrote them to. Check the path, and `stegobench score --help` says \
+         where the documents land"
+    )]
+    PathUnusable { path: String, why: String },
     #[error(
         "nothing under {paths} is a result document, so there is no table to \
          print. An empty table under an exit code of zero reads as \"checked, \
@@ -160,7 +175,11 @@ impl ReportError {
             // the command, so this is a usage error rather than a breakage.
             ReportError::NothingFound { .. } => exit::USAGE,
             // Capable of it, declining. Retrying unchanged refuses again.
-            ReportError::TooMany { .. } | ReportError::TooDeep { .. } => exit::PREFLIGHT_REFUSED,
+            // The same code `score` returns for a `--corpus` that is not
+            // there. Retrying unchanged refuses again.
+            ReportError::TooMany { .. }
+            | ReportError::TooDeep { .. }
+            | ReportError::PathUnusable { .. } => exit::PREFLIGHT_REFUSED,
             ReportError::Read { .. } | ReportError::Write { .. } => exit::FAILURE,
         }
     }
@@ -348,9 +367,17 @@ fn discover(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<Skipped>), ReportErr
     let mut found = Vec::new();
     let mut skipped = Vec::new();
     for path in paths {
-        let meta = std::fs::metadata(path).map_err(|e| ReportError::Read {
-            path: path.display().to_string(),
-            source: e,
+        let meta = std::fs::metadata(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+                ReportError::PathUnusable {
+                    path: path.display().to_string(),
+                    why: crate::plain_io(&e),
+                }
+            }
+            _ => ReportError::Read {
+                path: path.display().to_string(),
+                source: e,
+            },
         })?;
         if meta.is_dir() {
             walk(path, 0, &mut found, &mut skipped)?;
@@ -2086,12 +2113,19 @@ mod tests {
         assert!(matches!(err, ReportError::NothingFound { .. }));
     }
 
+    /// `score --corpus /nope` refuses with exit 3 and an explanation, and
+    /// this answered the identical mistake with the operating system's own
+    /// error number under exit 1. Same fault, same code, and no `os error 2`
+    /// in front of a reader.
     #[test]
-    fn a_missing_path_fails_with_the_path_named() {
+    fn a_missing_path_refuses_the_way_score_refuses_one() {
         let err = build(&[PathBuf::from("/definitely/not/here")]).unwrap_err();
-        assert!(matches!(err, ReportError::Read { .. }));
-        assert_eq!(err.exit_code(), exit::FAILURE);
-        assert!(err.to_string().contains("/definitely/not/here"));
+        assert!(matches!(err, ReportError::PathUnusable { .. }));
+        assert_eq!(err.exit_code(), exit::PREFLIGHT_REFUSED);
+        let said = err.to_string();
+        assert!(said.contains("/definitely/not/here"), "{said}");
+        assert!(said.contains("nothing is there"), "{said}");
+        assert!(!said.contains("os error"), "{said}");
     }
 
     /// A file named on the command line is read whatever it is called. Only a
