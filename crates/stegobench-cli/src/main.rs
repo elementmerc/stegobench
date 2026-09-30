@@ -78,6 +78,45 @@ impl Output {
             payload_on_stdout: false,
         }
     }
+
+    /// The same, carrying a stable word a script can branch on.
+    ///
+    /// The exit code says how bad it was and the message says what happened in
+    /// English, and neither is a thing to branch on: there are more failures
+    /// than codes, and the prose is written to be read by a person and will be
+    /// reworded when a person is confused by it. `metrics` has published one of
+    /// these since it shipped and `score` did not, so automating against
+    /// `score` meant matching English that nothing promised to keep.
+    fn err_because(code: i32, reason: &str, human: impl Into<String>) -> Self {
+        let mut out = Output::err(code, human);
+        out.json["reason"] = serde_json::json!(reason);
+        out
+    }
+}
+
+/// A [`score::ScoreError`] as the command's answer: the stable word, the exit
+/// code, and the prose with the flag that caused it named where one did.
+fn score_refusal(e: &score::ScoreError, limit: Option<u64>) -> Output {
+    let why = e.to_string();
+    // `--limit` TAKES A PREFIX, AND A CORPUS PUTS ITS COVERS FIRST
+    //
+    // So the flag advertised for a smoke test is the one that reliably
+    // produces an all-clean set and a refusal about the corpus. The refusal is
+    // true and it names the wrong culprit: nothing is wrong with the corpus,
+    // the command asked for a slice of it that cannot be measured. Naming the
+    // flag here rather than widening the message in `score.rs` keeps the
+    // corpus's own refusal about the corpus.
+    let human = match (e, limit) {
+        (score::ScoreError::OneSided { .. }, Some(n)) => format!(
+            "{why}.\n--limit {n} takes the FIRST {n} item(s) in corpus order, \
+             and a corpus lists its covers before its stego arms, so a small \
+             limit reaches clean images only. Raise it past the covers, drop \
+             it and score the whole corpus, or use --split test for a smaller \
+             whole."
+        ),
+        _ => why,
+    };
+    Output::err_because(e.exit_code(), e.reason(), human)
 }
 
 const KNOWN_SCHEMAS: &[&str] = &["result-v1", "run-v1", "manifest-v1"];
@@ -1274,7 +1313,12 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
             return Output::err(
                 exit::VERIFY_MISMATCH,
                 format!(
-                    "{} does not match its own content digest. It declares \n                       {claimed}\nand its contents come to\n  {actual}\nEvery                      field except the two that record WHEN the run happened is                      covered, so something in this document changed after it                      was written. Re-run the measurement rather than trusting                      the number in it",
+                    "{} does not match its own content digest. It declares\n  \
+                     {claimed}\nand its contents come to\n  {actual}\nEvery \
+                     field except the two that record WHEN the run happened is \
+                     covered, so something in this document changed after it \
+                     was written. Re-run the measurement rather than trusting \
+                     the number in it",
                     file.display()
                 ),
             );
@@ -1305,7 +1349,10 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                 ),
             )
         }
-        Err(e) => return Output::err(exit::FAILURE, e.to_string()),
+        // The exit code is deliberately unchanged: `verify` has always
+        // answered a corpus it could not read with a generic failure, and the
+        // stable word is an addition beside it rather than a reclassification.
+        Err(e) => return Output::err_because(exit::FAILURE, e.reason(), e.to_string()),
     };
 
     let claimed = &result.corpus.digest;
@@ -1327,7 +1374,7 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                 eprintln!("verify: {line}");
             }) {
                 Ok(v) => v,
-                Err(e) => return Output::err(exit::FAILURE, e.to_string()),
+                Err(e) => return Output::err_because(exit::FAILURE, e.reason(), e.to_string()),
             };
             if !bad.is_empty() {
                 json["ok"] = serde_json::Value::Bool(false);
@@ -1530,6 +1577,8 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         timeout,
         out,
         records,
+        split,
+        trained_on,
         ..
     }) = &parsed.command
     else {
@@ -1553,7 +1602,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     }
     for (flag, path) in [("--out", out.as_deref()), ("--records", records.as_deref())] {
         if let Some(why) = output_inside_corpus(corpus, flag, path) {
-            return Output::err(exit::USAGE, why);
+            return Output::err_because(exit::USAGE, "output-inside-corpus", why);
         }
     }
 
@@ -1562,25 +1611,35 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     // side of what this measures, and "no record beside DSC_0001" does not
     // tell them so.
     if let Some(why) = unlabelled_corpus(corpus) {
-        return Output::err(exit::PREFLIGHT_REFUSED, why);
+        return Output::err_because(exit::PREFLIGHT_REFUSED, "corpus-unlabelled", why);
     }
 
-    // Counted rather than guessed from the directory size. Walking the corpus
-    // is the only way to know how many scorable samples it holds, and an
-    // estimate built on a guess is the thing a plan exists to replace.
-    let mut items: u64 = 0;
-    for sample in match stegobench_core::samples::Samples::open(corpus) {
-        Ok(s) => s,
-        Err(e) => return Output::err(exit::FAILURE, e.to_string()),
-    } {
-        if let Err(e) = sample {
-            return Output::err(exit::FAILURE, e.to_string());
-        }
-        items += 1;
-        if limit.is_some_and(|n| items >= n) {
-            break;
-        }
-    }
+    // THE SAME PRE-FLIGHT `score` RUNS, RATHER THAN A COUNT OF ITS OWN
+    //
+    // This used to walk the corpus itself and count scorable samples, which
+    // answered "how many" and nothing else. Everything the walk could also
+    // have said was left for `score` to say later, which is backwards for a
+    // command whose whole job is telling you things before you spend the time:
+    // a corpus of 120 dimension-mismatched pairs planned silently, and `score`
+    // then found it instantly and statically from the same records.
+    //
+    // `registered` is deliberately `None`, so this does the record pass and
+    // not the digest-and-rehash pass. Naming the corpus is `plan_configuration`'s
+    // question and it answers it from the registry alone, which is what keeps
+    // a plan cheaper than the run it describes.
+    let mut notes: Vec<String> = Vec::new();
+    let prepared = match score::prepare(
+        corpus,
+        None,
+        *limit,
+        trained_on.as_deref(),
+        split.as_deref(),
+        |line: &str| notes.push(line.to_string()),
+    ) {
+        Ok(p) => p,
+        Err(e) => return score_refusal(&e, *limit),
+    };
+    let items = prepared.items();
 
     // What the run would be WORTH, beside what it would cost. A plan that
     // reports six hours and omits that the result will be `custom` has
@@ -1607,7 +1666,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
             None => unestimated += 1,
         }
         let duration = match seconds {
-            Some(s) => format!("about {}", human_duration(s)),
+            Some(s) => format!("at least {}", human_duration(s)),
             None => "unknown: it declares no seconds_per_image".to_string(),
         };
         lines.push(format!("{:<16} {duration}", entry.name));
@@ -1636,6 +1695,12 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         "worst_case_seconds".into(),
         serde_json::json!(items * timeout * entries.len() as u64),
     );
+    // So a caller cannot mistake the total for something this machine
+    // measured. Nothing here times a detector, and nothing yet replaces a
+    // declared rate with a measured one.
+    value.insert("rate_source".into(), serde_json::json!("declared"));
+    value.insert("estimate_is_a_lower_bound".into(), serde_json::json!(true));
+    value.insert("corpus_notes".into(), serde_json::json!(notes));
 
     let mut human = format!(
         "{items} item(s) to score with each of {} detector(s):\n",
@@ -1653,8 +1718,8 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         );
     } else {
         human.push_str(&format!(
-            "\n\nTotal          about {}, over the {estimated} that declare a \
-             rate",
+            "\n\nTotal          at least {}, over the {estimated} that declare \
+             a rate",
             human_duration(total_seconds),
         ));
         if unestimated > 0 {
@@ -1667,11 +1732,38 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         }
     }
     human.push_str(&format!(
-        "\nRecords        about {records_mb:.1} MB\nWorst case     {} (every \
-         item hitting the {timeout}s deadline)\nConfiguration  {configuration}: \
-         {why}",
+        "\nRecords        about {records_mb:.1} MB\nWorst case     {} (a \
+         ceiling, not a forecast: every item hitting the {timeout}s \
+         deadline)\nConfiguration  {configuration}: {why}",
         human_duration((items * timeout * entries.len() as u64) as f64)
     ));
+
+    // WHERE THE RATE COMES FROM, SAID IN THE OUTPUT RATHER THAN ONLY IN THE
+    // REGISTRY
+    //
+    // `seconds_per_image` is a number whoever registered the tool wrote down.
+    // Nothing here has ever timed a detector, and the mechanism that was meant
+    // to replace a declared rate with a measured one does not exist yet, so
+    // every total printed above is arithmetic over a guess. It is also a rate
+    // for the WORK, and the host starts the tool once per image, so the
+    // start-up cost of a container or a process is in the real run and not in
+    // the figure. Measured 2026-09-30: an estimate of about 3 minutes against
+    // roughly 11 minutes on the same machine. Saying "about" in front of a
+    // figure that is systematically low is the plan being confidently wrong,
+    // which is worse than the plan admitting what it knows.
+    if estimated > 0 {
+        human.push_str(
+            "\n\nThe rate is what each tool's registry entry DECLARES. \
+             Nothing here has timed one, and the figure covers the work on an \
+             image and not the cost of starting the tool once per image, so \
+             a real run takes longer. Read the total as a floor and an order \
+             of magnitude, not a budget.",
+        );
+    }
+    if !notes.is_empty() {
+        human.push_str("\n\nAbout this corpus:\n  ");
+        human.push_str(&notes.join("\n  "));
+    }
 
     Output::ok(serde_json::Value::Object(value), human)
 }
@@ -1753,7 +1845,14 @@ enum Outcome {
     /// Not available on this machine, so nothing ran. Not fatal to the others.
     Skipped { why: String },
     /// It was available and the run did not produce a usable result.
-    Failed { why: String, code: i32 },
+    ///
+    /// `reason` is the stable word, carried beside the prose so a single
+    /// detector's failure can publish it the way `metrics` does.
+    Failed {
+        why: String,
+        code: i32,
+        reason: &'static str,
+    },
 }
 
 /// Which detectors a `--detector` list names, in a deterministic order.
@@ -1769,8 +1868,9 @@ fn resolve_detectors<'a>(
 ) -> Result<Vec<&'a stegobench_core::registry::Entry>, Output> {
     if asked.iter().any(|d| d == "all") {
         if asked.len() > 1 {
-            return Err(Output::err(
+            return Err(Output::err_because(
                 exit::USAGE,
+                "all-with-others",
                 "`--detector all` already means every registered detector. Use \
                  `all` on its own, or list the ones you want."
                     .to_string(),
@@ -1781,8 +1881,9 @@ fn resolve_detectors<'a>(
         // in the same order however the registry happened to be read.
         all.sort_by(|a, b| a.name.cmp(&b.name));
         if all.is_empty() {
-            return Err(Output::err(
+            return Err(Output::err_because(
                 exit::USAGE,
+                "no-detectors-registered",
                 "no detectors are registered, so `--detector all` has nothing \
                  to score with. `stegobench list detectors` says where it \
                  looked."
@@ -1796,8 +1897,9 @@ fn resolve_detectors<'a>(
     let mut out = Vec::new();
     for name in asked {
         let Some(entry) = reg.entries.get(name) else {
-            return Err(Output::err(
+            return Err(Output::err_because(
                 exit::USAGE,
+                "unknown-detector",
                 format!(
                     "no tool named {name:?} is registered. \
                      `stegobench list detectors` shows what is."
@@ -1809,8 +1911,9 @@ fn resolve_detectors<'a>(
         // somebody who typed its name has asked for something impossible
         // rather than something unavailable.
         if entry.kind == Kind::Embedder {
-            return Err(Output::err(
+            return Err(Output::err_because(
                 exit::USAGE,
+                "not-a-detector",
                 format!(
                     "{name} is an embedder: it hides payloads, it cannot tell \
                      two images apart. `stegobench list detectors` shows what \
@@ -1902,15 +2005,17 @@ fn corpus_argument_problem(reg: Option<&Registry>, corpus: &Path) -> Option<Outp
     if matches!(std::fs::metadata(corpus), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound) {
         return Some(unresolved_corpus(reg, corpus));
     }
-    corpus_path_problem(corpus).map(|why| Output::err(exit::PREFLIGHT_REFUSED, why))
+    corpus_path_problem(corpus)
+        .map(|why| Output::err_because(exit::PREFLIGHT_REFUSED, "corpus-unusable", why))
 }
 
 /// A `--corpus` value that is not a directory, answered by what it might be.
 fn unresolved_corpus(reg: Option<&Registry>, corpus: &Path) -> Output {
     let typed = corpus.to_string_lossy().into_owned();
     if reg.is_some_and(|r| r.corpora.contains_key(typed.as_str())) {
-        return Output::err(
+        return Output::err_because(
             exit::PREFLIGHT_REFUSED,
+            "corpus-missing",
             format!(
                 "there is no corpus at {typed}, and {typed} is a registered \
                  corpus id rather than a path: --corpus takes a directory of \
@@ -1941,8 +2046,9 @@ fn unresolved_corpus(reg: Option<&Registry>, corpus: &Path) -> Output {
         // was would send the reader to check a spelling that may be right.
         None => "the registry could not be read, so this was not checked".to_string(),
     };
-    Output::err(
+    Output::err_because(
         exit::PREFLIGHT_REFUSED,
+        "corpus-missing",
         format!(
             "there is no corpus at {typed}, and it is not a registered corpus \
              id either. Both were tried:\n  as a directory  nothing is there\n  \
@@ -2020,7 +2126,7 @@ fn unregistered_corpus_id(reg: &Registry, id: &str, next: &str) -> Output {
     // registered is the second: the flag took the kind of value it asked for.
     // These two call sites answered USAGE until 2026-09-30 purely because
     // nothing had made them agree with the path case.
-    Output::err(exit::PREFLIGHT_REFUSED, human)
+    Output::err_because(exit::PREFLIGHT_REFUSED, "unregistered-corpus-id", human)
 }
 
 /// Registered corpus ids close enough to what was typed to be worth naming.
@@ -2287,7 +2393,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     // by way of a corpus that no longer matches its own digest.
     for (flag, path) in [("--out", out), ("--records", records)] {
         if let Some(why) = output_inside_corpus(corpus, flag, path) {
-            return Output::err(exit::USAGE, why);
+            return Output::err_because(exit::USAGE, "output-inside-corpus", why);
         }
     }
 
@@ -2297,7 +2403,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     // this tool does, and telling them "docker pull ..." sends them to install
     // a container that will not answer their question either.
     if let Some(why) = unlabelled_corpus(corpus) {
-        return Output::err(exit::PREFLIGHT_REFUSED, why);
+        return Output::err_because(exit::PREFLIGHT_REFUSED, "corpus-unlabelled", why);
     }
 
     // Resolved before anything runs, so a typo costs a usage error rather than
@@ -2325,8 +2431,9 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     if many {
         for (flag, path) in [("--out", out), ("--records", records)] {
             if path.is_some_and(|p| p.is_file()) {
-                return Output::err(
+                return Output::err_because(
                     exit::USAGE,
+                    "output-not-a-directory",
                     format!(
                         "{} is a file. Scoring {} detectors writes one {} \
                          each, so {flag} has to name a directory.",
@@ -2356,6 +2463,34 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     let mut outcomes: Vec<(String, Outcome)> = Vec::new();
     for entry in &entries {
         match availability::check(entry, resolved.adapter_roots()).presence {
+            // PRESENT IS NOT THE SAME AS DRIVABLE, AND `score` USED TO TREAT
+            // IT AS THE SAME.
+            //
+            // Availability answers whether the code is on this machine. An
+            // entry with no invoke block passes that and still says nothing
+            // about what command to launch, so there is nothing to run.
+            // `doctor` has reported this since it shipped and `score` did
+            // not: the run announced "1 of 1 that can run here", started the
+            // tool once per image, recorded "entry declares no invoke block"
+            // against every one of them, and then refused with "the corpus
+            // holds 0 clean and 0 stego image(s)" over a corpus holding six
+            // and twelve. A gap in this project's own registry was reported
+            // as a fault in the user's corpus, and it was classified as a
+            // plugin failure beside other detectors and a pre-flight refusal
+            // on its own. It is a skip, in both.
+            //
+            // Asked inside the Present arm rather than before the check, so a
+            // tool that is neither installed nor drivable is still answered
+            // with the half the reader can act on.
+            Presence::Present { .. } if entry.invoke.is_none() => outcomes.push((
+                entry.name.clone(),
+                Outcome::Skipped {
+                    why: "declares no invoke block, so nothing in its \
+                          registry entry says what command to launch and the \
+                          host has no way to drive it"
+                        .to_string(),
+                },
+            )),
             Presence::Present { .. } => runnable.push(*entry),
             Presence::Unsupported { reason } => outcomes.push((
                 entry.name.clone(),
@@ -2391,8 +2526,9 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
             })
             .collect::<Vec<_>>()
             .join("\n  ");
-        return Output::err(
+        return Output::err_because(
             exit::PREFLIGHT_REFUSED,
+            "nothing-available",
             format!(
                 "nothing was measured: not one of the {} detector(s) asked for \
                  is available here.\n  {why}\n`stegobench doctor` checks every \
@@ -2423,7 +2559,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     ));
     let prepared = match score::prepare(corpus, registered, limit, trained_on, split, say) {
         Ok(p) => p,
-        Err(e) => return Output::err(e.exit_code(), e.to_string()),
+        Err(e) => return score_refusal(&e, limit),
     };
     say(&format!(
         "corpus established in {:.1}s: {} item(s) to score with each detector",
@@ -2509,8 +2645,9 @@ fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<P
         }
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return Err(Output::err(
+        return Err(Output::err_because(
             exit::FAILURE,
+            "results-unwritable",
             format!("could not create {} for the results: {e}", dir.display()),
         ));
     }
@@ -2584,6 +2721,7 @@ where
                 return Outcome::Failed {
                     why: format!("could not create {} for the records: {e}", parent.display()),
                     code: exit::FAILURE,
+                    reason: "records-unwritable",
                 };
             }
         }
@@ -2602,6 +2740,7 @@ where
             return Outcome::Failed {
                 why: e.to_string(),
                 code: e.exit_code(),
+                reason: e.reason(),
             }
         }
     };
@@ -2617,6 +2756,7 @@ where
                 problems.join("\n  ")
             ),
             code: exit::SCHEMA_INVALID,
+            reason: "result-invalid",
         };
     }
 
@@ -2626,6 +2766,7 @@ where
             return Outcome::Failed {
                 why: format!("could not write the result: {e}"),
                 code: exit::FAILURE,
+                reason: "result-unwritable",
             }
         }
     };
@@ -2645,6 +2786,7 @@ where
             return Outcome::Failed {
                 why: format!("could not write the result to {}: {e}", path.display()),
                 code: exit::FAILURE,
+                reason: "result-unwritable",
             };
         }
     }
@@ -2876,7 +3018,7 @@ fn summarise(
             Outcome::Skipped { why } => serde_json::json!({
                 "name": name, "status": "skipped", "reason": why,
             }),
-            Outcome::Failed { why, code } => serde_json::json!({
+            Outcome::Failed { why, code, .. } => serde_json::json!({
                 "name": name, "status": "failed", "reason": why, "exit_code": code,
             }),
         }).collect::<Vec<_>>(),
@@ -2902,7 +3044,9 @@ fn summarise(
                 output.code = code;
                 return output;
             }
-            Some((_, Outcome::Failed { why, code })) => return Output::err(*code, why.clone()),
+            Some((_, Outcome::Failed { why, code, reason })) => {
+                return Output::err_because(*code, reason, why.clone())
+            }
             _ => {}
         }
     }
@@ -3356,6 +3500,21 @@ fn parse_or_explain() -> Cli {
             );
             std::process::exit(exit::USAGE);
         }
+        // `stegobench plan --corpus ...` is the natural first attempt at a
+        // command that wraps another one, and clap answers it with "to pass
+        // '--corpus' as a value, use '-- --corpus'", which would quote the
+        // flag as a literal word and plan nothing at all.
+        Err(ref e) if plan_without_its_verb(e).is_some() => {
+            let rest = plan_without_its_verb(e).expect("matched");
+            eprintln!(
+                "`plan` takes the command you would run, whole, so it has to \
+                 start with that command's own name."
+            );
+            eprintln!("\nYou typed:\n  stegobench plan {rest}");
+            eprintln!("You probably meant:\n  stegobench plan score {rest}");
+            eprintln!("\n`score` is the only command that can be planned today.");
+            std::process::exit(exit::USAGE);
+        }
         // `stegobench score ~/Pictures` is the commonest wrong first command
         // there is, because it is what the tool sounds like it does. clap
         // answers it with the required flags it did not get, which is true
@@ -3382,6 +3541,42 @@ fn parse_or_explain() -> Cli {
         }
         Err(e) => e.exit(),
     }
+}
+
+/// Did somebody type `stegobench plan --corpus ...` and mean
+/// `stegobench plan score --corpus ...`?
+///
+/// `Some(rest)` is the arguments they gave after `plan`, quoted so the
+/// suggestion can be pasted back. Matched on the arguments rather than on
+/// clap's message, for the same reason as [`looks_like_a_folder_of_photos`].
+///
+/// Only a leading flag counts. A leading word is either a verb `plan` can
+/// read or one it refuses by name, and both of those are better answers than
+/// this one.
+fn plan_without_its_verb(e: &clap::Error) -> Option<String> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    plan_verb_hint(e.kind(), &argv)
+}
+
+/// The decision [`plan_without_its_verb`] makes, with the argv handed in so a
+/// test can drive it without a process of its own.
+fn plan_verb_hint(kind: clap::error::ErrorKind, argv: &[String]) -> Option<String> {
+    if kind != clap::error::ErrorKind::UnknownArgument {
+        return None;
+    }
+    if argv.first().map(String::as_str) != Some("plan") {
+        return None;
+    }
+    let rest = &argv[1..];
+    if !rest.first().is_some_and(|a| a.starts_with('-')) {
+        return None;
+    }
+    Some(
+        rest.iter()
+            .map(|w| shell_word(w))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// Did somebody type `stegobench score <path>` and mean "check these"?
@@ -6438,5 +6633,418 @@ mod tests {
         // process and a real signal to drive, not a function call. No
         // signal handling exists in this binary yet to test in the first
         // place.
+    }
+
+    /// A registry entry that is installed and that nothing here can drive.
+    ///
+    /// `aletheia-rich` is the shipped one: a real, registered detector with a
+    /// self-test and no invoke block.
+    #[cfg(unix)]
+    fn registry_with_an_undrivable_detector(dir: &Path) -> PathBuf {
+        let reg = registry_with_one_present_and_one_missing(dir);
+        std::fs::write(
+            reg.join("paperwork.toml"),
+            "name = \"paperwork\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"sh\"]\nversion_args = [\"-c\", \"echo v1\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+        )
+        .unwrap();
+        reg
+    }
+
+    /// THE FAULT THIS EXISTS TO STOP: OUR REGISTRY, THEIR CORPUS, THEIR FAULT.
+    ///
+    /// An entry with no invoke block cannot be driven, `doctor` has always
+    /// said so, and `score` did not ask. So it announced "1 of 1 that can run
+    /// here", started the tool once per image, wrote "entry declares no invoke
+    /// block" against every one, and refused with "the corpus holds 0 clean
+    /// and 0 stego image(s)" over a corpus holding six and twelve.
+    #[cfg(unix)]
+    #[test]
+    fn a_detector_with_no_invoke_block_is_skipped_before_the_corpus_is_walked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_an_undrivable_detector(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["paperwork".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+                split: None,
+            },
+        );
+
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert!(
+            out.human.contains("invoke block"),
+            "the refusal has to name the real reason: {}",
+            out.human
+        );
+        assert!(
+            !out.human.contains("0 clean"),
+            "our registry's gap was reported as a fault in their corpus: {}",
+            out.human
+        );
+        assert!(
+            !corpus.join("paperwork.records.jsonl").exists(),
+            "an entry that cannot be driven was still run over the corpus"
+        );
+    }
+
+    /// The same entry, classified the same way whether it is asked for alone
+    /// or beside a detector that works. It used to be a pre-flight refusal in
+    /// one case and a plugin failure in the other, which is one fact answered
+    /// with two exit codes.
+    #[cfg(unix)]
+    #[test]
+    fn an_undrivable_detector_is_a_skip_beside_a_working_one_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_an_undrivable_detector(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["paperwork".to_string(), "sizer".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+                split: None,
+            },
+        );
+
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert!(
+            out.human.contains("skipped: declares no invoke block"),
+            "{}",
+            out.human
+        );
+        assert_eq!(out.json["skipped"], serde_json::json!(1), "{}", out.json);
+        assert_eq!(out.json["failed"], serde_json::json!(0), "{}", out.json);
+        assert!(
+            out_dir.join("sizer.json").exists(),
+            "the detector that could run lost its work: {}",
+            out.human
+        );
+    }
+
+    /// `--limit` TAKES A PREFIX AND A CORPUS PUTS ITS COVERS FIRST.
+    ///
+    /// So the flag advertised for a smoke test reliably produces an all-clean
+    /// set, and the refusal that followed talked only about the corpus. The
+    /// corpus is fine; the slice asked for is not, and the message has to say
+    /// which of the two it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_limit_that_reaches_only_covers_names_the_flag_rather_than_the_corpus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: Some(2),
+                split: None,
+            },
+        );
+
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert!(out.human.contains("--limit 2"), "{}", out.human);
+        assert!(
+            out.human.contains("covers before its stego arms"),
+            "{}",
+            out.human
+        );
+        assert_eq!(out.json["reason"], serde_json::json!("one-sided"));
+    }
+
+    /// The same refusal without the flag says nothing about the flag, because
+    /// then the corpus genuinely is the one-sided thing.
+    #[cfg(unix)]
+    #[test]
+    fn a_one_sided_corpus_is_not_blamed_on_a_limit_nobody_gave() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("covers-only");
+        std::fs::create_dir_all(&corpus).unwrap();
+        for i in 0..3 {
+            std::fs::write(corpus.join(format!("c{i}.png")), test_png(0)).unwrap();
+            std::fs::write(
+                corpus.join(format!("c{i}.json")),
+                r#"{"role":"clean","sha256":"0"}"#,
+            )
+            .unwrap();
+        }
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+                split: None,
+            },
+        );
+
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert!(!out.human.contains("--limit"), "{}", out.human);
+        assert_eq!(out.json["reason"], serde_json::json!("one-sided"));
+    }
+
+    /// PLAN'S WHOLE JOB IS TELLING YOU THINGS BEFORE YOU SPEND THE TIME.
+    ///
+    /// A corpus whose stego images differ from their covers in more than the
+    /// payload planned silently, and `score` then found it instantly and
+    /// statically from the same records.
+    #[cfg(unix)]
+    #[test]
+    fn plan_warns_about_a_confounded_corpus_before_anything_is_scored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("confounded");
+        std::fs::create_dir_all(&corpus).unwrap();
+        // Wider than its cover, which is a second variable a measurement over
+        // this corpus would pick up along with the payload.
+        let mut wider = b"\x89PNG\r\n\x1a\n".to_vec();
+        wider.extend_from_slice(&13u32.to_be_bytes());
+        wider.extend_from_slice(b"IHDR");
+        wider.extend_from_slice(&64u32.to_be_bytes());
+        wider.extend_from_slice(&64u32.to_be_bytes());
+        wider.extend_from_slice(&[8, 2, 0, 0, 0]);
+        wider.extend_from_slice(&[0, 0, 0, 0]);
+        for i in 0..3 {
+            std::fs::write(corpus.join(format!("c{i}.png")), test_png(0)).unwrap();
+            std::fs::write(
+                corpus.join(format!("c{i}.json")),
+                r#"{"role":"clean","sha256":"0"}"#,
+            )
+            .unwrap();
+            std::fs::write(corpus.join(format!("s{i}.png")), &wider).unwrap();
+            std::fs::write(
+                corpus.join(format!("s{i}.json")),
+                format!(r#"{{"role":"stego","source_png":"c{i}.png","sha256":"0"}}"#),
+            )
+            .unwrap();
+        }
+
+        let out = cmd_plan(
+            &resolved_at(&reg),
+            &[
+                "score".into(),
+                "--corpus".into(),
+                corpus.display().to_string(),
+                "--detector".into(),
+                "sizer".into(),
+            ],
+        );
+
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(
+            out.human.contains("differ from their cover in more than"),
+            "plan said nothing about a corpus score would warn about: {}",
+            out.human
+        );
+        assert!(
+            out.human.contains("different sizes"),
+            "the warning has to carry an example: {}",
+            out.human
+        );
+        assert!(
+            !out.json["corpus_notes"].as_array().unwrap().is_empty(),
+            "{}",
+            out.json
+        );
+    }
+
+    /// A PLAN THAT SAYS "ABOUT" IN FRONT OF A GUESS IS CONFIDENTLY WRONG.
+    ///
+    /// Every total is arithmetic over a `seconds_per_image` somebody wrote
+    /// into a registry entry, covering the work on an image and not the cost
+    /// of starting the tool once per image. Measured 2026-09-30: an estimate
+    /// of about 3 minutes against roughly 11 minutes on the same machine.
+    #[cfg(unix)]
+    #[test]
+    fn plan_says_its_rate_is_declared_rather_than_measured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let sizer = reg.join("sizer.toml");
+        let with_cost = format!(
+            "{}\n[cost]\nseconds_per_image = 0.5\n",
+            std::fs::read_to_string(&sizer).unwrap()
+        );
+        std::fs::write(&sizer, with_cost).unwrap();
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+
+        let out = cmd_plan(
+            &resolved_at(&reg),
+            &[
+                "score".into(),
+                "--corpus".into(),
+                corpus.display().to_string(),
+                "--detector".into(),
+                "sizer".into(),
+            ],
+        );
+
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(
+            out.human.contains("Total          at least"),
+            "{}",
+            out.human
+        );
+        assert!(out.human.contains("DECLARES"), "{}", out.human);
+        assert!(
+            out.human.contains("a ceiling, not a forecast"),
+            "{}",
+            out.human
+        );
+        assert_eq!(out.json["rate_source"], serde_json::json!("declared"));
+        assert_eq!(
+            out.json["estimate_is_a_lower_bound"],
+            serde_json::json!(true)
+        );
+    }
+
+    /// `plan` wraps a whole command, so the natural first attempt puts
+    /// `score`'s flags straight after `plan`. clap answered that with "to
+    /// pass '--corpus' as a value, use '-- --corpus'", which quotes the flag
+    /// as a literal word and plans nothing at all.
+    #[test]
+    fn a_plan_command_starting_with_a_flag_is_answered_with_the_verb_it_needs() {
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let unknown = clap::error::ErrorKind::UnknownArgument;
+
+        let hint = plan_verb_hint(unknown, &argv(&["plan", "--corpus", "./mine"]))
+            .expect("the natural first attempt is not recognised");
+        assert_eq!(hint, "--corpus ./mine");
+
+        // A path with a space survives being pasted back.
+        let quoted = plan_verb_hint(unknown, &argv(&["plan", "--corpus", "my corpus"]))
+            .expect("a quoted value is not recognised");
+        assert_eq!(quoted, "--corpus 'my corpus'");
+
+        // A leading word is either a verb `plan` reads or one it refuses by
+        // name, and both are better answers than this one.
+        assert!(plan_verb_hint(unknown, &argv(&["plan", "score", "--corpus", "x"])).is_none());
+        // Another command's unknown flag is not this.
+        assert!(plan_verb_hint(unknown, &argv(&["score", "--nope"])).is_none());
+        assert!(plan_verb_hint(unknown, &argv(&["plan"])).is_none());
+        assert!(plan_verb_hint(unknown, &[]).is_none());
+        // A different failure keeps clap's own answer, which is better for it.
+        assert!(plan_verb_hint(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            &argv(&["plan", "--corpus", "x"])
+        )
+        .is_none());
+    }
+
+    /// `metrics` has published a stable word beside every refusal since it
+    /// shipped and `score` published prose. A caller branching on the second
+    /// is matching English that nothing promises to keep.
+    #[cfg(unix)]
+    #[test]
+    fn every_score_refusal_carries_a_word_a_script_can_branch_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let ask = |corpus: &Path, detectors: &[String]| {
+            cmd_score(
+                &resolved_at(&reg),
+                ScoreRequest {
+                    corpus,
+                    detectors,
+                    corpus_id: None,
+                    trained_on: None,
+                    records: None,
+                    out: None,
+                    timeout: 5,
+                    limit: None,
+                    split: None,
+                },
+            )
+        };
+
+        let cases = [
+            (
+                ask(&tmp.path().join("nope"), &["sizer".to_string()]),
+                "corpus-missing",
+            ),
+            (ask(&corpus, &["ghost".to_string()]), "nothing-available"),
+            (ask(&corpus, &["nobody".to_string()]), "unknown-detector"),
+            (
+                ask(&corpus, &["all".to_string(), "sizer".to_string()]),
+                "all-with-others",
+            ),
+        ];
+        for (out, want) in cases {
+            assert_ne!(out.code, exit::OK, "{}", out.human);
+            assert_eq!(out.json["reason"], serde_json::json!(want), "{}", out.human);
+            // The prose is still there beside the word, because a person
+            // reads one and a script reads the other.
+            assert!(out.json["error"].is_string(), "{}", out.json);
+        }
+    }
+
+    /// The flagship integrity message, which rendered with runs of a dozen
+    /// spaces inside it because the format string had been collapsed onto one
+    /// line with its continuations baked in as literal whitespace.
+    #[test]
+    fn the_content_digest_refusal_wraps_like_every_other_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+        let mut sealed: Result1 =
+            serde_json::from_str(&std::fs::read_to_string(&doc).unwrap()).unwrap();
+        sealed.seal();
+        sealed.metrics.auc = 0.99;
+        std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
+
+        let out = cmd_verify(&doc, &corpus, true);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
+        assert!(
+            !out.human.contains("   "),
+            "the message still carries runs of whitespace:\n{}",
+            out.human
+        );
+        assert!(
+            out.human
+                .contains("Every field except the two that record WHEN the run happened"),
+            "the sentence did not survive rewrapping:\n{}",
+            out.human
+        );
     }
 }

@@ -43,7 +43,11 @@ pub enum ReportFormat {
 #[derive(Parser)]
 #[command(
     name = "stegobench",
-    version,
+    // The URL rather than the bare number, because `--version` is where
+    // somebody who installed this from crates.io goes looking for where it
+    // came from, and there was nowhere in the binary that said. Taken from the
+    // manifest so it cannot drift from what crates.io shows.
+    version = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_REPOSITORY")),
     // clap's built-in `help` subcommand (`stegobench help <subcommand>`,
     // printing that subcommand's --help) would otherwise collide with our
     // own `help` subcommand (`stegobench help <topic>`, conceptual material
@@ -76,11 +80,16 @@ pub enum ReportFormat {
                   stegobench doctor           what is installed, and what it \
                   needs\n  \
                   stegobench help             the reasoning, one topic at a time",
-    after_help = "Start with `stegobench list detectors`, then `stegobench doctor`.\n\
-                  This measures detectors; it does not examine your own images \
-                  (`stegobench help scope`).\n\
-                  Exit codes and the stdout/stderr contract are under `--help`.",
-    after_long_help = "OUTPUT STREAMS\n  \
+    after_help = concat!(
+        "Start with `stegobench list detectors`, then `stegobench doctor`.\n\
+         This measures detectors; it does not examine your own images \
+         (`stegobench help scope`).\n\
+         Exit codes and the stdout/stderr contract are under `--help`.\n\
+         Source and issues: ",
+        env!("CARGO_PKG_REPOSITORY")
+    ),
+    after_long_help = concat!(
+        "OUTPUT STREAMS\n  \
                   --json writes machine-readable output to stdout. Progress and \
                   diagnostics go to stderr.\n\n\
                   EXIT CODES\n  \
@@ -98,8 +107,11 @@ pub enum ReportFormat {
                   WHERE THE REGISTRY COMES FROM\n  \
                   In order: --registry or STEGOBENCH_REGISTRY, ./plugins/registry, \
                   beside this executable, your user data directory, the system \
-                  data directory, then the copy compiled in. A path you name is \
-                  used as given. `stegobench doctor` prints which one answered."
+         data directory, then the copy compiled in. A path you name is \
+         used as given. `stegobench doctor` prints which one answered.\n\n\
+         SOURCE AND ISSUES\n  ",
+        env!("CARGO_PKG_REPOSITORY")
+    )
 )]
 pub struct Cli {
     /// Machine-readable output on stdout. Accepted by every subcommand.
@@ -391,7 +403,17 @@ pub enum Command {
         /// that item is recorded as an error.
         #[arg(long, value_name = "SECONDS", default_value = "60")]
         timeout: u64,
-        /// Score at most this many items, for a smoke test.
+        /// Score the first this many items, for a smoke test.
+        ///
+        /// A PREFIX in corpus order, not a sample spread across the corpus.
+        /// A records file resumes by position, so the item at position 4 has
+        /// to be the same image whatever limit was given, and a sample that
+        /// moved with N would make every earlier records file unresumable.
+        ///
+        /// Corpora list their covers before their stego arms, so a small
+        /// limit reaches clean images only and the run is refused: a
+        /// measurement needs both sides. Raise it past the covers, or use
+        /// `--split test` to score a smaller whole.
         ///
         /// Marks the result `custom`: a prefix of a corpus is not the corpus,
         /// so the figure cannot be quoted as a tier number.
