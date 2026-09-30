@@ -75,6 +75,8 @@ pub struct Request<'a> {
     /// produces a number that measures memory rather than detection, and a
     /// reader has no way to tell from the document unless the document says.
     pub trained_on: Option<&'a str>,
+    /// Which half of the split to score, where the caller asked for one.
+    pub split: Option<&'a str>,
     /// The trees a relative `invoke.adapter` is resolved against.
     ///
     /// Empty for a caller with no registry directory to name, which then falls
@@ -127,6 +129,18 @@ pub enum ScoreError {
         got: String,
     },
     #[error(
+        "{asked:?} is not a side of a split. The two halves are `train` and \
+         `test`"
+    )]
+    UnknownSplit { asked: String },
+    #[error(
+        "the corpus at {path} carries no train and test split, so there is \
+         no half to score. Its records state no `split`, and inventing one \
+         here would put a cover and its stego twin on opposite sides, which \
+         is the exact fault the split exists to prevent"
+    )]
+    NoSplitLabels { path: String },
+    #[error(
         "the corpus at {path} holds {clean} clean and {stego} stego image(s), \
          and a measurement needs both. A detector scored on one side of the \
          question has not been measured, it has been asked a leading one"
@@ -177,6 +191,11 @@ impl ScoreError {
         match self {
             // The caller asked for something incoherent. Fix the command.
             ScoreError::NotADetector { .. } => exit::USAGE,
+            // The command named a half that does not exist. Fix the command.
+            ScoreError::UnknownSplit { .. } => exit::USAGE,
+            // The corpus cannot answer the question asked of it. Not the
+            // command's fault and not a breakage: a pre-flight refusal.
+            ScoreError::NoSplitLabels { .. } => exit::PREFLIGHT_REFUSED,
             // A claim about the bytes was checked and did not hold.
             ScoreError::NotThatCorpus { .. } | ScoreError::ImageChanged { .. } => {
                 exit::VERIFY_MISMATCH
@@ -231,6 +250,14 @@ pub struct Prepared {
     /// the same declaration: it is a property of the detector and the command,
     /// not of one pass over the corpus.
     trained_on: Option<String>,
+    /// Which samples this run covers, in corpus order.
+    ///
+    /// All true unless `--split` narrowed it. One bool per sample, the same
+    /// shape as `labels`, and `Feed` walks the same order so the two index
+    /// the same items.
+    keep: Vec<bool>,
+    /// The half being scored, where one was asked for.
+    pub side: Option<Side>,
     /// When the shared preparation began, and how long it took.
     ///
     /// Every result written from this `Prepared` reports `started_utc` as the
@@ -277,6 +304,7 @@ where
         request.registered,
         request.limit,
         request.trained_on,
+        request.split,
         &mut progress,
     )?;
     score_one(
@@ -308,6 +336,7 @@ pub fn prepare<P>(
     registered: Option<&CorpusEntry>,
     limit: Option<u64>,
     trained_on: Option<&str>,
+    split: Option<&str>,
     mut progress: P,
 ) -> Result<Prepared, ScoreError>
 where
@@ -502,12 +531,54 @@ where
     // labels is cheap next to hashing it, but it is still a walk of every
     // record on disk, and seven of them over a Core tier is seven times
     // 344,357 file reads for an answer that cannot have changed.
+    //
+    // Built alongside the keep mask, because `--split test` changes which
+    // samples are scored and the two have to describe the same set. Both
+    // follow corpus order, which is the order `Feed` walks, so the mask and
+    // the labels index the same items.
+    let wanted = match split {
+        None => None,
+        Some(s) => match Side::parse(s) {
+            Some(side) => Some(side),
+            None => {
+                return Err(ScoreError::UnknownSplit {
+                    asked: s.to_string(),
+                })
+            }
+        },
+    };
+    if wanted.is_some() && checks.sides.iter().all(Option::is_none) {
+        return Err(ScoreError::NoSplitLabels {
+            path: corpus.display().to_string(),
+        });
+    }
+
     let mut labels = Vec::new();
-    for sample in Samples::open(corpus)? {
-        labels.push(sample?.role == Role::Stego);
-        if limit.is_some_and(|n| labels.len() as u64 >= n) {
-            break;
+    let mut keep = Vec::new();
+    for (i, sample) in Samples::open(corpus)?.enumerate() {
+        let sample = sample?;
+        let take = match wanted {
+            None => true,
+            // A sample the corpus says nothing about is not in the half you
+            // asked for. Dropping it silently would be the wrong default, so
+            // the count of what was left out is reported below.
+            Some(side) => checks.sides.get(i).copied().flatten() == Some(side),
+        };
+        keep.push(take);
+        if take {
+            labels.push(sample.role == Role::Stego);
+            if limit.is_some_and(|n| labels.len() as u64 >= n) {
+                break;
+            }
         }
+    }
+    if let Some(side) = wanted {
+        let left_out = keep.iter().filter(|k| !**k).count();
+        progress(&format!(
+            "scoring the {} split only: {} image(s), {left_out} left out",
+            side.as_str(),
+            labels.len()
+        ));
     }
 
     // The corpus itself is one-sided, which no detector can fix. Refused here
@@ -519,7 +590,10 @@ where
     let clean = labels.len() as u64 - stego;
     if clean == 0 || stego == 0 {
         return Err(ScoreError::OneSided {
-            path: corpus.display().to_string(),
+            path: match wanted {
+                Some(side) => format!("{} ({} split)", corpus.display(), side.as_str()),
+                None => corpus.display().to_string(),
+            },
             clean,
             stego,
         });
@@ -533,6 +607,8 @@ where
         checks,
         claim_holds,
         labels,
+        keep,
+        side: wanted,
         started_utc,
         preflight: started.elapsed(),
     })
@@ -571,7 +647,11 @@ where
     // Streamed, not collected. Building a Vec of 344,357 items here would put
     // the corpus back in memory one layer above the runner that was written
     // specifically not to hold it.
-    let mut feed = Feed::open(&prepared.corpus, prepared.limit)?;
+    let mut feed = Feed::filtered(
+        &prepared.corpus,
+        prepared.limit,
+        prepared.side.map(|_| prepared.keep.clone()),
+    )?;
     let own_started = Instant::now();
     let tally = runner::score(
         entry,
@@ -756,7 +836,11 @@ where
             // A pair is a cover and its stego twin, so the count is the stego
             // side. See the field's own documentation in `result.rs`.
             pairs: labels.iter().filter(|&&stego| stego).count() as u64,
-            split: None,
+            // Which half was scored, so a reader is never left inferring it
+            // from `split_discipline`. That field says the corpus keeps a
+            // pair together; this one says which side of it the number came
+            // from, and for a trained detector they are different questions.
+            split: prepared.side.map(|s| s.as_str().to_string()),
         },
         arm: checks.arm.clone(),
         metrics: Metrics {
@@ -871,15 +955,29 @@ struct Feed {
     samples: Samples,
     limit: Option<u64>,
     taken: u64,
+    /// How many samples have been looked at, kept or not.
+    ///
+    /// Separate from `taken`, which counts only what was yielded: the mask is
+    /// indexed by position in the corpus and the limit is a count of work, so
+    /// one cannot stand in for the other once a split is being filtered.
+    seen: usize,
+    /// Which positions to yield, or `None` for all of them.
+    keep: Option<Vec<bool>>,
     fault: Option<stegobench_core::samples::SampleError>,
 }
 
 impl Feed {
-    fn open(corpus: &Path, limit: Option<u64>) -> Result<Self, ScoreError> {
+    fn filtered(
+        corpus: &Path,
+        limit: Option<u64>,
+        keep: Option<Vec<bool>>,
+    ) -> Result<Self, ScoreError> {
         Ok(Self {
             samples: Samples::open(corpus)?,
             limit,
             taken: 0,
+            seen: 0,
+            keep,
             fault: None,
         })
     }
@@ -899,20 +997,34 @@ impl Iterator for Feed {
     type Item = WorkItem;
 
     fn next(&mut self) -> Option<WorkItem> {
-        if self.limit.is_some_and(|n| self.taken >= n) {
-            return None;
-        }
-        match self.samples.next()? {
-            Ok(sample) => {
-                self.taken += 1;
-                Some(WorkItem {
-                    id: sample.id,
-                    path: sample.image,
-                })
+        loop {
+            if self.limit.is_some_and(|n| self.taken >= n) {
+                return None;
             }
-            Err(e) => {
-                self.fault = Some(e);
-                None
+            match self.samples.next()? {
+                Ok(sample) => {
+                    let at = self.seen;
+                    self.seen += 1;
+                    if let Some(keep) = &self.keep {
+                        // Past the end of the mask means the mask was built
+                        // under a limit that stopped early, so there is
+                        // nothing further this run covers.
+                        match keep.get(at) {
+                            Some(true) => {}
+                            Some(false) => continue,
+                            None => return None,
+                        }
+                    }
+                    self.taken += 1;
+                    return Some(WorkItem {
+                        id: sample.id,
+                        path: sample.image,
+                    });
+                }
+                Err(e) => {
+                    self.fault = Some(e);
+                    return None;
+                }
             }
         }
     }
@@ -951,8 +1063,43 @@ impl Violations {
 }
 
 /// What the corpus turned out to be, as opposed to what it claims.
+/// Which half of a train and test split a sample falls in.
+///
+/// A byte per sample rather than the split string per sample: a Core tier is
+/// 344,357 records, and holding "test" as a `String` for each is thirty
+/// megabytes to answer a question with two answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Train,
+    Test,
+}
+
+impl Side {
+    fn parse(s: &str) -> Option<Side> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "train" => Some(Side::Train),
+            "test" => Some(Side::Test),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Side::Train => "train",
+            Side::Test => "test",
+        }
+    }
+}
+
 struct Checks {
     split: SplitDiscipline,
+    /// The side each sample falls on, in corpus order.
+    ///
+    /// A stego row inherits its cover's side, which is the whole discipline:
+    /// the split is a property of the cover and a pair that straddles it
+    /// inflates every number computed from the corpus. `None` where the
+    /// corpus says nothing, or where a stego row's cover cannot be found.
+    sides: Vec<Option<Side>>,
     split_leaks: Violations,
     pairing: Pairing,
     pairing_breaks: Violations,
@@ -1365,12 +1512,30 @@ fn check(corpus: &Path) -> Result<Checks, ScoreError> {
         pairing_breaks: Violations::default(),
         compared: 0,
         unreadable: 0,
+        sides: Vec::new(),
         digest: digest.finish(),
         arm: arm_of(&facts),
     };
 
     for sample in Samples::open(corpus)? {
         let sample = sample?;
+
+        // Recorded for EVERY sample and in corpus order, so the mask lines up
+        // with the labels built from the same walk. A stego row takes its
+        // cover's side, because the split is a property of the cover and
+        // reading the row's own value would let a corpus put a pair on both
+        // sides of it.
+        let side = match (&sample.role, &sample.cover) {
+            (Role::Clean, _) => sample.split.as_deref().and_then(Side::parse),
+            (_, Some(name)) => covers
+                .get(name)
+                .and_then(|c| c.split.as_deref())
+                .and_then(Side::parse)
+                .or_else(|| sample.split.as_deref().and_then(Side::parse)),
+            (_, None) => sample.split.as_deref().and_then(Side::parse),
+        };
+        checks.sides.push(side);
+
         if sample.role != Role::Stego {
             continue;
         }
@@ -1743,6 +1908,7 @@ mod tests {
             records: dir.with_extension("records.jsonl"),
             timeout: Duration::from_secs(5),
             limit,
+            split: None,
         }
     }
 
@@ -1751,7 +1917,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         corpus(&root, 2, 2);
-        let feed = Feed::open(&root, None).expect("opens");
+        let feed = Feed::filtered(&root, None, None).expect("opens");
         let ids: Vec<String> = feed.map(|w| w.id).collect();
         assert_eq!(ids, ["c000", "c001", "s000", "s001"]);
     }
@@ -1763,7 +1929,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("corpus");
         corpus(&root, 4, 4);
-        let feed = Feed::open(&root, Some(3)).expect("opens");
+        let feed = Feed::filtered(&root, Some(3), None).expect("opens");
         assert_eq!(feed.count(), 3);
     }
 
@@ -1777,7 +1943,7 @@ mod tests {
         corpus(&root, 2, 2);
         // An image with no record beside it.
         std::fs::write(root.join("orphan.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        let mut feed = Feed::open(&root, None).expect("opens");
+        let mut feed = Feed::filtered(&root, None, None).expect("opens");
         let seen = feed.by_ref().count();
         assert!(
             feed.fault.is_some(),
@@ -2072,6 +2238,143 @@ mod tests {
         let entry = sizing_detector(tmp.path());
         let err = score(&entry, &request(&root, None), |_| {}).expect_err("refused");
         assert!(err.to_string().contains("different side"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoring_the_test_half_leaves_the_train_half_out_and_says_which_it_used() {
+        // The point of the flag. A detector trained on this corpus can only
+        // be measured on the half it never saw, and the number is worthless
+        // unless the document says which half that was: a reader comparing
+        // two results cannot tell a held-out score from a whole-corpus one
+        // by looking at the figure.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, false);
+
+        let prepared = prepare(&root, None, None, None, Some("test"), |_| {}).expect("prepared");
+        assert_eq!(prepared.side, Some(Side::Test));
+        // Cover 0 and its twin are the test half; the other two pairs are not.
+        assert_eq!(prepared.items(), 2);
+        assert_eq!(prepared.keep, [true, false, false, true, false, false]);
+
+        let entry = sizing_detector(tmp.path());
+        let (doc, _) = score_one(
+            &entry,
+            &prepared,
+            &root.with_extension("t.jsonl"),
+            Duration::from_secs(5),
+            &[],
+            |_| {},
+        )
+        .expect("scored");
+        assert_eq!(doc.corpus.split.as_deref(), Some("test"));
+        assert_eq!(doc.corpus.pairs, 1, "one stego image in the test half");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoring_the_train_half_covers_the_samples_the_test_half_did_not() {
+        // The two halves partition the corpus. If they overlapped, a detector
+        // could be trained and measured on the same photograph without either
+        // command saying anything was wrong.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, false);
+
+        let test = prepare(&root, None, None, None, Some("test"), |_| {}).expect("test half");
+        let train = prepare(&root, None, None, None, Some("train"), |_| {}).expect("train half");
+        assert_eq!(train.side, Some(Side::Train));
+        assert_eq!(train.items(), 4);
+        for (a, b) in test.keep.iter().zip(train.keep.iter()) {
+            assert!(
+                !(*a && *b),
+                "a sample landed in both halves: {:?}",
+                test.keep
+            );
+        }
+        let both: Vec<bool> = test
+            .keep
+            .iter()
+            .zip(train.keep.iter())
+            .map(|(a, b)| *a || *b)
+            .collect();
+        assert!(both.iter().all(|x| *x), "a sample landed in neither half");
+    }
+
+    #[test]
+    fn a_whole_corpus_run_records_no_split_rather_than_guessing_one() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, false);
+        let prepared = prepare(&root, None, None, None, None, |_| {}).expect("prepared");
+        assert_eq!(prepared.side, None);
+        assert_eq!(prepared.items(), 6);
+    }
+
+    #[test]
+    fn asking_for_a_half_of_a_corpus_that_has_none_is_refused() {
+        // Inventing a split here would put a cover and its twin on opposite
+        // sides, which is the exact fault the whole split discipline exists
+        // to prevent. Silently scoring everything instead would be worse: the
+        // caller asked for a held-out number and would get a whole-corpus one.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 2, 2);
+        let err = prepare(&root, None, None, None, Some("test"), |_| {})
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("no train and test split"), "{err}");
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn a_side_that_is_not_a_side_is_a_usage_error_naming_both_halves() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, false);
+        let err = prepare(&root, None, None, None, Some("holdout"), |_| {})
+            .err()
+            .expect("refused");
+        let text = err.to_string();
+        assert!(text.contains("holdout"), "{text}");
+        assert!(text.contains("train") && text.contains("test"), "{text}");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_half_holding_one_class_is_refused_and_the_message_names_the_half() {
+        // A filter can make a two-class corpus one-sided, and the refusal
+        // then has to say the half rather than the corpus: the directory is
+        // fine and re-running without --split would work.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        // The test half is a lone clean image; both stego images are train.
+        for (name, body) in [
+            ("c0.json", r#"{"role":"clean","split":"test","sha256":"0"}"#),
+            (
+                "c1.json",
+                r#"{"role":"clean","split":"train","sha256":"0"}"#,
+            ),
+        ] {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        std::fs::write(root.join("c0.png"), png(32, 32, 8, 2, 0)).unwrap();
+        std::fs::write(root.join("c1.png"), png(32, 32, 8, 2, 0)).unwrap();
+        std::fs::write(root.join("s1.png"), png(32, 32, 8, 2, 64)).unwrap();
+        std::fs::write(
+            root.join("s1.json"),
+            r#"{"role":"stego","source_png":"c1.png","split":"train","sha256":"0"}"#,
+        )
+        .unwrap();
+
+        let err = prepare(&root, None, None, None, Some("test"), |_| {})
+            .err()
+            .expect("refused");
+        let text = err.to_string();
+        assert!(text.contains("test split"), "{text}");
+        assert!(text.contains("has not been measured"), "{text}");
     }
 
     #[test]
@@ -2674,7 +2977,7 @@ mod tests {
         let entry = registered_corpus(Some(&digest));
 
         let mut lines: Vec<String> = Vec::new();
-        let prepared = prepare(&root, Some(&entry), None, None, |l: &str| {
+        let prepared = prepare(&root, Some(&entry), None, None, None, |l: &str| {
             lines.push(l.to_string())
         })
         .expect("prepared");

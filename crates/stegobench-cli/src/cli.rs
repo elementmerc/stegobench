@@ -316,6 +316,20 @@ pub enum Command {
         /// and each detector gets its own file inside them.
         #[arg(long, value_name = "NAME", num_args = 1.., required = true)]
         detector: Vec<String>,
+        /// Score only one half of the train and test split.
+        ///
+        /// `test` is the one a trained detector's number has to come from.
+        /// Without this every run covers train and test together, which is
+        /// harmless for a detector that learned nothing and makes the figure
+        /// unquotable for one that did, while `split_discipline: by-cover`
+        /// in the document still reads as though a held-out set was used.
+        ///
+        /// A stego image takes its cover's side, because the split is a
+        /// property of the cover. Refused on a corpus whose records carry no
+        /// split, and on one where the half you asked for has only clean or
+        /// only stego images in it.
+        #[arg(long, value_name = "SIDE", value_parser = ["train", "test"])]
+        split: Option<String>,
         /// Which registered corpus the directory holds. See
         /// `stegobench list corpora`.
         ///

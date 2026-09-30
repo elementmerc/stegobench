@@ -92,3 +92,27 @@ makes the number wrong while it still looks right.
 A cover and its stego versions are near-identical, so a random split puts a
 cover in training and its own stego copy in test. Group by `source_png`. See
 [Limitations](/guide/limits).
+
+## Scoring one half
+
+If your detector was trained on part of this corpus, the only honest number
+comes from the part it never saw:
+
+```
+stegobench score --corpus pentimento-core --detector mine --split test
+```
+
+Two things happen. The run keeps only the samples the corpus labels `test`,
+and it says how many it left out. The result document then records
+`corpus.split: "test"`, so a reader comparing two figures can tell a held-out
+score from a whole-corpus one; from the number alone they cannot.
+
+Records are kept per half, in `<corpus>.<detector>.test.records.jsonl`, so an
+interrupted half resumes into itself and never into the whole-corpus run
+beside it.
+
+Two refusals to expect. A corpus whose records state no `split` has no half to
+score, and stegobench refuses rather than inventing a boundary that would
+separate a cover from its twin. A half holding only clean images, or only
+stego ones, is refused for the same reason any one-sided corpus is: a detector
+asked a leading question has not been measured.

@@ -1464,6 +1464,8 @@ struct ScoreRequest<'a> {
     corpus_id: Option<&'a str>,
     /// The corpus the detector was trained on, as the user declared it.
     trained_on: Option<&'a str>,
+    /// Which half of the train and test split to score, if only one.
+    split: Option<&'a str>,
     records: Option<&'a Path>,
     out: Option<&'a Path>,
     timeout: u64,
@@ -1476,6 +1478,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         detectors,
         corpus_id,
         trained_on,
+        split,
         records,
         out,
         timeout,
@@ -1630,7 +1633,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         "establishing what the corpus is, once, for {} detector(s)",
         runnable.len()
     ));
-    let prepared = match score::prepare(corpus, registered, limit, trained_on, say) {
+    let prepared = match score::prepare(corpus, registered, limit, trained_on, split, say) {
         Ok(p) => p,
         Err(e) => return Output::err(e.exit_code(), e.to_string()),
     };
@@ -1641,7 +1644,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     ));
 
     for (i, entry) in runnable.iter().enumerate() {
-        let records_path = records_for(corpus, records, &out_dir, &entry.name, many);
+        let records_path = records_for(corpus, records, &out_dir, &entry.name, many, prepared.side);
         // Counted against what CAN run rather than against what was asked for,
         // so "1 of 2" beside a third skipped detector does not read as a
         // miscount. The ratio of asked to measured is the summary's job and it
@@ -1736,14 +1739,25 @@ fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<P
 /// scores under its own name, with a resumed count that looked like a feature.
 /// A records file is a record of what one subject said about one corpus, so
 /// the name says both.
+///
+/// The split is the third part of that key, for the same reason. `--split
+/// test` scores a subset in a different order, so a records file written for
+/// the whole corpus does not line up with it; the resume check catches the
+/// mismatch and refuses, which is correct but reads as "the corpus changed"
+/// when nothing changed except which half was asked for. Keying the name on
+/// the split means the two runs never meet in the first place.
 fn records_for(
     corpus: &Path,
     records: Option<&Path>,
     out_dir: &Option<PathBuf>,
     detector: &str,
     many: bool,
+    split: Option<score::Side>,
 ) -> PathBuf {
-    let file = format!("{detector}.records.jsonl");
+    let file = match split {
+        Some(side) => format!("{detector}.{}.records.jsonl", side.as_str()),
+        None => format!("{detector}.records.jsonl"),
+    };
     match (records, many, out_dir) {
         // One detector and an explicit path: exactly what the caller asked
         // for, because they named one run's file and there is one run.
@@ -2430,6 +2444,7 @@ fn run(cli: &Cli) -> Output {
             detector,
             corpus_id,
             trained_on,
+            split,
             records,
             out,
             timeout,
@@ -2442,6 +2457,7 @@ fn run(cli: &Cli) -> Output {
                     detectors: detector.as_slice(),
                     corpus_id: corpus_id.as_deref(),
                     trained_on: trained_on.as_deref(),
+                    split: split.as_deref(),
                     records: records.as_deref(),
                     out: out.as_deref(),
                     timeout: *timeout,
@@ -2653,6 +2669,60 @@ fn main() {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_half_corpus_run_keeps_its_own_records_file() {
+        // The same collision the detector name already fixed, one dimension
+        // along. `--split test` scores a subset in a different order, so a
+        // records file written for the whole corpus does not line up with it.
+        // Sharing the name makes the resume check refuse with "the corpus has
+        // changed", which is true of nothing: the corpus is identical and only
+        // the question was narrowed.
+        let corpus = PathBuf::from("/data/pentimento-core");
+        let whole = records_for(&corpus, None, &None, "stegcore", false, None);
+        let test = records_for(
+            &corpus,
+            None,
+            &None,
+            "stegcore",
+            false,
+            Some(score::Side::Test),
+        );
+        let train = records_for(
+            &corpus,
+            None,
+            &None,
+            "stegcore",
+            false,
+            Some(score::Side::Train),
+        );
+        assert_ne!(whole, test);
+        assert_ne!(test, train);
+        assert!(
+            test.to_string_lossy()
+                .ends_with("stegcore.test.records.jsonl"),
+            "{}",
+            test.display()
+        );
+    }
+
+    #[test]
+    fn a_records_path_the_caller_named_is_used_whatever_the_split() {
+        // An explicit path is an instruction, not a suggestion. Decorating it
+        // with the split would write somewhere the caller did not ask for and
+        // leave them looking at an empty file.
+        let corpus = PathBuf::from("/data/corpus");
+        let asked = PathBuf::from("/tmp/mine.jsonl");
+        let got = records_for(
+            &corpus,
+            Some(&asked),
+            &None,
+            "stegcore",
+            false,
+            Some(score::Side::Test),
+        );
+        assert_eq!(got, asked);
+    }
 
     /// Every code `stegobench_core::exit` publishes, which is what the help
     /// text, `llms.txt` and the man page all print as the contract.
@@ -3340,6 +3410,7 @@ mod tests {
                 out: None,
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(out.code, exit::PREFLIGHT_REFUSED);
@@ -3898,6 +3969,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
 
@@ -3938,6 +4010,7 @@ mod tests {
                 out: Some(&target),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
 
@@ -3975,6 +4048,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
 
@@ -4034,6 +4108,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert!(
@@ -4073,6 +4148,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert!(
@@ -4108,6 +4184,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(out.code, exit::OK, "{}", out.human);
@@ -4147,6 +4224,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(out.code, exit::OK, "{}", out.human);
@@ -4189,6 +4267,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(first.code, exit::OK, "{}", first.human);
@@ -4204,6 +4283,7 @@ mod tests {
                 out: Some(&out_dir),
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(second.code, exit::OK, "{}", second.human);
@@ -4236,6 +4316,7 @@ mod tests {
                 out: None,
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         let expected = tmp.path().join("corpus.results");
@@ -4269,6 +4350,7 @@ mod tests {
                 out: None,
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(out.code, exit::OK, "{}", out.human);
@@ -4311,6 +4393,7 @@ mod tests {
                 out: None,
                 timeout: 5,
                 limit: None,
+                split: None,
             },
         );
         assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
@@ -4475,6 +4558,7 @@ mod tests {
                         out: None,
                         timeout: 5,
                         limit: None,
+                        split: None,
                     },
                 )
             };

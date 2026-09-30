@@ -301,6 +301,24 @@ applied:
 
 The corpus manifest carries a `split_salt` per tier specifically so this \
 assignment is deterministic and auditable rather than re-rolled per run.
+
+SCORING ONE HALF
+
+  stegobench score --corpus <name> --detector <name> --split test
+
+A detector that learned from part of this corpus can only be measured on the \
+part it never saw. `--split test` keeps the samples the corpus labels `test` \
+and says how many it left out, and the document records `corpus.split` so a \
+reader can tell a held-out figure from a whole-corpus one. Nothing in the \
+number itself says which it is.
+
+Without the flag a run covers both halves, which is harmless for a detector \
+that learned nothing and makes the figure unquotable for one that did. \
+Records are kept per half, so an interrupted half resumes into itself.
+
+A corpus whose records state no split is refused rather than given an \
+invented one, and so is a half that turns out to hold only clean or only \
+stego images.
 ";
 
 const LICENCES: &str = "\
