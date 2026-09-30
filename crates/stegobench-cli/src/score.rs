@@ -48,8 +48,8 @@ use stegobench_core::corpus::CorpusEntry;
 use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
-    Arm, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain, Host,
-    Isolation, Metrics, Pairing, PinnedBy, PluginRef, Provenance, Rate, RateUnit, Result1,
+    Arm, ArmMetrics, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain,
+    Host, Isolation, Metrics, Pairing, PinnedBy, PluginRef, Provenance, Rate, RateUnit, Result1,
     SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Sample, Samples};
@@ -258,6 +258,16 @@ pub struct Prepared {
     keep: Vec<bool>,
     /// The half being scored, where one was asked for.
     pub side: Option<Side>,
+    /// The distinct arm names this run covers, sorted, and an index into them
+    /// per scored sample.
+    ///
+    /// Interned for the same reason [`Side`] is an enum rather than a string:
+    /// a Core tier is 344,357 samples over 39 arms, and holding the name on
+    /// every sample is tens of megabytes to answer a question with 39
+    /// answers. `None` is a sample whose record names no arm, which every
+    /// clean image is.
+    arm_names: Vec<String>,
+    arms: Vec<Option<u16>>,
     /// When the shared preparation began, and how long it took.
     ///
     /// Every result written from this `Prepared` reports `started_utc` as the
@@ -555,6 +565,8 @@ where
 
     let mut labels = Vec::new();
     let mut keep = Vec::new();
+    let mut arm_names: Vec<String> = Vec::new();
+    let mut arms: Vec<Option<u16>> = Vec::new();
     for (i, sample) in Samples::open(corpus)?.enumerate() {
         let sample = sample?;
         let take = match wanted {
@@ -567,6 +579,7 @@ where
         keep.push(take);
         if take {
             labels.push(sample.role == Role::Stego);
+            arms.push(intern(&mut arm_names, arm_name_of(&sample)));
             if limit.is_some_and(|n| labels.len() as u64 >= n) {
                 break;
             }
@@ -609,6 +622,8 @@ where
         labels,
         keep,
         side: wanted,
+        arm_names,
+        arms,
         started_utc,
         preflight: started.elapsed(),
     })
@@ -672,7 +687,7 @@ where
     // come from the records, joined by position, because both are produced in
     // the same deterministic order and the runner refuses to continue when
     // they disagree.
-    let (scores, labels, errored) = join(records, &prepared.labels)?;
+    let (scores, labels, arms, errored) = join(records, &prepared.labels, &prepared.arms)?;
     let n_stego = labels.iter().filter(|l| **l).count() as u64;
     let n_clean = labels.len() as u64 - n_stego;
     if n_clean == 0 || n_stego == 0 {
@@ -802,7 +817,7 @@ where
 
     let (version, pinned_by) = pinning(entry);
 
-    let result = Result1 {
+    let mut result = Result1 {
         schema: RESULT_SCHEMA_ID.to_string(),
         subject: Subject {
             name: entry.name.clone(),
@@ -851,13 +866,14 @@ where
             n_clean,
             n_stego,
             n_error: errored,
+            per_arm: per_arm(&scores, &labels, &arms, &prepared.arm_names),
         },
         provenance: Provenance {
             seed: None,
             plugins: vec![PluginRef {
                 name: entry.name.clone(),
                 image: version,
-                determinism: Determinism::Nondeterministic,
+                determinism: entry.determinism.unwrap_or(Determinism::Unstated),
                 // Two fields because an entry can declare an image AND
                 // `invoke.host`: the image digest names the subject while what
                 // executes is an adapter here that posts to a running
@@ -895,7 +911,11 @@ where
             trained_on: prepared.trained_on.clone(),
             self_reported: false,
         },
+        content_digest: None,
     };
+    // Last, because it covers every other field. Sealing earlier would digest
+    // a document that did not exist yet.
+    result.seal();
     Ok((result, tally))
 }
 
@@ -1688,11 +1708,46 @@ fn difference(cover: Shape, stego: Shape) -> Option<String> {
     None
 }
 
+/// The arm a sample belongs to, or `None` where its record names none.
+///
+/// A clean image has no arm by construction: it is the thing every arm is
+/// measured against. `None` here means "not part of any arm", not "unknown".
+fn arm_name_of(sample: &stegobench_core::samples::Sample) -> Option<&str> {
+    if sample.role != Role::Stego {
+        return None;
+    }
+    sample.arm.name.as_deref()
+}
+
+/// The index of `name` in `table`, adding it if it is new.
+///
+/// Linear because a corpus has tens of arms, not thousands, and a map would
+/// cost more in allocation than the scan saves. Refuses to grow past
+/// `u16::MAX` distinct arms rather than wrapping the index: a corpus with
+/// 65,536 arms is a corrupt corpus, and a wrapped index would silently file
+/// one arm's scores under another's name.
+fn intern(table: &mut Vec<String>, name: Option<&str>) -> Option<u16> {
+    let name = name?;
+    if let Some(i) = table.iter().position(|n| n == name) {
+        return u16::try_from(i).ok();
+    }
+    if table.len() >= u16::MAX as usize {
+        return None;
+    }
+    table.push(name.to_string());
+    u16::try_from(table.len() - 1).ok()
+}
+
 /// Scores and labels, joined by position.
 ///
 /// The labels are handed in rather than re-read, because they are a property
 /// of the corpus and every detector of one command shares them.
-fn join(records: &Path, labels: &[bool]) -> Result<(Vec<f64>, Vec<bool>, u64), ScoreError> {
+#[allow(clippy::type_complexity)]
+fn join(
+    records: &Path,
+    labels: &[bool],
+    arms: &[Option<u16>],
+) -> Result<(Vec<f64>, Vec<bool>, Vec<Option<u16>>, u64), ScoreError> {
     let file = std::fs::File::open(records).map_err(|e| ScoreError::Records {
         path: records.display().to_string(),
         source: e,
@@ -1700,7 +1755,15 @@ fn join(records: &Path, labels: &[bool]) -> Result<(Vec<f64>, Vec<bool>, u64), S
     let mut scores = Vec::new();
     let mut errored = 0;
     let mut kept = Vec::new();
-    for (line, label) in BufReader::new(file).lines().zip(labels.iter()) {
+    // Carried alongside rather than re-derived, because an unanswered item
+    // drops out here and a per-arm count taken from the corpus afterwards
+    // would claim images the detector never scored.
+    let mut kept_arms = Vec::new();
+    for ((line, label), arm) in BufReader::new(file)
+        .lines()
+        .zip(labels.iter())
+        .zip(arms.iter().chain(std::iter::repeat(&None)))
+    {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
@@ -1715,6 +1778,7 @@ fn join(records: &Path, labels: &[bool]) -> Result<(Vec<f64>, Vec<bool>, u64), S
             Some(s) => {
                 scores.push(s);
                 kept.push(*label);
+                kept_arms.push(*arm);
             }
             // An item the tool could not answer about is counted, never
             // guessed at. A metric computed over the survivors of a partly
@@ -1723,7 +1787,67 @@ fn join(records: &Path, labels: &[bool]) -> Result<(Vec<f64>, Vec<bool>, u64), S
             None => errored += 1,
         }
     }
-    Ok((scores, kept, errored))
+    Ok((scores, kept, kept_arms, errored))
+}
+
+/// One AUC per arm, each against the whole clean set.
+///
+/// Returns empty for a corpus with fewer than two named arms, because a
+/// breakdown with one row is the headline figure printed twice and a reader
+/// would reasonably read two numbers as two measurements.
+fn per_arm(
+    scores: &[f64],
+    labels: &[bool],
+    arms: &[Option<u16>],
+    names: &[String],
+) -> Vec<ArmMetrics> {
+    let present: std::collections::BTreeSet<u16> = arms
+        .iter()
+        .zip(labels.iter())
+        .filter(|(_, stego)| **stego)
+        .filter_map(|(a, _)| *a)
+        .collect();
+    if present.len() < 2 {
+        return Vec::new();
+    }
+
+    let clean: Vec<f64> = scores
+        .iter()
+        .zip(labels.iter())
+        .filter(|(_, stego)| !**stego)
+        .map(|(s, _)| *s)
+        .collect();
+
+    let mut out = Vec::new();
+    for arm in present {
+        let mut s = clean.clone();
+        let mut l = vec![false; clean.len()];
+        for ((score, stego), a) in scores.iter().zip(labels.iter()).zip(arms.iter()) {
+            if *stego && *a == Some(arm) {
+                s.push(*score);
+                l.push(true);
+            }
+        }
+        // Skipped rather than reported as zero. An arm the detector answered
+        // nothing about has not been measured, and a row saying `auc: 0` for
+        // it would read as a detector that got everything wrong.
+        let Some(auc) = stegobench_metrics::roc_auc(&s, &l) else {
+            continue;
+        };
+        let n_stego = l.iter().filter(|x| **x).count() as u64;
+        out.push(ArmMetrics {
+            arm: names
+                .get(arm as usize)
+                .cloned()
+                .unwrap_or_else(|| arm.to_string()),
+            auc,
+            auc_ci95: stegobench_metrics::roc_auc_interval(&s, &l, stegobench_metrics::Z_95)
+                .map(|ci| [ci.low, ci.high]),
+            n_clean: clean.len() as u64,
+            n_stego,
+        });
+    }
+    out
 }
 
 /// What machine this ran on, as far as it can be established portably.
@@ -2300,6 +2424,79 @@ mod tests {
             .map(|(a, b)| *a || *b)
             .collect();
         assert!(both.iter().all(|x| *x), "a sample landed in neither half");
+    }
+
+    #[test]
+    fn two_arms_are_measured_separately_against_the_shared_clean_set() {
+        // Detection at one payload rate and at another are different
+        // questions. Pooling them answers neither: the headline lands
+        // between the two and describes no arm that exists.
+        let names = vec!["weak-0100".to_string(), "loud-0400".to_string()];
+        // Two clean, then two of each arm. The loud arm is separable and the
+        // weak one is not, which is the shape a real corpus has.
+        let scores = vec![0.1, 0.2, 0.15, 0.25, 0.9, 0.95];
+        let labels = vec![false, false, true, true, true, true];
+        let arms = vec![None, None, Some(0), Some(0), Some(1), Some(1)];
+
+        let rows = per_arm(&scores, &labels, &arms, &names);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let weak = rows.iter().find(|r| r.arm == "weak-0100").expect("weak");
+        let loud = rows.iter().find(|r| r.arm == "loud-0400").expect("loud");
+
+        assert_eq!(weak.n_clean, 2);
+        assert_eq!(weak.n_stego, 2);
+        assert_eq!(loud.n_clean, 2, "the clean set is shared, not divided");
+        assert_eq!(loud.n_stego, 2);
+        assert!(
+            loud.auc > weak.auc,
+            "the separable arm should score higher: {rows:?}"
+        );
+        assert_eq!(loud.auc, 1.0);
+    }
+
+    #[test]
+    fn one_arm_gets_no_breakdown_because_it_would_be_the_headline_twice() {
+        let names = vec!["only-0100".to_string()];
+        let scores = vec![0.1, 0.9];
+        let labels = vec![false, true];
+        let arms = vec![None, Some(0)];
+        assert!(per_arm(&scores, &labels, &arms, &names).is_empty());
+    }
+
+    #[test]
+    fn a_corpus_whose_records_name_no_arm_gets_no_breakdown() {
+        let scores = vec![0.1, 0.2, 0.9, 0.95];
+        let labels = vec![false, false, true, true];
+        let arms = vec![None, None, None, None];
+        assert!(per_arm(&scores, &labels, &arms, &[]).is_empty());
+    }
+
+    #[test]
+    fn an_arm_the_detector_answered_nothing_about_is_left_out_not_scored_zero() {
+        // A row saying `auc: 0` would read as a detector that got everything
+        // wrong, which is a claim about the detector. Nothing was measured.
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let scores = vec![0.1, 0.9, 0.8];
+        let labels = vec![false, true, true];
+        let arms = vec![None, Some(0), Some(1)];
+        let rows = per_arm(&scores, &labels, &arms, &names);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows.iter().any(|r| r.arm == "c"), "{rows:?}");
+    }
+
+    #[test]
+    fn the_arm_table_holds_one_entry_per_distinct_name_however_often_it_repeats() {
+        // The scale rule: a Core tier is 344,357 samples over 39 arms, and
+        // holding the name on every sample is tens of megabytes to answer a
+        // question with 39 answers.
+        let mut table = Vec::new();
+        for _ in 0..1000 {
+            assert_eq!(intern(&mut table, Some("wow-0200")), Some(0));
+            assert_eq!(intern(&mut table, Some("hill-0400")), Some(1));
+        }
+        assert_eq!(table.len(), 2);
+        assert_eq!(intern(&mut table, None), None);
+        assert_eq!(table.len(), 2, "None must not become an arm");
     }
 
     #[test]

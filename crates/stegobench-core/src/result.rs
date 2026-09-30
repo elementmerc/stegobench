@@ -38,6 +38,46 @@ pub struct Result1 {
     pub metrics: Metrics,
     pub provenance: Provenance,
     pub declarations: Declarations,
+    /// A digest over everything in this document except when it was run.
+    ///
+    /// Reproduction is the claim this whole format exists to support, and
+    /// checking it used to mean diffing two documents and knowing which two
+    /// fields to forgive. Two runs of the same detector over the same corpus
+    /// differ in `provenance.started_utc` and `provenance.elapsed_seconds`
+    /// and in nothing else, so a digest that leaves those out turns the
+    /// check into a string comparison a script can do in one line.
+    ///
+    /// Optional because a hand-written or submitted document need not carry
+    /// one, and absent is honest: it means nobody offered a digest, not that
+    /// the document failed to match one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+}
+
+impl Result1 {
+    /// What [`Result1::content_digest`] should hold for this document.
+    ///
+    /// Excludes the two timing fields and the digest itself, since a digest
+    /// cannot cover its own value. `serde_json` orders object keys, so two
+    /// runs serialise identically without a canonicalisation pass of our own.
+    pub fn compute_content_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut v = serde_json::to_value(self).expect("a result document serialises");
+        if let Some(o) = v.as_object_mut() {
+            o.remove("content_digest");
+            if let Some(p) = o.get_mut("provenance").and_then(|p| p.as_object_mut()) {
+                p.remove("started_utc");
+                p.remove("elapsed_seconds");
+            }
+        }
+        let bytes = serde_json::to_vec(&v).expect("a json value serialises");
+        format!("{:x}", Sha256::new().chain_update(&bytes).finalize())
+    }
+
+    /// Fill in [`Result1::content_digest`] from the document's own contents.
+    pub fn seal(&mut self) {
+        self.content_digest = Some(self.compute_content_digest());
+    }
 }
 
 /// What was measured.
@@ -200,6 +240,40 @@ pub struct Metrics {
     /// of a partly failed run is how an evaluation misleads without anyone
     /// intending it.
     pub n_error: u64,
+    /// The same measurement taken again within each arm.
+    ///
+    /// Detection at 0.1 bits per pixel and detection at 0.4 are different
+    /// questions, and a corpus holding both answers neither when the two are
+    /// pooled: the headline AUC lands somewhere between them and describes no
+    /// arm that exists. A reader calibrating a threshold needs the arm, not
+    /// the average over a mixture whose proportions came from how the corpus
+    /// happened to be built.
+    ///
+    /// Empty when the corpus holds one arm, or none that its records name,
+    /// because a breakdown with one row is the headline figure written twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_arm: Vec<ArmMetrics>,
+}
+
+/// One arm's share of a measurement.
+///
+/// The clean images are shared. Every arm is scored against the whole clean
+/// set rather than against a slice of it, because the clean images are not
+/// part of any arm: an arm is a way of hiding something, and an image with
+/// nothing hidden in it belongs to all of them equally. Splitting the covers
+/// between arms would shrink each comparison for no reason and make the arms
+/// disagree about what a false alarm is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ArmMetrics {
+    /// The arm as its records name it, such as `wow-0200`.
+    pub arm: String,
+    pub auc: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auc_ci95: Option<[f64; 2]>,
+    /// Shared with every other arm in this document, and repeated on each row
+    /// so a row can be read on its own.
+    pub n_clean: u64,
+    pub n_stego: u64,
 }
 
 /// Everything needed to run it again.
@@ -298,6 +372,14 @@ pub enum Determinism {
     /// They do not, and a result from this plugin says so rather than being
     /// presented as reproducible.
     Nondeterministic,
+    /// Nobody has recorded whether two runs agree.
+    ///
+    /// Here for the same reason `Isolation::Unstated` is: the alternative is
+    /// a default standing in silently for a measurement. `Nondeterministic`
+    /// was that default for every entry in the registry, so every report
+    /// carried the warning and none of them meant it, which is the same as
+    /// carrying no warning at all.
+    Unstated,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -542,6 +624,71 @@ impl Result1 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn two_runs_that_differ_only_in_when_they_ran_seal_to_the_same_digest() {
+        // The whole point. Reproduction used to mean diffing two documents
+        // and knowing which two fields to forgive; now it is a string
+        // comparison, which a script can do and a reader can eyeball.
+        let mut a = sample();
+        let mut b = sample();
+        b.provenance.started_utc = "2030-01-01T00:00:00Z".into();
+        b.provenance.elapsed_seconds = a.provenance.elapsed_seconds + 41.5;
+        a.seal();
+        b.seal();
+        assert_eq!(a.content_digest, b.content_digest);
+        assert!(a.content_digest.is_some());
+    }
+
+    #[test]
+    fn a_different_number_seals_to_a_different_digest() {
+        let mut a = sample();
+        let mut b = sample();
+        b.metrics.auc = a.metrics.auc / 2.0;
+        assert_ne!(
+            a.metrics.auc, b.metrics.auc,
+            "the fixture must carry an auc"
+        );
+        a.seal();
+        b.seal();
+        assert_ne!(a.content_digest, b.content_digest);
+    }
+
+    #[test]
+    fn a_different_corpus_seals_to_a_different_digest() {
+        // Two identical numbers measured on different bytes are different
+        // results, and this is the field that says so.
+        let mut a = sample();
+        let mut b = sample();
+        b.corpus.digest = "0".repeat(64);
+        a.seal();
+        b.seal();
+        assert_ne!(a.content_digest, b.content_digest);
+    }
+
+    #[test]
+    fn sealing_twice_does_not_change_the_answer() {
+        // A digest cannot cover its own value, so the second seal has to see
+        // the same bytes as the first. Getting this wrong would make the
+        // field depend on how many times it was written.
+        let mut a = sample();
+        a.seal();
+        let once = a.content_digest.clone();
+        a.seal();
+        assert_eq!(once, a.content_digest);
+    }
+
+    #[test]
+    fn a_document_carrying_no_digest_round_trips_without_growing_one() {
+        // Absent means nobody offered one. A submitted document is allowed
+        // to say nothing here, and reading it must not invent an answer.
+        let a = sample();
+        assert_eq!(a.content_digest, None);
+        let text = serde_json::to_string(&a).unwrap();
+        assert!(!text.contains("content_digest"), "{text}");
+        let back: Result1 = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.content_digest, None);
+    }
+
     fn sample() -> Result1 {
         Result1 {
             schema: RESULT_SCHEMA_ID.into(),
@@ -575,6 +722,7 @@ mod tests {
                 verdict_rate: None,
                 n_clean: 300,
                 n_stego: 300,
+                per_arm: Vec::new(),
                 n_error: 0,
             },
             provenance: Provenance {
@@ -599,6 +747,7 @@ mod tests {
                 trained_on: None,
                 self_reported: false,
             },
+            content_digest: None,
         }
     }
 
@@ -851,6 +1000,18 @@ mod tests {
             assert_eq!(serde_json::to_value(value).unwrap(), written);
             assert_eq!(
                 serde_json::from_value::<Isolation>(serde_json::json!(written)).unwrap(),
+                value
+            );
+        }
+        for (value, written) in [
+            (Determinism::Exact, "exact"),
+            (Determinism::Seeded, "seeded"),
+            (Determinism::Nondeterministic, "nondeterministic"),
+            (Determinism::Unstated, "unstated"),
+        ] {
+            assert_eq!(serde_json::to_value(value).unwrap(), written);
+            assert_eq!(
+                serde_json::from_value::<Determinism>(serde_json::json!(written)).unwrap(),
                 value
             );
         }

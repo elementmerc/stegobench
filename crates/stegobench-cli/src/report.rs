@@ -471,6 +471,22 @@ fn agreed(plugins: &[PluginRef], of: impl Fn(&PluginRef) -> &'static str) -> &'s
 
 /// Turns a document into a row, working out the conditions that go beside the
 /// number.
+/// The plugins in one result whose determinism is the given value.
+///
+/// Names them rather than counting, because the reader's next question after
+/// "this run is not reproducible" is always "which part of it".
+fn named(r: &Result1, want: Determinism) -> String {
+    let mut names: Vec<&str> = r
+        .provenance
+        .plugins
+        .iter()
+        .filter(|p| p.determinism == want)
+        .map(|p| p.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.join(", ")
+}
+
 fn to_row(source: &Path, r: Result1) -> Row {
     let pinned_by = agreed(&r.provenance.plugins, |p| match p.pinned_by {
         PinnedBy::ImageDigest => "image-digest",
@@ -528,12 +544,23 @@ fn to_row(source: &Path, r: Result1) -> Row {
     if r.corpus.digest.is_empty() {
         flags.push("NO CORPUS DIGEST: nobody can check which bytes this measured".to_string());
     }
-    if r.provenance
-        .plugins
-        .iter()
-        .any(|p| p.determinism == Determinism::Nondeterministic)
-    {
-        flags.push("NONDETERMINISTIC: two runs need not agree".to_string());
+    // Named rather than blanket, and the two cases are kept apart. This
+    // warning used to fire on every row in every report, because the value
+    // was hardcoded rather than read from anywhere, and a warning that is
+    // always on is one a reader learns to skip past. "Somebody measured this
+    // tool and it varies" and "nobody has checked" are different facts and
+    // only the first is a reason to distrust the number.
+    let varies = named(&r, Determinism::Nondeterministic);
+    if !varies.is_empty() {
+        flags.push(format!(
+            "NONDETERMINISTIC: two runs need not agree ({varies})"
+        ));
+    }
+    let unchecked = named(&r, Determinism::Unstated);
+    if !unchecked.is_empty() {
+        flags.push(format!(
+            "determinism unstated, so reproducibility is unverified ({unchecked})"
+        ));
     }
     if r.provenance.network_reachable {
         flags.push("the plugins could reach the network during this run".to_string());
@@ -1914,6 +1941,86 @@ mod tests {
         assert!(
             !text.contains("structural at"),
             "a rateless arm invented one"
+        );
+    }
+
+    #[test]
+    fn the_nondeterminism_warning_names_the_plugin_it_is_about() {
+        // It used to fire on every row of every report, because the value was
+        // hardcoded rather than read from anywhere. A warning that is always
+        // on is one a reader stops seeing, and this one was also false: it
+        // said "two runs need not agree" about tools nobody had measured.
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Doc::default().value();
+        v["provenance"]["plugins"] = serde_json::json!([
+            {"name": "steady", "image": format!("sha256:{}", "c".repeat(64)), "determinism": "exact", "pinned_by": "executable-hash", "isolation": "host"},
+            {"name": "wobbly", "image": format!("sha256:{}", "d".repeat(64)), "determinism": "nondeterministic", "pinned_by": "executable-hash", "isolation": "host"},
+        ]);
+        std::fs::write(
+            dir.path().join("a.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
+        let text = flat(&render(
+            &build(&[dir.path().to_path_buf()]).unwrap(),
+            ReportFormat::Text,
+        ));
+        assert!(text.contains("NONDETERMINISTIC"), "{text}");
+        assert!(
+            text.contains("wobbly"),
+            "the warning should name it: {text}"
+        );
+        assert!(
+            !text.contains("NONDETERMINISTIC: two runs need not agree (steady"),
+            "the deterministic plugin was accused: {text}"
+        );
+    }
+
+    #[test]
+    fn a_report_of_deterministic_plugins_carries_no_determinism_warning() {
+        // The case that proves the flag can now clear. Before, it could not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Doc::default().value();
+        v["provenance"]["plugins"] = serde_json::json!([
+            {"name": "steady", "image": format!("sha256:{}", "c".repeat(64)), "determinism": "exact", "pinned_by": "executable-hash", "isolation": "host"},
+        ]);
+        std::fs::write(
+            dir.path().join("a.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
+        let text = flat(&render(
+            &build(&[dir.path().to_path_buf()]).unwrap(),
+            ReportFormat::Text,
+        ));
+        assert!(!text.contains("NONDETERMINISTIC"), "{text}");
+        assert!(!text.contains("determinism unstated"), "{text}");
+    }
+
+    #[test]
+    fn nobody_having_checked_is_said_differently_from_having_checked_and_found_drift() {
+        // Two different facts. Only one of them is a reason to distrust the
+        // number, and collapsing them is how the original warning came to
+        // mean nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Doc::default().value();
+        v["provenance"]["plugins"] = serde_json::json!([
+            {"name": "unchecked", "image": format!("sha256:{}", "c".repeat(64)), "determinism": "unstated", "pinned_by": "executable-hash", "isolation": "host"},
+        ]);
+        std::fs::write(
+            dir.path().join("a.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
+        let text = flat(&render(
+            &build(&[dir.path().to_path_buf()]).unwrap(),
+            ReportFormat::Text,
+        ));
+        assert!(text.contains("determinism unstated"), "{text}");
+        assert!(text.contains("unchecked"), "{text}");
+        assert!(
+            !text.contains("NONDETERMINISTIC"),
+            "an unmeasured tool was called nondeterministic: {text}"
         );
     }
 

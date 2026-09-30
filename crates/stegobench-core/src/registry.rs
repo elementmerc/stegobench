@@ -101,6 +101,15 @@ pub struct Entry {
     /// a manifest or in a result: see `secret_names`.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Whether two runs of this tool over the same image agree.
+    ///
+    /// Absent means nobody has checked, and a result written from such an
+    /// entry says `unstated` rather than picking a side. Declaring `exact`
+    /// is a claim about somebody else's program, so it belongs to whoever
+    /// measured it: most steganalysis detectors are deterministic, and
+    /// "most" is not evidence about the one in front of you.
+    #[serde(default)]
+    pub determinism: Option<crate::result::Determinism>,
     /// How to invoke the tool, for the tools that do not speak the plugin
     /// protocol themselves.
     ///
@@ -1279,6 +1288,31 @@ must_clear = "b.png"
     }
 
     const A_REAL_DIGEST: &str = "59710f7b5fbaeb7c3b1d4333e64654c1721a3ddb60b489d8e54d5d0e8b269bfb";
+
+    #[test]
+    fn an_entry_that_says_nothing_about_determinism_says_nothing() {
+        // The absence has to survive parsing as an absence. It used to be
+        // filled in downstream with `nondeterministic`, which made every
+        // report warn about every tool and told a reader nothing.
+        assert_eq!(parse("").determinism, None);
+    }
+
+    #[test]
+    fn an_entry_may_declare_that_two_runs_agree() {
+        assert_eq!(
+            parse("determinism = \"exact\"").determinism,
+            Some(crate::result::Determinism::Exact)
+        );
+        assert_eq!(
+            parse("determinism = \"nondeterministic\"").determinism,
+            Some(crate::result::Determinism::Nondeterministic)
+        );
+    }
+
+    #[test]
+    fn a_determinism_value_that_is_not_one_of_the_four_is_refused() {
+        assert!(toml::from_str::<Entry>(&minimal("determinism = \"probably\"")).is_err());
+    }
 
     #[test]
     fn a_container_entry_pinned_by_digest_is_valid() {
