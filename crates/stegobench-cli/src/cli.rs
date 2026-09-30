@@ -168,15 +168,27 @@ pub enum Command {
 
     /// Show everything registered about one tool or corpus
     ///
-    /// Takes a tool name or a corpus id.
+    /// Takes a tool name or a corpus id, never a path. A directory of samples
+    /// on this machine is not a registered thing and has nothing to describe;
+    /// `stegobench score --corpus <dir>` is what points at one of those.
+    ///
+    /// Prints a summary written for a reader. `--toml` prints the registered
+    /// entry verbatim instead, and nothing else, so it can be piped.
     ///
     /// Example:
     ///   stegobench describe steghide
-    ///   stegobench describe reveal
+    ///   stegobench describe reveal --toml
     Describe {
-        /// A name or id as `list` prints it.
+        /// A tool name or a corpus id as `list` prints it. Not a path.
         #[arg(value_name = "NAME")]
         name: String,
+        /// Print the registered entry as TOML, and nothing else.
+        ///
+        /// The whole entry, byte for byte as the registry holds it, with no
+        /// summary above it and no advice below it, so a pipe receives one
+        /// document rather than a document with prose stapled to it.
+        #[arg(long)]
+        toml: bool,
     },
 
     /// Hide a payload in one image, with a registered embedder
@@ -307,6 +319,11 @@ pub enum Command {
     ///   stegobench score --corpus ./pentimento-nano --detector all --out ./results
     Score {
         /// A directory of samples: images with a JSON record beside each.
+        ///
+        /// A PATH, never a registered id. An id names a dataset somebody
+        /// publishes; this names the unpacked bytes on this machine. Get
+        /// those with `stegobench fetch <id> --tier <tier>`, unpack them,
+        /// then name the directory here and the id under --corpus-id.
         #[arg(long, value_name = "DIR")]
         corpus: std::path::PathBuf,
         /// Which registered detector to ask. See `stegobench list detectors`.
@@ -355,6 +372,9 @@ pub enum Command {
         ///
         /// With more than one detector this is a DIRECTORY, and each
         /// detector's records go in <dir>/<detector>.records.jsonl.
+        ///
+        /// Refused when it lands inside the corpus: a file written there
+        /// joins the corpus and the next run measures a different set.
         #[arg(long, value_name = "FILE")]
         records: Option<std::path::PathBuf>,
         /// Where to write the result-v1 document. Defaults to stdout.
@@ -362,6 +382,9 @@ pub enum Command {
         /// With more than one detector this is a DIRECTORY, created if it is
         /// not there, and each document is written to <dir>/<detector>.json.
         /// With no --out they go to <corpus>.results/ beside the corpus.
+        ///
+        /// Refused when it lands inside the corpus: a file written there
+        /// joins the corpus and the next run measures a different set.
         #[arg(long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
         /// Seconds any single image is given before the detector is killed and
@@ -452,6 +475,10 @@ pub enum Command {
     ///   stegobench fetch <corpus> --tier nano
     Fetch {
         /// A corpus id as `stegobench list corpora` prints it.
+        ///
+        /// An ID, never a path. This command exists to GET bytes you do not
+        /// have; a directory you already hold is scored directly with
+        /// `stegobench score --corpus <dir>`.
         #[arg(value_name = "CORPUS")]
         corpus: String,
         /// Which tier to fetch: the vocabulary the corpus publishes, such as
@@ -499,6 +526,10 @@ pub enum Command {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
         /// The corpus to check it against.
+        ///
+        /// A PATH to an unpacked corpus, never a registered id: this reads
+        /// the bytes, so it needs the bytes. `stegobench fetch <id>` is how
+        /// an id becomes a directory.
         #[arg(long, value_name = "DIR")]
         corpus: std::path::PathBuf,
         /// Compare the records only, without re-reading the images.

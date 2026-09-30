@@ -313,7 +313,9 @@ point at, a plugin is code you run. It has a licence, a download route and a
 cover count; it has no container image, no argv and no self-test.
 
 `stegobench list corpora` and `stegobench describe <id>` read them the same
-way they read a tool, so a user sees one registry. Where an entry declares a
+way they read a tool, so a user sees one registry. `describe` prints a summary
+written for a reader; `describe <id> --toml` prints the entry itself and
+nothing else, for a script. Where an entry declares a
 download route, `stegobench fetch <id> --tier <tier>` downloads it and checks
 the bytes against the SHA-256 and the size the entry declared in advance. A
 corpus whose terms don't permit redistribution is refused before a connection

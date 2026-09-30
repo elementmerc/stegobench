@@ -1296,7 +1296,7 @@ base_images = 8
             });
 
         match parsed.command {
-            Some(crate::cli::Command::Describe { name }) => {
+            Some(crate::cli::Command::Describe { name, .. }) => {
                 assert!(reg.corpora.contains_key(&name), "{name} is not registered");
             }
             Some(crate::cli::Command::Fetch { corpus, tier, .. }) => {

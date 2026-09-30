@@ -376,13 +376,12 @@ fn cmd_embed(
     }
 }
 
-fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
+fn cmd_describe(resolved: &Resolved, name: &str, toml_only: bool) -> Output {
     let reg = &resolved.registry;
-    // The needs block goes FIRST, above the entry, because it is the question
-    // somebody typing `describe` is usually asking. The TOML below it is the
-    // whole truth and is what they read second. One shape for every subject:
-    // a container, a binary, a service and a corpus all answer here, so a
-    // reader never has to know which of the four they are holding.
+    // The needs block goes FIRST, above the facts, because it is the question
+    // somebody typing `describe` is usually asking. One shape for every
+    // subject: a container, a binary, a service and a corpus all answer here,
+    // so a reader never has to know which of the four they are holding.
     if let Some(e) = reg.entries.get(name) {
         let needs = needs::of_tool(
             e,
@@ -393,7 +392,13 @@ fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
         if let Some(map) = json.as_object_mut() {
             map.insert("needs".into(), needs.to_json());
         }
-        return Output::ok(json, describe_block(&needs, e.name.as_str(), e, "tool"));
+        if toml_only {
+            return raw_toml(e, json, &e.name);
+        }
+        return Output::ok(
+            json,
+            describe_block(&needs, e.name.as_str(), "tool", &tool_facts(e)),
+        );
     }
     // One vocabulary: a corpus id is looked up in the same breath as a tool
     // name, because a user should not have to know which of the two a thing is
@@ -404,7 +409,13 @@ fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
         if let Some(map) = json.as_object_mut() {
             map.insert("needs".into(), needs.to_json());
         }
-        return Output::ok(json, describe_block(&needs, c.id.as_str(), c, "corpus"));
+        if toml_only {
+            return raw_toml(c, json, &c.id);
+        }
+        return Output::ok(
+            json,
+            describe_block(&needs, c.id.as_str(), "corpus", &corpus_facts(c)),
+        );
     }
     let known: Vec<_> = reg
         .entries
@@ -412,39 +423,255 @@ fn cmd_describe(resolved: &Resolved, name: &str) -> Output {
         .chain(reg.corpora.keys())
         .cloned()
         .collect();
-    Output::err(
-        exit::USAGE,
+    // A path here is the commonest way to reach this refusal with something
+    // that is not a typo, because `score` and `verify` both take a directory
+    // under a flag spelled almost the same way. Saying which of the two
+    // vocabularies this command speaks costs one line and saves the reader
+    // working it out from a list of names that does not contain theirs.
+    let mut human = if Path::new(name).exists() {
         format!(
-            "nothing registered as {name:?}. Known tools and corpora: {}",
-            known.join(", ")
-        ),
-    )
+            "{name:?} is a path on this machine, and `describe` takes a \
+             registered name or corpus id rather than a path. There is nothing \
+             registered under that name.\nTo measure a directory of samples:\n  \
+             stegobench score --corpus {name} --detector <name>\n"
+        )
+    } else {
+        let close = near_registered_names(reg, name);
+        let mut head = format!("nothing registered as {name:?}.");
+        if !close.is_empty() {
+            head.push_str(&format!(" Did you mean: {}?", close.join(", ")));
+        }
+        head.push('\n');
+        head
+    };
+    human.push_str(&format!("Known tools and corpora: {}", known.join(", ")));
+    Output::err(exit::USAGE, human)
 }
 
-/// What `describe` prints: the needs block, then the entry in full.
+/// The registered entry verbatim, and nothing else.
+///
+/// A serialisation failure is reported rather than papered over with the
+/// `Debug` rendering the summary path once fell back to: this output exists to
+/// be piped into a TOML parser, and handing that parser Rust's struct dump
+/// under exit zero is the silent wrong answer the flag is least able to afford.
+fn raw_toml<T: serde::Serialize>(entry: &T, json: serde_json::Value, name: &str) -> Output {
+    match toml::to_string_pretty(entry) {
+        Ok(text) => {
+            let mut out = Output::ok(json, text);
+            out.payload_on_stdout = true;
+            out
+        }
+        Err(e) => Output::err(
+            exit::FAILURE,
+            format!(
+                "the registered entry for {name} could not be written back as \
+                 TOML: {e}. `stegobench describe {name}` prints the summary, \
+                 and `--json` prints the same entry as JSON."
+            ),
+        ),
+    }
+}
+
+/// What `describe` prints: the readiness line, the facts, then what is needed.
 ///
 /// One renderer for a tool and for a corpus, on purpose. They are different
 /// types with different fields, and the thing a reader wants first is the same
 /// for both: whether they can use it, and what to type if not.
-fn describe_block<T: serde::Serialize + std::fmt::Debug>(
+///
+/// The whole entry USED TO BE PRINTED UNDERNEATH, as TOML. That put forty
+/// lines of registry between the reader and the next command, most of it
+/// fields only the harness reads, and a first-time user reported reading past
+/// the answer looking for it. The entry is still one flag away, under `--toml`,
+/// which prints it alone so a pipe gets a document rather than a document with
+/// prose around it.
+fn describe_block(
     needs: &needs::Needs,
     name: &str,
-    entry: &T,
     kind: &str,
+    facts: &[(&str, String)],
 ) -> String {
-    let body = toml::to_string_pretty(entry).unwrap_or_else(|_| format!("{entry:#?}"));
+    let width = facts.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let mut text = format!("{name}  [{}]\n", needs.readiness.word());
+    for (label, value) in facts {
+        text.push_str(&format!("{label:<width$}  {value}\n", width = width));
+    }
     let steps = needs.block();
     if steps.is_empty() {
-        return format!(
-            "{name}  [{}]\nNothing needed. `stegobench doctor` says whether \
-             this {kind} works.\n\n{body}",
-            needs.readiness.word()
-        );
+        text.push_str(&format!(
+            "\nNothing needed. `stegobench doctor` says whether this {kind} \
+             works.\n"
+        ));
+    } else {
+        text.push_str(&format!("\nNeeds from you:\n{steps}\n"));
     }
-    format!(
-        "{name}  [{}]\nNeeds from you:\n{steps}\n\n{body}",
-        needs.readiness.word()
-    )
+    text.push_str(&format!(
+        "\nThe registered entry in full: stegobench describe {name} --toml"
+    ));
+    text
+}
+
+/// The fields of a tool entry a person reads, in the order they ask for them.
+///
+/// A subset rather than everything: the rest is one `--toml` away, and a
+/// summary that reprints every field is the dump it replaced.
+fn tool_facts(e: &stegobench_core::registry::Entry) -> Vec<(&'static str, String)> {
+    let mut facts = vec![(
+        "Kind",
+        match e.kind {
+            Kind::Detector => "detector".to_string(),
+            Kind::Embedder => "embedder".to_string(),
+        },
+    )];
+    facts.push(("Licence", e.licence.clone()));
+    let runs = match (&e.image, &e.binary) {
+        (Some(i), _) => {
+            let sandbox = if e.invoke.as_ref().is_some_and(|i| i.host) {
+                "a service this only talks to, so its isolation is not ours to state"
+            } else if i.needs_network {
+                "a container, with network"
+            } else {
+                "a container, sandboxed with no network"
+            };
+            format!("{} ({sandbox})", i.reference)
+        }
+        (_, Some(b)) => format!(
+            "{} (a program you installed, no sandbox, your network)",
+            b.command.first().map(String::as_str).unwrap_or("a binary")
+        ),
+        _ => "nothing declared, so it cannot be run".to_string(),
+    };
+    facts.push(("Runs as", runs));
+    // The argv is in the summary rather than only in the entry because
+    // `stegobench help scope` sends the reader who wants to examine their own
+    // images here, to find the command that runs the tool directly. That
+    // reader is the one least able to go looking for it under another flag.
+    if let Some(argv) = e
+        .invoke
+        .as_ref()
+        .map(|i| &i.argv)
+        .filter(|a| !a.is_empty())
+        .or_else(|| {
+            e.binary
+                .as_ref()
+                .map(|b| &b.command)
+                .filter(|c| !c.is_empty())
+        })
+    {
+        facts.push(("Command", argv.join(" ")));
+    }
+    facts.push((
+        "Answers",
+        match e.emits.output {
+            stegobench_core::registry::Output::Score => {
+                if e.emits.higher_means_stego {
+                    "a score, higher means more like stego".to_string()
+                } else {
+                    "a score, lower means more like stego".to_string()
+                }
+            }
+            stegobench_core::registry::Output::Verdict => {
+                "a verdict, yes or no, so it gives one point and not a curve".to_string()
+            }
+        },
+    ));
+    if !e.accepts.formats.is_empty() {
+        facts.push(("Reads", e.accepts.formats.join(", ")));
+    }
+    if let Some(s) = e.cost.seconds_per_image {
+        facts.push(("Costs", format!("about {s} seconds an image")));
+    }
+    if let Some(u) = &e.upstream {
+        facts.push(("Upstream", u.clone()));
+    }
+    if let Some(n) = &e.notes {
+        facts.push(("Notes", n.clone()));
+    }
+    facts
+}
+
+/// The fields of a corpus entry a person reads, in the order they ask for them.
+///
+/// The licence block is not abbreviated to its identifier. Whether the terms
+/// were READ, and on what date, and whether a stego image derived from them may
+/// be published, are the three questions the registry exists to answer, and
+/// each one has a field precisely so a reader never has to infer it.
+fn corpus_facts(c: &stegobench_core::corpus::CorpusEntry) -> Vec<(&'static str, String)> {
+    use stegobench_core::corpus::{LicenceStatus, Redistribution};
+    let mut facts = vec![("Name", c.name.clone()), ("What", c.description.clone())];
+    if let Some(t) = &c.tier {
+        facts.push(("Tier", t.clone()));
+    }
+    let licence = match c.licence.status {
+        LicenceStatus::Verified => {
+            let named = c.licence.spdx.clone().unwrap_or_else(|| "verified".into());
+            let inferred = if c.licence.spdx_version_inferred {
+                ", version inferred rather than stated"
+            } else {
+                ""
+            };
+            match &c.licence.verified_on {
+                Some(day) => format!("{named}, verified_on {day}{inferred}"),
+                None => format!("{named}, verified{inferred}"),
+            }
+        }
+        LicenceStatus::Unverified => {
+            "UNVERIFIED: nobody has established the terms, so treat it as granting nothing"
+                .to_string()
+        }
+        LicenceStatus::NoneGranted => {
+            "NO LICENCE: there is no grant, which is not the same as none being found".to_string()
+        }
+    };
+    facts.push(("Licence", licence));
+    if let Some(src) = &c.licence.source {
+        facts.push(("Read from", src.clone()));
+    }
+    facts.push((
+        "Republish",
+        format!(
+            "{}: {}",
+            match c.licence.redistribution {
+                Redistribution::Permitted => "permitted",
+                Redistribution::Forbidden => "forbidden",
+                Redistribution::Unknown => "unknown, which any gate here treats as no",
+            },
+            c.licence.redistribution_reason
+        ),
+    ));
+    let size = match (c.properties.base_images, c.properties.total_images) {
+        (Some(b), Some(t)) => format!("{b} covers, {t} files in all"),
+        (Some(b), None) => format!("{b} covers"),
+        (None, Some(t)) => format!("{t} files"),
+        (None, None) => match (&c.properties.size_mb, &c.properties.size_note) {
+            (Some(mb), _) => format!("{mb} MB"),
+            (None, Some(note)) => note.clone(),
+            (None, None) => "size unestablished".to_string(),
+        },
+    };
+    facts.push(("Size", size));
+    if let Some(paired) = c.properties.paired {
+        facts.push((
+            "Paired",
+            if paired {
+                "yes, every stego image has its clean twin".to_string()
+            } else {
+                "NO, so it cannot answer the question this benchmark asks".to_string()
+            },
+        ));
+    }
+    if c.demonstration {
+        facts.push((
+            "Demonstration",
+            "yes: enough to prove a detector runs, nowhere near enough to measure one".to_string(),
+        ));
+    }
+    if let Some(cite) = &c.citation {
+        facts.push(("Cite as", cite.clone()));
+    }
+    if let Some(n) = &c.notes {
+        facts.push(("Notes", n.clone()));
+    }
+    facts
 }
 
 /// `fixtures` is `None` when the self-tests are not being run, which is the
@@ -1034,6 +1261,8 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         corpus_id,
         limit,
         timeout,
+        out,
+        records,
         ..
     }) = &parsed.command
     else {
@@ -1048,6 +1277,18 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         Ok(e) => e,
         Err(o) => return o,
     };
+
+    // The same refusals `score` gives, in the same order, because a plan that
+    // accepts a command `score` would reject has answered a question nobody
+    // can act on.
+    if let Some(refused) = corpus_argument_problem(Some(reg), corpus) {
+        return refused;
+    }
+    for (flag, path) in [("--out", out.as_deref()), ("--records", records.as_deref())] {
+        if let Some(why) = output_inside_corpus(corpus, flag, path) {
+            return Output::err(exit::USAGE, why);
+        }
+    }
 
     // The same teaching refusal `score` gives, for the same reason: somebody
     // asking what a run would cost over their own photographs is on the wrong
@@ -1367,6 +1608,233 @@ fn corpus_path_problem(corpus: &Path) -> Option<String> {
     }
 }
 
+/// What `--corpus` was given, after BOTH of its plausible meanings were tried.
+///
+/// WHY ONE FLAG HAS TWO PLAUSIBLE MEANINGS
+/// ---------------------------------------
+/// This tool says the word "corpus" in two vocabularies. `fetch` and
+/// `--corpus-id` take a registered ID, a name for a dataset somebody
+/// publishes. `score --corpus` and `verify --corpus` take a PATH, the unpacked
+/// bytes on this machine, because both of them read the bytes. A reader who
+/// learns one of those first types it at the other, and the answer they used
+/// to get was "there is no corpus at pentimento-core: nothing is there", which
+/// is true, unhelpful, and says nothing about the vocabulary they are in.
+///
+/// So a value that is not a directory is looked up as an id before it is
+/// refused, and the refusal says what was tried.
+///
+/// WHY EVERY ANSWER HERE IS EXIT 3 AND NOT EXIT 2
+/// ----------------------------------------------
+/// The two codes divide on a line this project has already drawn: 2 means the
+/// command line was malformed, and 3 means what you named is not there or not
+/// fit to use. `--corpus somewhere-that-is-not-there` is a well-formed command
+/// naming a thing that does not exist, which is the second. Only the WORDING
+/// changed here; the code is the one the contract test has asserted since
+/// before the two vocabularies were noticed.
+fn corpus_argument_problem(reg: Option<&Registry>, corpus: &Path) -> Option<Output> {
+    if matches!(std::fs::metadata(corpus), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return Some(unresolved_corpus(reg, corpus));
+    }
+    corpus_path_problem(corpus).map(|why| Output::err(exit::PREFLIGHT_REFUSED, why))
+}
+
+/// A `--corpus` value that is not a directory, answered by what it might be.
+fn unresolved_corpus(reg: Option<&Registry>, corpus: &Path) -> Output {
+    let typed = corpus.to_string_lossy().into_owned();
+    if reg.is_some_and(|r| r.corpora.contains_key(typed.as_str())) {
+        return Output::err(
+            exit::PREFLIGHT_REFUSED,
+            format!(
+                "there is no corpus at {typed}, and {typed} is a registered \
+                 corpus id rather than a path: --corpus takes a directory of \
+                 unpacked samples on this machine.\nGet the bytes first:\n  \
+                 stegobench fetch {typed} \
+                 --tier <tier>\nthen unpack them, point --corpus at the \
+                 directory, and name the id under --corpus-id {typed} so the \
+                 run is checked against the digest the registry declares.\n\
+                 `stegobench describe {typed}` says how it is obtained when it \
+                 declares no download route."
+            ),
+        );
+    }
+    let as_id = match reg {
+        Some(r) => {
+            let close = near_corpus_ids(r, &typed);
+            if close.is_empty() {
+                "none is registered under that name".to_string()
+            } else {
+                format!(
+                    "none is registered under that name; close: {}",
+                    close.join(", ")
+                )
+            }
+        }
+        // Fail loud rather than report an absence nobody established: with no
+        // registry the id half of the question was not asked, and saying it
+        // was would send the reader to check a spelling that may be right.
+        None => "the registry could not be read, so this was not checked".to_string(),
+    };
+    Output::err(
+        exit::PREFLIGHT_REFUSED,
+        format!(
+            "there is no corpus at {typed}, and it is not a registered corpus \
+             id either. Both were tried:\n  as a directory  nothing is there\n  \
+             as a corpus id  {as_id}\n`stegobench list corpora` names every \
+             registered id. --corpus wants a directory of samples, an image \
+             with a record beside it; `stegobench help scope` says what one \
+             has to hold."
+        ),
+    )
+}
+
+/// A corpus id that is not in the registry, answered the same way everywhere.
+///
+/// `next` is the sentence that closes it, because the commands that take an id
+/// fail for one reason and want different things done about it.
+fn unregistered_corpus_id(reg: &Registry, id: &str, next: &str) -> Output {
+    let mut human = format!("no corpus with id {id:?} is registered.");
+    if Path::new(id).is_dir() {
+        // The mirror image of `unresolved_corpus`, and the other half of the
+        // same confusion: a directory handed to the flag that wants a name.
+        human.push_str(&format!(
+            " It is a directory on this machine, and an id names a dataset \
+             rather than a path.\nThose bytes are already here, so score them \
+             directly:\n  stegobench score --corpus {id} --detector <name>"
+        ));
+    } else {
+        let close = near_corpus_ids(reg, id);
+        if !close.is_empty() {
+            human.push_str(&format!(" Did you mean: {}?", close.join(", ")));
+        }
+    }
+    human.push('\n');
+    human.push_str(next);
+    Output::err(exit::USAGE, human)
+}
+
+/// Registered corpus ids close enough to what was typed to be worth naming.
+///
+/// Substring matches count however far apart the two strings are: `pentimento`
+/// is fifteen edits from `pentimento-core` and is obviously the thing the
+/// reader meant, which is the case an edit distance alone answers worst.
+/// Sorted and capped so two runs print the same suggestions in the same order.
+fn near_corpus_ids(reg: &Registry, typed: &str) -> Vec<String> {
+    near_names(reg.corpora.keys().map(String::as_str), typed)
+}
+
+/// The same, over everything `describe` can look up.
+fn near_registered_names(reg: &Registry, typed: &str) -> Vec<String> {
+    near_names(
+        reg.entries
+            .keys()
+            .chain(reg.corpora.keys())
+            .map(String::as_str),
+        typed,
+    )
+}
+
+fn near_names<'a>(names: impl Iterator<Item = &'a str>, typed: &str) -> Vec<String> {
+    let typed = typed.to_lowercase();
+    let mut scored: Vec<(usize, String)> = names
+        .filter_map(|name| {
+            let lower = name.to_lowercase();
+            let d = edit_distance(&typed, &lower);
+            let close = d <= 3 || lower.contains(&typed) || typed.contains(&lower);
+            close.then(|| (d, name.to_string()))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(3).map(|(_, name)| name).collect()
+}
+
+/// A path resolved far enough to be compared with another one, existing or not.
+///
+/// [`Path::canonicalize`] answers only for a path that is already there, and
+/// the path this has to judge is one nothing has written yet. So the deepest
+/// ancestor that DOES exist is canonicalised, which resolves every symbolic
+/// link and every `..` in that half, and the components below it are rejoined
+/// on the end.
+///
+/// `None` means the question could not be answered, which happens for a
+/// relative path with no working directory and for one whose unwritten half
+/// ends in `..`. A caller treats that as "cannot prove containment" and lets
+/// the write fail on its own terms rather than refusing on a guess.
+fn resolved_for_comparison(path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut head = absolute.as_path();
+    loop {
+        if let Ok(base) = head.canonicalize() {
+            let mut resolved = base;
+            for component in tail.iter().rev() {
+                resolved.push(component);
+            }
+            return Some(resolved);
+        }
+        let name = head.file_name()?;
+        tail.push(name.to_os_string());
+        head = head.parent()?;
+    }
+}
+
+/// Whether an output path would be written INTO the corpus being scored.
+///
+/// WHY THIS IS A REFUSAL AND NOT A WARNING
+/// ---------------------------------------
+/// The corpus digest is computed over what the corpus holds. A result document
+/// or a records file written inside it becomes part of it, so the next run
+/// reads a different set, computes a different digest, and reports that the
+/// corpus changed when nothing about the images did. The measurement before it
+/// cannot be reproduced and nothing says why. `--out ./mycorpus/result.json`
+/// is a natural thing to type and it quietly destroys the one property this
+/// tool exists to protect, so it is refused at the boundary rather than
+/// explained afterwards.
+///
+/// Both paths are resolved before they are compared, so a corpus reached
+/// through a symbolic link and an `--out` reached through the real directory
+/// are still recognised as the same place.
+///
+/// The caller raises this as a usage error, exit 2, deliberately: both paths
+/// are well formed and both destinations exist or could be created, and it is
+/// the COMBINATION of the two that is wrong. That is the line exit 2 draws.
+/// Exit 3 is for a thing that is named and is not there, which is a different
+/// fault and needs a different answer from a script.
+fn output_inside_corpus(corpus: &Path, flag: &str, out: Option<&Path>) -> Option<String> {
+    let out = out?;
+    let corpus_real = resolved_for_comparison(corpus)?;
+    let out_real = resolved_for_comparison(out)?;
+    if !out_real.starts_with(&corpus_real) {
+        return None;
+    }
+    let what = if out_real == corpus_real {
+        format!("the corpus directory {} itself", corpus.display())
+    } else {
+        format!("inside the corpus at {}", corpus.display())
+    };
+    let mut why = format!(
+        "{flag} {} is {what}.\nWriting there adds a file to the corpus, so the \
+         next run reads a different set of bytes, computes a different corpus \
+         digest, and reports that the corpus has changed when nothing about \
+         the images did. The number measured now could not be reproduced \
+         afterwards.\nPut it anywhere outside the corpus.",
+        out.display()
+    );
+    if let Some(parent) = corpus_real.parent() {
+        let name = out_real
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("results"));
+        why.push_str(&format!(
+            " Beside it works: {flag} {}",
+            parent.join(name).display()
+        ));
+    }
+    Some(why)
+}
+
 /// An IO error as a sentence, without the operating system's error number.
 ///
 /// `os error 2` names nothing a reader can act on and reads as a crash rather
@@ -1499,8 +1967,17 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     // where the contract has a refusal, and a message that does not say what to
     // do. A path that is not a readable directory is a refusal, and it is the
     // cheapest one there is.
-    if let Some(why) = corpus_path_problem(corpus) {
-        return Output::err(exit::PREFLIGHT_REFUSED, why);
+    if let Some(refused) = corpus_argument_problem(Some(reg), corpus) {
+        return refused;
+    }
+
+    // Before the corpus is walked and before any detector is probed, because
+    // it costs two `canonicalize` calls and the alternative is discovering it
+    // by way of a corpus that no longer matches its own digest.
+    for (flag, path) in [("--out", out), ("--records", records)] {
+        if let Some(why) = output_inside_corpus(corpus, flag, path) {
+            return Output::err(exit::USAGE, why);
+        }
     }
 
     // Asked BEFORE availability, because it is the more useful refusal and
@@ -1519,12 +1996,12 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
         Some(id) => match reg.corpora.get(id) {
             Some(entry) => Some(entry),
             None => {
-                return Output::err(
-                    exit::USAGE,
-                    format!(
-                        "no corpus with id {id:?} is registered. \
-                         `stegobench list corpora` shows what is."
-                    ),
+                return unregistered_corpus_id(
+                    reg,
+                    id,
+                    "`stegobench list corpora` shows what is. Leaving \
+                     --corpus-id out scores the directory anyway, and marks \
+                     the result `custom`.",
                 )
             }
         },
@@ -2225,12 +2702,10 @@ fn cmd_fetch(
     budget_minutes: u64,
 ) -> Output {
     let Some(entry) = resolved.registry.corpora.get(id) else {
-        return Output::err(
-            exit::USAGE,
-            format!(
-                "no corpus with id {id:?} is registered. \
-                 `stegobench list corpora` shows what is."
-            ),
+        return unregistered_corpus_id(
+            &resolved.registry,
+            id,
+            "`stegobench list corpora` shows what is registered.",
         );
     };
     // A corpus carried inside this binary is obtained by writing it out, not
@@ -2399,9 +2874,22 @@ fn run(cli: &Cli) -> Output {
             file,
             corpus,
             shallow,
-        } => cmd_verify(file, corpus, *shallow),
+        } => {
+            // The registry is resolved leniently here and nowhere else in this
+            // arm: `verify` compares a document against bytes and needs no
+            // registry to do it, so a machine without one must still be able
+            // to run it. It is read only so that a `--corpus` value naming a
+            // registered id rather than a directory can be told apart from a
+            // typo, and a registry that cannot be read costs that one sentence
+            // rather than the command.
+            let reg = registry::resolve(cli.registry.as_deref()).ok();
+            match corpus_argument_problem(reg.as_ref().map(|r| &r.registry), corpus) {
+                Some(refused) => refused,
+                None => cmd_verify(file, corpus, *shallow),
+            }
+        }
         Command::List { kind } => with_registry(cli, |r| cmd_list(r, kind)),
-        Command::Describe { name } => with_registry(cli, |r| cmd_describe(r, name)),
+        Command::Describe { name, toml } => with_registry(cli, |r| cmd_describe(r, name, *toml)),
         Command::Embed {
             embedder,
             cover,
@@ -2834,6 +3322,286 @@ mod tests {
         );
     }
 
+    /// Measured 2026-09-30, in a first-time walkthrough: `score --corpus
+    /// pentimento-core` answered "there is no corpus at pentimento-core:
+    /// nothing is there". True, and it says nothing about the thing the reader
+    /// got wrong, which is that the word "corpus" is spoken in two
+    /// vocabularies here and they typed the other one.
+    #[test]
+    fn a_corpus_value_is_tried_as_an_id_before_it_is_refused_as_a_path() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+
+        // Exit 3 throughout, not 2: the command line is well formed and the
+        // thing it names is not there, which is the line this project's exit
+        // codes already divide on.
+        let as_id = corpus_argument_problem(Some(&reg), Path::new("pentimento-core"))
+            .expect("a registered id is not a directory");
+        assert_eq!(as_id.code, exit::PREFLIGHT_REFUSED);
+        assert!(
+            as_id.human.contains("registered corpus id")
+                && as_id.human.contains("stegobench fetch pentimento-core"),
+            "a registered id must be recognised as one: {}",
+            as_id.human
+        );
+
+        let neither = corpus_argument_problem(Some(&reg), Path::new("pentimento"))
+            .expect("a value that is nothing is a problem");
+        assert_eq!(neither.code, exit::PREFLIGHT_REFUSED);
+        assert!(
+            neither.human.contains("as a directory") && neither.human.contains("as a corpus id"),
+            "the refusal must say both meanings were tried: {}",
+            neither.human
+        );
+        // The sentence the exit-code contract test reads is still here: the
+        // wording grew, it did not move.
+        assert!(neither.human.contains("no corpus at"), "{}", neither.human);
+        assert!(
+            neither.human.contains("pentimento-core"),
+            "a near miss must be named: {}",
+            neither.human
+        );
+
+        // A registry that could not be read says so rather than reporting an
+        // absence it never established.
+        let blind = corpus_argument_problem(None, Path::new("pentimento-core"))
+            .expect("still not a directory");
+        assert_eq!(blind.code, exit::PREFLIGHT_REFUSED);
+        assert!(
+            blind.human.contains("registry could not be read"),
+            "{}",
+            blind.human
+        );
+
+        // An existing directory is what the flag wants, and a path that is
+        // there and the wrong shape stays the pre-flight refusal it was.
+        let tmp = tempfile::tempdir().expect("tmp");
+        assert!(corpus_argument_problem(Some(&reg), tmp.path()).is_none());
+        let file = tmp.path().join("shard.tar");
+        std::fs::write(&file, b"bytes").expect("written");
+        let wrong_shape =
+            corpus_argument_problem(Some(&reg), &file).expect("a file is not a corpus");
+        assert_eq!(wrong_shape.code, exit::PREFLIGHT_REFUSED);
+        assert!(
+            wrong_shape.human.contains("is a file"),
+            "{}",
+            wrong_shape.human
+        );
+    }
+
+    /// The mirror image: a directory handed to `fetch`, which takes an id.
+    #[test]
+    fn an_unregistered_corpus_id_names_the_close_ones_and_spots_a_directory() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+
+        let typo =
+            unregistered_corpus_id(&reg, "bossbas", "`stegobench list corpora` shows what is.");
+        assert_eq!(typo.code, exit::USAGE);
+        assert!(
+            typo.human.contains("Did you mean") && typo.human.contains("bossbase"),
+            "{}",
+            typo.human
+        );
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let as_path = unregistered_corpus_id(
+            &reg,
+            &tmp.path().display().to_string(),
+            "`stegobench list corpora` shows what is.",
+        );
+        assert_eq!(as_path.code, exit::USAGE);
+        assert!(
+            as_path.human.contains("an id names a dataset")
+                && as_path.human.contains("score --corpus"),
+            "a directory handed to an id flag must be recognised: {}",
+            as_path.human
+        );
+    }
+
+    /// A result document or a records file written inside the corpus JOINS the
+    /// corpus: the next run reads a different set of bytes, computes a
+    /// different digest, and reports that the corpus changed when nothing
+    /// about the images did. `--out ./mycorpus/result.json` is a natural thing
+    /// to type, so it is refused at the boundary.
+    #[test]
+    fn an_output_path_inside_the_corpus_is_refused_and_one_outside_it_is_not() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let corpus = tmp.path().join("mycorpus");
+        std::fs::create_dir_all(&corpus).expect("made");
+
+        let inside = output_inside_corpus(&corpus, "--out", Some(&corpus.join("result.json")))
+            .expect("a file in the corpus is refused");
+        assert!(
+            inside.contains("inside the corpus") && inside.contains("digest"),
+            "the refusal must say what would have happened: {inside}"
+        );
+        assert!(
+            inside.contains("Beside it works"),
+            "the refusal must say where to put it instead: {inside}"
+        );
+
+        // The corpus directory itself, which is what `--out <dir>` means when
+        // several detectors are named.
+        let itself =
+            output_inside_corpus(&corpus, "--out", Some(&corpus)).expect("the corpus itself");
+        assert!(itself.contains("itself"), "{itself}");
+
+        // A path that walks out and back in again resolves to the same place.
+        let round_trip = corpus.join("..").join("mycorpus").join("result.json");
+        assert!(
+            output_inside_corpus(&corpus, "--out", Some(&round_trip)).is_some(),
+            "a path that leaves the corpus and returns was not recognised"
+        );
+
+        // Directories below the corpus that nothing has created yet are still
+        // inside it, and a missing parent must not panic on the way to saying
+        // so.
+        assert!(
+            output_inside_corpus(
+                &corpus,
+                "--records",
+                Some(&corpus.join("not-made-yet").join("deeper").join("r.jsonl"))
+            )
+            .is_some(),
+            "an unwritten directory inside the corpus was not recognised"
+        );
+
+        // Outside is allowed, whether or not it exists yet.
+        assert!(
+            output_inside_corpus(&corpus, "--out", Some(&tmp.path().join("result.json"))).is_none()
+        );
+        assert!(output_inside_corpus(
+            &corpus,
+            "--out",
+            Some(&tmp.path().join("nowhere").join("yet").join("result.json"))
+        )
+        .is_none());
+        // A sibling whose name merely starts with the corpus's is a different
+        // directory, and a textual prefix test would have called it inside.
+        assert!(output_inside_corpus(
+            &corpus,
+            "--out",
+            Some(&tmp.path().join("mycorpus-2/r.json"))
+        )
+        .is_none());
+        assert!(output_inside_corpus(&corpus, "--out", None).is_none());
+    }
+
+    /// A corpus reached through a symbolic link and an `--out` reached through
+    /// the real directory are the same place, and a comparison of the strings
+    /// would not have said so.
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_does_not_hide_an_output_path_inside_the_corpus() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let real = tmp.path().join("real-corpus");
+        std::fs::create_dir_all(&real).expect("made");
+        let link = tmp.path().join("linked");
+        std::os::unix::fs::symlink(&real, &link).expect("linked");
+
+        assert!(
+            output_inside_corpus(&link, "--out", Some(&real.join("result.json"))).is_some(),
+            "the link hid an output path inside the corpus"
+        );
+        assert!(
+            output_inside_corpus(&real, "--out", Some(&link.join("result.json"))).is_some(),
+            "the link hid an output path inside the corpus"
+        );
+    }
+
+    /// The two refusals above, reaching a user through the commands that can
+    /// raise them, and raised before anything is scored rather than after.
+    #[test]
+    fn score_and_plan_both_refuse_before_they_touch_the_corpus() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let reg = dir.path().join("registry");
+        std::fs::create_dir_all(&reg).expect("made");
+        std::fs::write(
+            reg.join("ghost.toml"),
+            "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
+             version_args = [\"--version\"]\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
+        )
+        .expect("written");
+        let corpus = dir.path().join("mycorpus");
+        std::fs::create_dir_all(&corpus).expect("made");
+        let inside = corpus.join("result.json");
+
+        let scored = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["ghost".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                split: None,
+                records: None,
+                out: Some(&inside),
+                timeout: 5,
+                limit: None,
+            },
+        );
+        assert_eq!(scored.code, exit::USAGE, "{}", scored.human);
+        assert!(
+            scored.human.contains("inside the corpus"),
+            "{}",
+            scored.human
+        );
+        assert!(
+            !inside.exists(),
+            "the refusal wrote into the corpus it was refusing to write into"
+        );
+
+        // `plan` is the command whose whole job is to answer before the run,
+        // so a plan that approves a run `score` would refuse is the one
+        // answer it must never give.
+        let planned = cmd_plan(
+            &resolved_at(&reg),
+            &[
+                "score".to_string(),
+                "--corpus".to_string(),
+                corpus.display().to_string(),
+                "--detector".to_string(),
+                "ghost".to_string(),
+                "--records".to_string(),
+                corpus.join("r.jsonl").display().to_string(),
+            ],
+        );
+        assert_eq!(planned.code, exit::USAGE, "{}", planned.human);
+        assert!(
+            planned.human.contains("inside the corpus"),
+            "{}",
+            planned.human
+        );
+    }
+
+    /// `score --corpus <a registered id>` is the mistake the two vocabularies
+    /// invite, and it reaches the user through the command rather than only
+    /// through the helper.
+    #[test]
+    fn score_answers_a_registered_id_in_the_path_flag_with_the_way_out() {
+        let refused = cmd_score(
+            &resolved_at(shipped_registry()),
+            ScoreRequest {
+                corpus: Path::new("pentimento-core"),
+                detectors: &["zsteg".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                split: None,
+                records: None,
+                out: None,
+                timeout: 5,
+                limit: None,
+            },
+        );
+        assert_eq!(refused.code, exit::PREFLIGHT_REFUSED, "{}", refused.human);
+        assert!(
+            refused.human.contains("stegobench fetch pentimento-core"),
+            "{}",
+            refused.human
+        );
+    }
+
     /// An environment variable bound with clap's `env` is read before any of
     /// our code runs, and clap treats a variable that is set but empty as a
     /// flag supplied without its value. `STEGOBENCH_REGISTRY=` in a shell
@@ -3066,17 +3834,116 @@ mod tests {
             "the machine output must carry the count, not only the rows"
         );
 
-        let described = cmd_describe(&resolved_at(&dir), "reveal");
+        let described = cmd_describe(&resolved_at(&dir), "reveal", false);
         assert_eq!(described.code, exit::OK);
         assert_eq!(described.json["licence"]["redistribution"], "permitted");
-        assert!(described.human.contains("verified_on"));
+        // The summary carries the date the terms were read, in the summary's
+        // own words rather than as the field name the TOML dump used to show.
+        assert!(
+            described.human.contains("verified_on"),
+            "the summary drops the verification date: {}",
+            described.human
+        );
+        assert!(
+            described.human.contains("Republish"),
+            "the summary drops the redistribution answer: {}",
+            described.human
+        );
 
         // And a tool still answers the same verb.
-        assert_eq!(cmd_describe(&resolved_at(&dir), "steghide").code, exit::OK);
+        assert_eq!(
+            cmd_describe(&resolved_at(&dir), "steghide", false).code,
+            exit::OK
+        );
         // An unknown name is a usage error that names both kinds.
-        let missing = cmd_describe(&resolved_at(&dir), "not-registered");
+        let missing = cmd_describe(&resolved_at(&dir), "not-registered", false);
         assert_eq!(missing.code, exit::USAGE);
         assert!(missing.human.contains("reveal") && missing.human.contains("steghide"));
+    }
+
+    /// `describe` used to print the whole registry entry as TOML under its
+    /// summary, which is forty lines of fields the harness reads and the
+    /// reader does not, between them and the next command they have to type.
+    ///
+    /// The entry is still one flag away, and under that flag it is ALONE:
+    /// anything else on the stream makes the output unpipeable, which is the
+    /// only reason a raw form exists.
+    #[test]
+    fn describe_summarises_by_default_and_prints_the_entry_only_under_toml() {
+        let dir = shipped_registry();
+        for name in ["steghide", "reveal"] {
+            let summary = cmd_describe(&resolved_at(&dir), name, false);
+            assert_eq!(summary.code, exit::OK);
+            assert!(
+                !summary.human.contains("[licence]") && !summary.human.contains("[properties]"),
+                "{name}'s summary still carries the raw TOML: {}",
+                summary.human
+            );
+            assert!(
+                summary.human.contains("--toml"),
+                "{name}'s summary does not say where the whole entry went: {}",
+                summary.human
+            );
+
+            let raw = cmd_describe(&resolved_at(&dir), name, true);
+            assert_eq!(raw.code, exit::OK);
+            assert!(
+                raw.payload_on_stdout,
+                "{name} --toml was diverted to stderr, so it cannot be piped"
+            );
+            let parsed: toml::Value = toml::from_str(&raw.human).unwrap_or_else(|e| {
+                panic!("{name} --toml is not parseable TOML: {e}\n{}", raw.human)
+            });
+            assert!(
+                parsed.get("name").is_some() || parsed.get("id").is_some(),
+                "{name} --toml is missing the entry itself: {}",
+                raw.human
+            );
+            assert!(
+                !raw.human.contains("Needs from you") && !raw.human.contains("Nothing needed"),
+                "{name} --toml carries the summary too: {}",
+                raw.human
+            );
+        }
+
+        // `stegobench help scope` promises that `describe` says where a tool
+        // lives, what it costs and the command that runs it. That promise used
+        // to be kept by the TOML dump, so the summary has to keep it now.
+        let zsteg = cmd_describe(&resolved_at(&dir), "zsteg", false);
+        assert_eq!(zsteg.code, exit::OK);
+        for expected in ["Runs as", "Costs", "Command", "zsteg -a"] {
+            assert!(
+                zsteg.human.contains(expected),
+                "the summary drops {expected:?}: {}",
+                zsteg.human
+            );
+        }
+    }
+
+    /// The commonest way to reach `describe`'s refusal with something that is
+    /// not a typo is to hand it the path that `score --corpus` wants. A list
+    /// of registered names that does not contain theirs does not tell them so.
+    #[test]
+    fn describe_says_it_takes_a_name_when_it_is_handed_a_path() {
+        let dir = shipped_registry();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let refused = cmd_describe(&resolved_at(&dir), &tmp.path().display().to_string(), false);
+        assert_eq!(refused.code, exit::USAGE);
+        assert!(
+            refused.human.contains("is a path on this machine")
+                && refused.human.contains("score --corpus"),
+            "{}",
+            refused.human
+        );
+
+        // A near miss is still a near miss, and gets the suggestion instead.
+        let typo = cmd_describe(&resolved_at(&dir), "steghid", false);
+        assert_eq!(typo.code, exit::USAGE);
+        assert!(
+            typo.human.contains("Did you mean") && typo.human.contains("steghide"),
+            "{}",
+            typo.human
+        );
     }
 
     /// Every listed row's columns start in the same place, including the
@@ -4466,7 +5333,7 @@ mod tests {
         }
 
         // And `describe` carries the identical structure for the same tool.
-        let described = cmd_describe(&resolved_at(&dir), "stegashield");
+        let described = cmd_describe(&resolved_at(&dir), "stegashield", false);
         assert_eq!(described.code, exit::OK);
         assert!(described.json["needs"]["readiness"].is_string());
         assert!(
@@ -4478,7 +5345,7 @@ mod tests {
 
         // A corpus answers in the same shape, which is the whole point: a
         // reader should not have to know which kind of thing they typed.
-        let corpus = cmd_describe(&resolved_at(&dir), "reveal");
+        let corpus = cmd_describe(&resolved_at(&dir), "reveal", false);
         assert_eq!(corpus.code, exit::OK);
         assert!(corpus.json["needs"]["steps"].is_array());
         assert!(corpus.human.contains("Needs from you"), "{}", corpus.human);

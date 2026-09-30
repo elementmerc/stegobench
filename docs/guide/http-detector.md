@@ -243,8 +243,9 @@ Worth knowing before you start a long one:
 |---|---|
 | `--limit N` | A smoke test over the first N items. The result is marked `custom`, because a prefix of a corpus is not the corpus |
 | `--timeout SECONDS` | How long any single image gets before the detector is killed and that item is recorded as an error. Defaults to 60 |
+| `--corpus DIR` | A directory of unpacked samples on this machine, never a registered id. `stegobench fetch <id>` is what turns an id into a directory |
 | `--corpus-id ID` | Names the registered corpus the directory holds. It is a claim the harness checks, not one it takes |
-| `--records FILE` | Where the per-item answers are kept |
+| `--records FILE` | Where the per-item answers are kept. It may not be inside the corpus: a file written there joins the corpus and the next run measures a different set |
 
 The run is resumable: every answer is written as it is produced, and running
 the same command again picks up where it stopped. Interrupt it without losing

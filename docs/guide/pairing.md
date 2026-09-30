@@ -99,7 +99,7 @@ If your detector was trained on part of this corpus, the only honest number
 comes from the part it never saw:
 
 ```
-stegobench score --corpus pentimento-core --detector mine --split test
+stegobench score --corpus ./pentimento-core --detector mine --split test
 ```
 
 Two things happen. The run keeps only the samples the corpus labels `test`,
