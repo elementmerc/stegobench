@@ -201,8 +201,40 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
     };
     // Same alignment rule as `corpora_block`, and for the same reason: the
     // widest name in the listing sets the column, not a literal in the source.
+    //
+    // Over the whole listing rather than per group, so the two tables under
+    // `list all` share one set of columns and read as one table with headings
+    // rather than two tables that happen to be adjacent.
     let rows = wanted.iter().map(|e| e.cells()).collect::<Vec<_>>();
-    let mut human = stegobench_core::table::align(&rows).join("\n");
+    let aligned = stegobench_core::table::align(&rows);
+    let mut human = if kind == "all" {
+        // HEADINGS, BECAUSE A BARE `stegobench list` HAD NONE.
+        //
+        // It printed thirteen tool rows, a footer, then five corpus rows,
+        // with nothing saying that the first block was tools and the second
+        // was data, or that six of the thirteen were embedders rather than
+        // the detectors `list detectors` had just counted at seven.
+        let mut out: Vec<String> = Vec::new();
+        for (k, heading) in [(Kind::Detector, "DETECTORS"), (Kind::Embedder, "EMBEDDERS")] {
+            let group: Vec<&String> = wanted
+                .iter()
+                .zip(&aligned)
+                .filter(|(e, _)| e.kind == k)
+                .map(|(_, line)| line)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.push(format!("{heading} ({})", group.len()));
+            out.extend(group.into_iter().cloned());
+        }
+        out.join("\n")
+    } else {
+        aligned.join("\n")
+    };
     if human.is_empty() {
         // Same standard as `corpora_block`: a bare line under an exit code of
         // zero reads as "checked, all fine". Say where it looked, and say
@@ -268,7 +300,11 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
         "registry": resolved.to_json(),
     });
     if kind == "all" {
-        human.push_str(&format!("\n\n{}", corpora_block(reg, &corpora_from)));
+        human.push_str(&format!(
+            "\n\nCORPORA ({})\n{}",
+            reg.corpora.len(),
+            corpora_block(reg, &corpora_from)
+        ));
         json["corpora"] = serde_json::json!(reg.corpora.values().collect::<Vec<_>>());
     }
     human.push_str(&format!("\n\n{}", resolved.source.line()));
@@ -395,9 +431,18 @@ fn cmd_describe(resolved: &Resolved, name: &str, toml_only: bool) -> Output {
         if toml_only {
             return raw_toml(e, json, &e.name);
         }
+        // Only the roots that will still be there tomorrow. The built-in
+        // registry unpacks its adapters into a scratch directory this process
+        // owns, and a command naming that path is a command that cannot be
+        // pasted. `adapter_roots()` is the right answer for running something
+        // now and the wrong one for printing something to keep.
+        let durable: &[PathBuf] = match resolved.source.path() {
+            Some(_) => resolved.adapter_roots(),
+            None => &[],
+        };
         return Output::ok(
             json,
-            describe_block(&needs, e.name.as_str(), "tool", &tool_facts(e)),
+            describe_block(&needs, e.name.as_str(), "tool", &tool_facts(e, durable)),
         );
     }
     // One vocabulary: a corpus id is looked up in the same breath as a tool
@@ -484,6 +529,30 @@ fn raw_toml<T: serde::Serialize>(entry: &T, json: serde_json::Value, name: &str)
 /// the answer looking for it. The entry is still one flag away, under `--toml`,
 /// which prints it alone so a pipe gets a document rather than a document with
 /// prose around it.
+/// The word in the brackets beside the name.
+///
+/// `needs::Readiness` answers one question, "can the harness drive this", and
+/// its bare words answered a different one for the reader. A first-time user
+/// read `[ready]` on a containerised detector as "ready for me to run", went
+/// looking for `zsteg` on their PATH, and found nothing; and read the honest
+/// `[unknown]` on the corpus that ships inside the binary as a fault.
+///
+/// So a tool says who it is ready FOR, and a corpus says whose copy is being
+/// talked about, which for the starter corpus is this binary's own.
+fn readiness_word(needs: &needs::Needs, kind: &str, name: &str) -> String {
+    if kind == "corpus" && needs.readiness == needs::Readiness::Unknown {
+        return if name == STARTER_ID {
+            "included in this binary".to_string()
+        } else {
+            "bring your own copy".to_string()
+        };
+    }
+    if needs.readiness == needs::Readiness::Ready {
+        return "stegobench can run it".to_string();
+    }
+    needs.readiness.word().to_string()
+}
+
 fn describe_block(
     needs: &needs::Needs,
     name: &str,
@@ -491,9 +560,16 @@ fn describe_block(
     facts: &[(&str, String)],
 ) -> String {
     let width = facts.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let mut text = format!("{name}  [{}]\n", needs.readiness.word());
+    let mut text = format!("{name}  [{}]\n", readiness_word(needs, kind, name));
     for (label, value) in facts {
-        text.push_str(&format!("{label:<width$}  {value}\n", width = width));
+        // A value of several lines keeps the column: the second line of a
+        // command that wraps anyway must not read as the next field's value.
+        let mut lines = value.lines();
+        let first = lines.next().unwrap_or("");
+        text.push_str(&format!("{label:<width$}  {first}\n", width = width));
+        for line in lines {
+            text.push_str(&format!("{:<width$}  {line}\n", "", width = width));
+        }
     }
     let steps = needs.block();
     if steps.is_empty() {
@@ -510,11 +586,126 @@ fn describe_block(
     text
 }
 
+/// One shell word, quoted if the shell would otherwise take it apart.
+///
+/// A registry lives wherever the reader installed it, and a path with a space
+/// in it pasted unquoted runs a different command rather than failing.
+fn shell_word(word: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-{}".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// The line that runs this tool on one image of the reader's own, exactly as
+/// the harness would run it, with `{file}` left for them to fill in.
+///
+/// Built from the same pieces `stegobench_plugin::selftest` assembles, so the
+/// sandbox flags, the mount, the entrypoint and the environment are the ones
+/// a measured run really uses rather than a plausible set invented here. A
+/// container reference carries its digest, so what this pastes is pinned.
+///
+/// `None` where no honest line exists: an entry with neither an image nor a
+/// binary cannot be run at all, and an adapter that is not where the registry
+/// says it is would paste a mount of a path that does not exist.
+fn runnable_command(
+    e: &stegobench_core::registry::Entry,
+    adapter_roots: &[PathBuf],
+) -> Option<String> {
+    let invoke = e.invoke.as_ref();
+    let argv = invoke.map(|i| i.argv.as_slice()).unwrap_or(&[]);
+
+    // A service is reached by an adapter that runs here, so the image names
+    // the subject and is not the thing to start.
+    let host = invoke.is_some_and(|i| i.host);
+    if host || e.image.is_none() {
+        if let Some(bin) = e.binary.as_ref().filter(|b| !b.command.is_empty()) {
+            let mut words: Vec<String> = bin.command.iter().map(|w| shell_word(w)).collect();
+            words.extend(argv.iter().map(|a| shell_word(a)));
+            return Some(words.join(" "));
+        }
+        let (Some(i), Some(rel)) = (invoke, invoke.and_then(|i| i.adapter.as_ref())) else {
+            return None;
+        };
+        let adapter = stegobench_plugin::adapter::resolve(rel, adapter_roots).ok()?;
+        let program = i
+            .entrypoint
+            .clone()
+            .unwrap_or_else(|| stegobench_plugin::DEFAULT_HOST_ENTRYPOINT.to_string());
+        let mut words = vec![shell_word(&program)];
+        for arg in argv {
+            words.push(shell_word(
+                &arg.replace("{adapter}", &adapter.display().to_string()),
+            ));
+        }
+        return Some(words.join(" "));
+    }
+
+    let image = e.image.as_ref()?;
+    let i = invoke?;
+    // The whole directory, writable, where the tool writes beside its input;
+    // the one file, read only, otherwise. Same choice `selftest::run_one`
+    // makes from the same flag.
+    let mut words: Vec<String> = ["docker", "run", "--rm"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if i.writable_workdir {
+        words.push("--user".into());
+        words.push("$(id -u):$(id -g)".into());
+    }
+    for flag in [
+        "--network=none",
+        "--cap-drop=ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--read-only",
+        "--memory=2g",
+        "-v",
+    ] {
+        words.push(flag.into());
+    }
+    words.push(if i.writable_workdir {
+        "\"$PWD\":/work".into()
+    } else {
+        "\"$PWD/{file}\":/work/{file}:ro".into()
+    });
+
+    let mut adapter_inner = String::new();
+    if let Some(rel) = &i.adapter {
+        let abs = stegobench_plugin::adapter::resolve(rel, adapter_roots).ok()?;
+        let base = abs.file_name()?.to_str()?;
+        adapter_inner = format!("/adapter/{base}");
+        words.push("-v".into());
+        words.push(shell_word(&format!("{}:{adapter_inner}:ro", abs.display())));
+    }
+    for kv in &i.env {
+        words.push("-e".into());
+        words.push(shell_word(kv));
+    }
+    if let Some(ep) = &i.entrypoint {
+        words.push("--entrypoint".into());
+        words.push(shell_word(ep));
+    }
+    words.push(shell_word(&image.reference));
+    for arg in argv {
+        words.push(shell_word(
+            &arg.replace("{file}", "/work/{file}")
+                .replace("{adapter}", &adapter_inner),
+        ));
+    }
+    Some(words.join(" "))
+}
+
 /// The fields of a tool entry a person reads, in the order they ask for them.
 ///
 /// A subset rather than everything: the rest is one `--toml` away, and a
 /// summary that reprints every field is the dump it replaced.
-fn tool_facts(e: &stegobench_core::registry::Entry) -> Vec<(&'static str, String)> {
+fn tool_facts(
+    e: &stegobench_core::registry::Entry,
+    adapter_roots: &[PathBuf],
+) -> Vec<(&'static str, String)> {
     let mut facts = vec![(
         "Kind",
         match e.kind {
@@ -541,23 +732,46 @@ fn tool_facts(e: &stegobench_core::registry::Entry) -> Vec<(&'static str, String
         _ => "nothing declared, so it cannot be run".to_string(),
     };
     facts.push(("Runs as", runs));
-    // The argv is in the summary rather than only in the entry because
+    // The command is in the summary rather than only in the entry because
     // `stegobench help scope` sends the reader who wants to examine their own
     // images here, to find the command that runs the tool directly. That
     // reader is the one least able to go looking for it under another flag.
-    if let Some(argv) = e
-        .invoke
-        .as_ref()
-        .map(|i| &i.argv)
-        .filter(|a| !a.is_empty())
-        .or_else(|| {
-            e.binary
-                .as_ref()
-                .map(|b| &b.command)
-                .filter(|c| !c.is_empty())
-        })
-    {
-        facts.push(("Command", argv.join(" ")));
+    //
+    // It used to be the raw `invoke.argv`, which for a container was an argv
+    // that only means anything INSIDE the image (`zsteg -a {file}`, where
+    // `zsteg` is on no host's PATH) and for a binary dropped the program name
+    // the entry keeps in `binary.command` (`{file}`, alone). Both read as
+    // something to paste and neither was.
+    match runnable_command(e, adapter_roots) {
+        Some(line) => {
+            let containerised = e.image.is_some() && !e.invoke.as_ref().is_some_and(|i| i.host);
+            let note = if !line.contains("{file}") {
+                "It reads every image in the directory you run it from."
+            } else if containerised {
+                "{file} is your image's filename, and this runs from the directory it is in."
+            } else {
+                "{file} is the path to your image."
+            };
+            facts.push(("Run it", format!("{line}\n{note}")));
+        }
+        // The adapter is real and the command would be too, but the built-in
+        // registry unpacks its adapters into a scratch directory that is
+        // wiped when the command ends. A line naming that path pastes as a
+        // file-not-found a minute later, which is worse than no line.
+        None => {
+            if let Some(adapter) = e.invoke.as_ref().and_then(|i| i.adapter.as_ref()) {
+                facts.push((
+                    "Run it",
+                    format!(
+                        "no command to paste: this one needs {adapter}, and \
+                         the copy inside this binary lasts only as long as a \
+                         run.\nWith a checkout of the repository: stegobench \
+                         describe {} --registry plugins/registry",
+                        e.name
+                    ),
+                ));
+            }
+        }
     }
     facts.push((
         "Answers",
@@ -693,6 +907,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     // Present, absent and "nobody can say" are three answers, and the third
     // one is a real state rather than a soft no. See the match below.
     let mut undetermined = 0;
+    let mut present = 0;
 
     for entry in reg.entries.values() {
         let mut check = availability::check(entry, resolved.adapter_roots());
@@ -720,7 +935,9 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
             // looking for a package that does not exist.
             Presence::Unknown { .. } => undetermined += 1,
             p if !p.is_present() => missing += 1,
-            _ => {}
+            // Counted rather than left implicit, so the presence line adds up
+            // to the total in front of it.
+            _ => present += 1,
         }
         match &verdict {
             Verified::Passed => passed += 1,
@@ -744,7 +961,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
         // Computed from the availability answer already paid for, so nothing
         // here asks the container runtime a second time.
         let needs = needs::of_tool(entry, &check, resolved.adapter_roots());
-        rows.push((check, verdict, detail, needs));
+        rows.push((check, verdict, detail, needs, entry.kind));
     }
 
     // One line per tool, and under the ones that need something, the lines to
@@ -765,26 +982,57 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
         Some(f) => f.line(),
         None => "fixtures  not read, because the self-tests were not run".to_string(),
     });
-    human.push(String::new());
-    for (_, _, detail, needs) in &rows {
-        human.push(detail.clone());
-        let block = needs.block();
-        if !block.is_empty() {
-            for line in block.lines() {
-                human.push(format!("  {line}"));
+    // Grouped under a heading naming the kind, because this screen and
+    // `stegobench list detectors` are read one after the other and used to
+    // disagree without explaining themselves: thirteen rows here, seven
+    // there, and the word "embedder" never printed. A reader with no way to
+    // tell which six were the difference reads it as something broken.
+    let detectors = rows.iter().filter(|r| r.4 == Kind::Detector).count();
+    let embedders = rows.len() - detectors;
+    for (kind, heading, count) in [
+        (Kind::Detector, "DETECTORS", detectors),
+        (Kind::Embedder, "EMBEDDERS", embedders),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        human.push(String::new());
+        human.push(format!("{heading} ({count})"));
+        for (_, _, detail, needs, _) in rows.iter().filter(|r| r.4 == kind) {
+            human.push(detail.clone());
+            let block = needs.block();
+            if !block.is_empty() {
+                for line in block.lines() {
+                    human.push(format!("  {line}"));
+                }
             }
         }
     }
     let needing = rows
         .iter()
-        .filter(|(_, _, _, n)| n.readiness == needs::Readiness::NeedsYou)
+        .filter(|(_, _, _, n, _)| n.readiness == needs::Readiness::NeedsYou)
         .count();
     human.push(String::new());
+    // TWO AXES, TWO LINES, AND EACH ONE SUMS TO THE TOTAL.
+    //
+    // These used to be one comma list: "13 tool(s): 6 verified, 0 answering,
+    // 0 broken, 2 not installed, 1 undetermined, 7 not checked", which adds
+    // up to 16. It was never wrong, it was two independent questions printed
+    // as one list, and a reader adds a comma list up against the number in
+    // front of it. Every bucket is printed even at zero, so both lines can
+    // still be summed on a machine where one of them is empty.
     human.push(format!(
-        "{} tool(s): {passed} verified, {answered} answering, {broken} broken, \
-         {missing} not installed, {undetermined} undetermined, {skipped} not \
-         checked.",
+        "{} tool(s): {detectors} detector(s), {embedders} embedder(s).",
         rows.len()
+    ));
+    human.push(format!(
+        "On this machine: {present} installed, {missing} not installed, \
+         {undetermined} undetermined, {unsupported} cannot run here."
+    ));
+    human.push(format!(
+        "Stegobench's own self-test: {passed} passed, {answered} answering, \
+         {broken} failed, {skipped} not run. Passing says stegobench can \
+         drive it, not that you can run it yourself."
     ));
     if undetermined > 0 {
         human.push(format!(
@@ -794,7 +1042,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     }
     if unsupported > 0 {
         human.push(format!(
-            "{unsupported} cannot run on {} at all.",
+            "{unsupported} cannot run on {} at all, so nothing to install would change it.",
             std::env::consts::OS
         ));
     }
@@ -803,7 +1051,7 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
     }
     if skipped > 0 {
         // Never let "we did not look" read as "it is fine".
-        human.push("not checked is not the same as working; each line says why.".into());
+        human.push("not run is not the same as working; each line says why.".into());
     }
     if needing > 0 {
         human.push(format!(
@@ -818,7 +1066,10 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
             "path": f.dir().display().to_string(),
         })),
         "checked": rows.len(),
+        "detectors": detectors,
+        "embedders": embedders,
         "needing_action": needing,
+        "present": present,
         "verified": passed,
         "broken": broken,
         "missing": missing,
@@ -826,8 +1077,12 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict
         "undetermined": undetermined,
         "not_checked": skipped,
         "answering": answered,
-        "tools": rows.iter().map(|(c, v, d, n)| serde_json::json!({
+        "tools": rows.iter().map(|(c, v, d, n, k)| serde_json::json!({
             "name": c.name,
+            "kind": match k {
+                Kind::Detector => "detector",
+                Kind::Embedder => "embedder",
+            },
             "present": c.presence.is_present(),
             "verified": c.verified,
             "status": match v {
@@ -2484,6 +2739,13 @@ fn summarise(
         }
     }
 
+    // Adjacent to the figures rather than in the footer. A definition one
+    // screen away from the number it defines is a definition nobody reads,
+    // and neither "AUC" nor the bracketed pair beside it is expanded here.
+    if measured > 0 {
+        lines.push("AUC and the bracketed pair: `stegobench help results`.".into());
+    }
+
     lines.push(String::new());
     lines.push(format!(
         "{measured} of {} detector(s) measured.",
@@ -2906,18 +3168,38 @@ fn cmd_orientation(offer: Option<fetch::Offer>) -> Output {
     out
 }
 
-/// The refusal for `check` and `scan`, the two words somebody looking for an
-/// image examiner guesses.
+/// The words somebody arriving with "is there something hidden in my photo"
+/// types before they read anything.
 ///
-/// They are routed rather than left to clap's did-you-mean, which suggested
-/// `schema` for `check` and nothing at all for `scan`. Both guesses are about
-/// the same misunderstanding, so both get the same answer to it.
+/// They are answered with the same tailored refusal rather than left to clap's
+/// did-you-mean, which suggested `schema` for `check` and nothing at all for
+/// `scan`. They are all the same misunderstanding, so they all get the same
+/// answer to it. `check` and `scan` are also hidden subcommands so that a
+/// trailing path parses; the rest never reach clap's command tree and are
+/// caught by `wrong_direction` instead.
+const WRONG_DIRECTION: &[&str] = &[
+    "analyse", "analyze", "check", "decode", "detect", "examine", "extract", "find", "inspect",
+    "reveal", "run", "scan", "search", "test", "unhide",
+];
+
+/// Is this one of the words above, whatever case it was typed in?
+fn wrong_direction(typed: &str) -> bool {
+    let typed = typed.to_lowercase();
+    WRONG_DIRECTION.contains(&typed.as_str())
+}
+
+/// The refusal those words get.
+///
+/// The second clause names no verb of its own. "it does not run your own
+/// images" is what a verb-substituting sentence produced for `run`, and a
+/// refusal that reads as nonsense teaches the reader nothing.
 fn cmd_wrong_direction(word: &str) -> Output {
     Output::err(
         exit::USAGE,
         format!(
             "there is no `stegobench {word}`. Stegobench measures DETECTORS \
-             against labelled images; it does not {word} your own images.\n\n\
+             against labelled images, and it cannot tell you whether anything \
+             is hidden in an image of yours.\n\n\
              `stegobench help scope`      the difference, and where to go \
              instead\n\
              `stegobench list detectors`  what is registered here\n\
@@ -3064,6 +3346,10 @@ fn parse_or_explain() -> Cli {
             let Some(typed) = typed else {
                 e.exit();
             };
+            if wrong_direction(&typed) {
+                eprintln!("{}", cmd_wrong_direction(&typed).human);
+                std::process::exit(exit::USAGE);
+            }
             let nearest = nearest_command(&typed);
             eprintln!("there is no `stegobench {typed}`.");
             if let Some(nearest) = nearest {
@@ -3986,7 +4272,7 @@ mod tests {
         // to be kept by the TOML dump, so the summary has to keep it now.
         let zsteg = cmd_describe(&resolved_at(&dir), "zsteg", false);
         assert_eq!(zsteg.code, exit::OK);
-        for expected in ["Runs as", "Costs", "Command", "zsteg -a"] {
+        for expected in ["Runs as", "Costs", "Run it", "zsteg -a"] {
             assert!(
                 zsteg.human.contains(expected),
                 "the summary drops {expected:?}: {}",
@@ -4218,6 +4504,435 @@ mod tests {
                 out.human
             );
         }
+    }
+
+    /// EVERY word on the list, not just the two that are hidden subcommands.
+    ///
+    /// `detect` is the likeliest first guess of all, and it fell through to
+    /// the generic "there is no `stegobench detect`" while the tailored
+    /// answer sat one match arm away. The whole list is walked here so that
+    /// adding a word and forgetting to wire it up fails rather than ships.
+    #[test]
+    fn every_wrong_direction_word_reaches_the_tailored_answer() {
+        assert!(
+            WRONG_DIRECTION.windows(2).all(|w| w[0] < w[1]),
+            "the list is meant to stay sorted so a reader can find a word in it"
+        );
+        for word in WRONG_DIRECTION {
+            assert!(
+                wrong_direction(word),
+                "`{word}` is on the list and unmatched"
+            );
+            assert!(
+                wrong_direction(&word.to_uppercase()),
+                "`{word}` typed in capitals is the same misunderstanding"
+            );
+            let out = cmd_wrong_direction(word);
+            assert_eq!(out.code, exit::USAGE, "`{word}` should be a usage error");
+            for expected in ["measures DETECTORS", "help scope", "list detectors"] {
+                assert!(
+                    out.human.contains(expected),
+                    "`{word}` does not say {expected:?}: {}",
+                    out.human
+                );
+            }
+            // Either clap parses it (the two hidden signposts) and `run`
+            // routes it here, or clap rejects it as an unknown subcommand and
+            // `parse_or_explain` catches it on the word. Anything else means
+            // the word never reaches this answer at runtime.
+            match Cli::try_parse_from(["stegobench", word, "./photo.png"]) {
+                Ok(parsed) => assert!(
+                    run(&parsed).human.contains("measures DETECTORS"),
+                    "`{word}` parses but is not routed to the answer"
+                ),
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    clap::error::ErrorKind::InvalidSubcommand,
+                    "`{word}` fails in a way `parse_or_explain` does not catch"
+                ),
+            }
+        }
+    }
+
+    /// The list must not swallow a real command or a plain typo.
+    #[test]
+    fn a_real_command_is_never_read_as_the_wrong_direction() {
+        for word in [
+            "list",
+            "score",
+            "help",
+            "doctor",
+            "verify",
+            "validate",
+            "report",
+            "frobnicate",
+            "",
+        ] {
+            assert!(!wrong_direction(word), "`{word}` was diverted");
+        }
+    }
+
+    #[test]
+    fn a_shell_word_is_quoted_only_when_the_shell_would_take_it_apart() {
+        assert_eq!(shell_word("zsteg"), "zsteg");
+        assert_eq!(shell_word("/work/{file}"), "/work/{file}");
+        assert_eq!(
+            shell_word("PYTHONPATH=/opt/aletheia"),
+            "PYTHONPATH=/opt/aletheia"
+        );
+        assert_eq!(shell_word("/my pictures/a.png"), "'/my pictures/a.png'");
+        assert_eq!(shell_word("it's.png"), r"'it'\''s.png'");
+        assert_eq!(shell_word(""), "''");
+    }
+
+    fn parsed_entry(text: &str) -> stegobench_core::registry::Entry {
+        toml::from_str(text).expect("the entry under test parses")
+    }
+
+    /// A containerised tool has no command anywhere a reader can paste, which
+    /// is what sent a first-time user looking for `zsteg` on their PATH and
+    /// then hand-writing a `docker run` out of `--toml`.
+    #[test]
+    fn a_containerised_tool_pastes_as_a_pinned_sandboxed_docker_run() {
+        let e = parsed_entry(
+            "name = \"zsteg\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"stegobench/zsteg@sha256:abc\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"zsteg\", \"-a\", \"{file}\"]\nparser = \"zsteg\"\n",
+        );
+        let line = runnable_command(&e, &[]).expect("a container has a command");
+        // The digest, because an unpinned paste measures whatever the tag
+        // points at today.
+        assert!(line.contains("stegobench/zsteg@sha256:abc"), "{line}");
+        // The same sandbox the harness uses, not a friendlier one.
+        for flag in [
+            "--rm",
+            "--network=none",
+            "--cap-drop=ALL",
+            "--security-opt no-new-privileges",
+            "--read-only",
+            "--memory=2g",
+        ] {
+            assert!(line.contains(flag), "{flag} is missing from {line}");
+        }
+        assert!(
+            line.contains("-v \"$PWD/{file}\":/work/{file}:ro"),
+            "{line}"
+        );
+        assert!(line.ends_with("zsteg -a /work/{file}"), "{line}");
+        assert!(
+            !line.contains("--user"),
+            "a read-only run needs no uid: {line}"
+        );
+    }
+
+    /// StegExpose scans a directory and writes beside its input, so the
+    /// harness gives it the whole directory and a uid. A paste that mounted
+    /// one read-only file would print nothing and exit zero.
+    #[test]
+    fn a_tool_that_writes_beside_its_input_pastes_with_the_directory_mounted() {
+        let e = parsed_entry(
+            "name = \"stegexpose\"\nkind = \"detector\"\nlicence = \"GPL-3.0\"\n\
+             [image]\nreference = \"stegobench/stegexpose@sha256:def\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"/work\", \"default\", \"0.2\"]\n\
+             writable_workdir = true\nparser = \"stegexpose\"\n",
+        );
+        let line = runnable_command(&e, &[]).expect("a container has a command");
+        assert!(line.contains("-v \"$PWD\":/work"), "{line}");
+        assert!(line.contains("--user $(id -u):$(id -g)"), "{line}");
+        assert!(
+            !line.contains("{file}"),
+            "nothing to substitute here: {line}"
+        );
+    }
+
+    /// The old line printed `invoke.argv` alone, which for a binary entry is
+    /// the arguments without the program: `{file}`, by itself.
+    #[test]
+    fn a_binary_tool_pastes_with_the_program_name_it_needs() {
+        let e = parsed_entry(
+            "name = \"stegcore\"\nkind = \"detector\"\nlicence = \"AGPL-3.0-or-later\"\n\
+             [binary]\ncommand = [\"stegcore\", \"analyse\", \"--json\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"stegcore\"\n",
+        );
+        assert_eq!(
+            runnable_command(&e, &[]).as_deref(),
+            Some("stegcore analyse --json {file}")
+        );
+    }
+
+    /// An adapter that is not where the registry says it is would paste a
+    /// mount of a path that does not exist, which fails at the runtime rather
+    /// than where the reader can see why.
+    #[test]
+    fn an_entry_with_nothing_runnable_pastes_no_command_at_all() {
+        let missing_adapter = parsed_entry(
+            "name = \"aletheia-rs\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"stegobench/aletheia@sha256:abc\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nadapter = \"nowhere/at/all.py\"\nentrypoint = \"python3\"\n\
+             argv = [\"{adapter}\", \"{file}\"]\nparser = \"number\"\n",
+        );
+        assert_eq!(runnable_command(&missing_adapter, &[]), None);
+
+        let nothing_declared = parsed_entry(
+            "name = \"aletheia-rich\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"stegobench/aletheia-rich@sha256:abc\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n",
+        );
+        assert_eq!(runnable_command(&nothing_declared, &[]), None);
+    }
+
+    /// An adapter that IS there is mounted read only and named by the path it
+    /// has inside the container, not the one it has here.
+    #[test]
+    fn an_adapter_is_mounted_and_then_referred_to_by_its_inside_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapters = tmp.path().join("plugins/adapters");
+        std::fs::create_dir_all(&adapters).unwrap();
+        std::fs::write(adapters.join("one.py"), "print(0)\n").unwrap();
+        let e = parsed_entry(
+            "name = \"aletheia-rs\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [image]\nreference = \"stegobench/aletheia@sha256:abc\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nadapter = \"plugins/adapters/one.py\"\nentrypoint = \"python3\"\n\
+             env = [\"PYTHONPATH=/opt/aletheia\"]\n\
+             argv = [\"{adapter}\", \"{file}\", \"rs\"]\nparser = \"number\"\n",
+        );
+        let line = runnable_command(&e, &[tmp.path().to_path_buf()]).expect("resolvable");
+        assert!(line.contains(":/adapter/one.py:ro"), "{line}");
+        assert!(line.contains("-e PYTHONPATH=/opt/aletheia"), "{line}");
+        assert!(line.contains("--entrypoint python3"), "{line}");
+        assert!(line.ends_with("/adapter/one.py /work/{file} rs"), "{line}");
+        assert!(
+            !line.contains("{adapter}"),
+            "the placeholder survived: {line}"
+        );
+    }
+
+    /// The built-in registry unpacks its adapters into a scratch directory
+    /// that is gone when the command ends, so `describe` must not print a
+    /// command naming a path that will not be there when it is pasted.
+    #[test]
+    fn a_command_is_never_printed_against_an_adapter_that_will_not_survive() {
+        let built_in = registry::Resolved::built_in().expect("the built-in registry loads");
+        let out = cmd_describe(&built_in, "aletheia-rs", false);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        let temp = std::env::temp_dir().display().to_string();
+        assert!(
+            !out.human.contains(&temp),
+            "a scratch path was offered to be pasted: {}",
+            out.human
+        );
+        assert!(
+            out.human.contains("no command to paste"),
+            "the reader is left with nothing and no reason: {}",
+            out.human
+        );
+        assert!(
+            out.human.contains("--registry plugins/registry"),
+            "nothing says how to get the command: {}",
+            out.human
+        );
+        // The same tool off a registry on disk does print one, so this is a
+        // property of where the adapter lives rather than of the entry.
+        let on_disk = cmd_describe(&resolved_at(shipped_registry()), "aletheia-rs", false);
+        assert!(
+            on_disk.human.contains("docker run --rm"),
+            "a registry with its adapters beside it still cannot paste: {}",
+            on_disk.human
+        );
+    }
+
+    /// A service is reached by an adapter running HERE, so the image is the
+    /// subject rather than the thing to start.
+    #[test]
+    fn a_service_pastes_the_adapter_that_runs_on_this_machine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapters = tmp.path().join("plugins/adapters");
+        std::fs::create_dir_all(&adapters).unwrap();
+        std::fs::write(adapters.join("svc.py"), "print(0)\n").unwrap();
+        let e = parsed_entry(
+            "name = \"stegashield\"\nkind = \"detector\"\nlicence = \"proprietary\"\n\
+             [image]\nreference = \"5iprojects/stegashield@sha256:abc\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nhost = true\nadapter = \"plugins/adapters/svc.py\"\n\
+             entrypoint = \"python3\"\nargv = [\"{adapter}\", \"{file}\"]\nparser = \"number\"\n",
+        );
+        let line = runnable_command(&e, &[tmp.path().to_path_buf()]).expect("resolvable");
+        assert!(line.starts_with("python3 "), "{line}");
+        assert!(
+            !line.contains("docker"),
+            "a service is not started here: {line}"
+        );
+        assert!(line.ends_with("{file}"), "{line}");
+    }
+
+    /// Both status words were true about the harness and read as claims about
+    /// the reader: `[ready]` sent one looking for a binary that only exists
+    /// inside an image, and `[unknown]` on the corpus that ships in the binary
+    /// read as a fault beside it.
+    #[test]
+    fn the_status_word_says_who_it_is_about() {
+        let ready = needs::Needs {
+            readiness: needs::Readiness::Ready,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            readiness_word(&ready, "tool", "zsteg"),
+            "stegobench can run it"
+        );
+
+        let unknown = needs::Needs {
+            readiness: needs::Readiness::Unknown,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            readiness_word(&unknown, "corpus", STARTER_ID),
+            "included in this binary"
+        );
+        assert_eq!(
+            readiness_word(&unknown, "corpus", "bossbase"),
+            "bring your own copy"
+        );
+        // A tool whose readiness genuinely cannot be established keeps the
+        // word that says so.
+        assert_eq!(readiness_word(&unknown, "tool", "stegashield"), "unknown");
+
+        let needs_you = needs::Needs {
+            readiness: needs::Readiness::NeedsYou,
+            steps: Vec::new(),
+        };
+        assert_eq!(readiness_word(&needs_you, "tool", "stegcore"), "NEEDS YOU");
+    }
+
+    /// Every whole number in a line, in the order it is printed.
+    fn numbers_in(line: &str) -> Vec<u64> {
+        line.split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    }
+
+    /// The summary used to be one comma list over two independent questions:
+    /// "13 tool(s): 6 verified, 0 answering, 0 broken, 2 not installed, 1
+    /// undetermined, 7 not checked", which sums to 16 against the 13 in front
+    /// of it. A reader adds a comma list up against the total beside it, so
+    /// every list that can be summed has to sum.
+    #[test]
+    fn every_count_doctor_prints_adds_up_to_the_total_beside_it() {
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false);
+        let total = out.json["checked"].as_u64().expect("a total");
+        assert!(total > 1, "a registry of one proves nothing here");
+
+        let mut summed = 0;
+        for (head, from_second) in [
+            ("tool(s):", true),
+            ("On this machine:", false),
+            ("Stegobench's own self-test:", false),
+        ] {
+            let line = out
+                .human
+                .lines()
+                .find(|l| l.contains(head))
+                .unwrap_or_else(|| panic!("no line for {head:?}: {}", out.human));
+            let found = numbers_in(line);
+            let (stated, parts) = if from_second {
+                (found[0], &found[1..])
+            } else {
+                (total, &found[..])
+            };
+            assert_eq!(stated, total, "{head:?} states a different total: {line}");
+            assert_eq!(
+                parts.iter().sum::<u64>(),
+                total,
+                "{head:?} does not add up to {total}: {line}"
+            );
+            summed += 1;
+        }
+        assert_eq!(summed, 3, "a line went unchecked");
+    }
+
+    /// `doctor` listed thirteen tools, `list detectors` listed seven, and the
+    /// word "embedder" appeared on neither screen. A reader with no way to
+    /// tell which six were the difference reads it as something broken.
+    #[test]
+    fn doctor_and_the_listing_both_say_which_kind_each_tool_is() {
+        let dir = shipped_registry();
+        let doctor = cmd_doctor(&resolved_at(&dir), None, false);
+        let listing = cmd_list(&resolved_at(&dir), "all");
+        let detectors = doctor.json["detectors"].as_u64().expect("a count");
+        let embedders = doctor.json["embedders"].as_u64().expect("a count");
+        assert!(detectors > 0 && embedders > 0, "one kind is missing here");
+        for screen in [&doctor.human, &listing.human] {
+            for heading in [
+                format!("DETECTORS ({detectors})"),
+                format!("EMBEDDERS ({embedders})"),
+            ] {
+                assert!(screen.contains(&heading), "no {heading:?} in:\n{screen}");
+            }
+        }
+        // The count under each heading is the count `list <kind>` gives, so
+        // the two screens cannot drift apart.
+        for (kind, count) in [("detectors", detectors), ("embedders", embedders)] {
+            let one = cmd_list(&resolved_at(&dir), kind);
+            assert_eq!(
+                one.json["tools"].as_array().map(Vec::len),
+                Some(count as usize),
+                "`list {kind}` and the grouped screens disagree"
+            );
+        }
+    }
+
+    /// A bare `stegobench list` printed thirteen tool rows, a footer, then
+    /// five corpus rows, with nothing saying which was which.
+    #[test]
+    fn a_bare_listing_says_where_the_tools_end_and_the_corpora_begin() {
+        let dir = shipped_registry();
+        let out = cmd_list(&resolved_at(&dir), "all");
+        let corpora = out.json["corpora"].as_array().expect("corpora").len();
+        assert!(
+            out.human.contains(&format!("CORPORA ({corpora})")),
+            "{}",
+            out.human
+        );
+        let heading = out.human.find("CORPORA (").expect("the corpora heading");
+        let tools = out.human.find("DETECTORS (").expect("the tools heading");
+        assert!(tools < heading, "the corpora are listed before the tools");
+    }
+
+    /// The pasteable command is long and carries a note under it. A second
+    /// line that started in column zero would read as the next field.
+    #[test]
+    fn a_fact_of_several_lines_keeps_the_column() {
+        let block = describe_block(
+            &needs::Needs {
+                readiness: needs::Readiness::Ready,
+                steps: Vec::new(),
+            },
+            "thing",
+            "tool",
+            &[
+                ("Short", "one".to_string()),
+                ("Much longer", "first\nsecond".to_string()),
+            ],
+        );
+        let lines: Vec<&str> = block.lines().collect();
+        let continuation = lines
+            .iter()
+            .find(|l| l.trim() == "second")
+            .expect("the second line survived");
+        let head = lines
+            .iter()
+            .find(|l| l.starts_with("Much longer"))
+            .expect("the labelled line");
+        assert_eq!(
+            continuation.find("second"),
+            head.find("first"),
+            "the continuation does not line up: {continuation:?} against {head:?}"
+        );
     }
 
     /// Neither of the two signposts may be offered as the nearest match to
@@ -5033,6 +5748,59 @@ mod tests {
         assert!(
             out_dir.join("sizer.records.jsonl").exists(),
             "the records did not follow the document into the directory"
+        );
+    }
+
+    /// "AUC" is never expanded on this screen and the bracketed pair beside
+    /// it is never explained, so the screen has to say where both are
+    /// defined. It used to point only at a report of a run that had just
+    /// happened, which is a next step rather than an answer.
+    #[cfg(unix)]
+    #[test]
+    fn the_score_summary_says_where_its_two_unexplained_figures_are_defined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let out_dir = tmp.path().join("results");
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: Some(&out_dir),
+                timeout: 5,
+                limit: None,
+                split: None,
+            },
+        );
+        assert!(
+            out.human.contains("AUC "),
+            "nothing to explain: {}",
+            out.human
+        );
+        assert!(
+            out.human.contains("`stegobench help results`"),
+            "the summary explains neither figure and points nowhere: {}",
+            out.human
+        );
+        // Beside the figures, not at the bottom of the screen: a definition a
+        // screen away from the number is one nobody reads.
+        let figure = out.human.find("AUC ").expect("an AUC");
+        let pointer = out
+            .human
+            .find("`stegobench help results`")
+            .expect("a pointer");
+        assert!(pointer > figure, "the pointer comes before the figure");
+        assert!(
+            out.human[figure..pointer].lines().count() <= 6,
+            "the pointer is not beside the figures: {}",
+            out.human
         );
     }
 
