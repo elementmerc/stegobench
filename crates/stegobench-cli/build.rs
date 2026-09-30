@@ -360,7 +360,7 @@ fn write_man_pages(cmd: &clap::Command, dir: &std::path::Path) -> std::io::Resul
     // stegobench(1): the root page.
     let root_page = dir.join(format!("{}.1", cmd.get_name()));
     let mut buf: Vec<u8> = Vec::new();
-    clap_mangen::Man::new(cmd.clone()).render(&mut buf)?;
+    render_page(cmd, &mut buf)?;
     buf.extend_from_slice(trailer.as_bytes());
     fs::write(&root_page, &buf)?;
 
@@ -383,11 +383,143 @@ fn write_man_pages(cmd: &clap::Command, dir: &std::path::Path) -> std::io::Resul
         // short-lived, single-purpose process that exits right after this
         // function returns; it would be the wrong call in the shipped binary.
         let name: &'static str = Box::leak(name.into_boxed_str());
-        clap_mangen::Man::new(sub.clone().name(name)).render(&mut buf)?;
+        render_page(&sub.clone().name(name), &mut buf)?;
         buf.extend_from_slice(trailer.as_bytes());
         fs::write(&page, &buf)?;
     }
     Ok(())
+}
+
+/// One page, with a SYNOPSIS this project writes rather than the one
+/// `clap_mangen` generates.
+///
+/// Everything else is `clap_mangen`'s, section for section and in its order,
+/// so only the line that was wrong is ours to keep right.
+///
+/// WHY THE SYNOPSIS IS NOT THE GENERATED ONE
+///
+/// `clap_mangen` prints an option's name and never its value name, so
+/// `--corpus <DIR>` came out as `<--corpus>`: angle brackets around a bare
+/// flag, which in a synopsis conventionally wrap a value the reader supplies
+/// and here wrap a word they must type verbatim. It read as though `--corpus`
+/// were a placeholder and it hid the one thing the line is for, which is what
+/// each flag takes. The value names are all declared in `cli.rs` already;
+/// nothing here invents one.
+fn render_page(cmd: &clap::Command, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    // Every section renderer emits this two-line apostrophe preamble of its
+    // own, because each one is written as a whole document. Repeating it six
+    // times is harmless and unreadable, so it is kept once, at the top.
+    const PREAMBLE: &str = ".ie \\n(.g .ds Aq \\(aq\n.el .ds Aq '\n";
+    let man = clap_mangen::Man::new(cmd.clone());
+    let mut first = true;
+    let mut section = |render: &dyn Fn(&mut Vec<u8>) -> std::io::Result<()>,
+                       into: &mut Vec<u8>|
+     -> std::io::Result<()> {
+        let mut part: Vec<u8> = Vec::new();
+        render(&mut part)?;
+        let body = match (first, part.strip_prefix(PREAMBLE.as_bytes())) {
+            (false, Some(rest)) => rest,
+            _ => &part[..],
+        };
+        first = false;
+        into.extend_from_slice(body);
+        Ok(())
+    };
+
+    section(&|w| man.render_title(w), buf)?;
+    section(&|w| man.render_name_section(w), buf)?;
+    let mine = format!(".SH SYNOPSIS\n{}\n", synopsis(cmd));
+    buf.extend_from_slice(mine.as_bytes());
+    section(&|w| man.render_description_section(w), buf)?;
+    if cmd.get_arguments().any(|a| !a.is_hide_set()) {
+        section(&|w| man.render_options_section(w), buf)?;
+    }
+    if cmd.get_subcommands().any(|s| !s.is_hide_set()) {
+        section(&|w| man.render_subcommands_section(w), buf)?;
+    }
+    if cmd.get_after_long_help().is_some() || cmd.get_after_help().is_some() {
+        section(&|w| man.render_extra_section(w), buf)?;
+    }
+    if cmd.get_version().is_some() || cmd.get_long_version().is_some() {
+        section(&|w| man.render_version_section(w), buf)?;
+    }
+    if cmd.get_author().is_some() {
+        section(&|w| man.render_authors_section(w), buf)?;
+    }
+    Ok(())
+}
+
+/// The SYNOPSIS line: every visible argument, with the value it takes.
+///
+/// Angle brackets mean "you supply this", square brackets mean optional,
+/// which is the convention every other man page on the machine uses.
+fn synopsis(cmd: &clap::Command) -> String {
+    let mut parts = vec![format!(
+        "\\fB{}\\fR",
+        roff_escape(cmd.get_bin_name().unwrap_or_else(|| cmd.get_name()))
+    )];
+    for arg in cmd.get_arguments().filter(|a| !a.is_hide_set()) {
+        // Positionals come round again in the loop below, where they are
+        // rendered as the value they are rather than as a flag.
+        let mut piece = match (arg.get_short(), arg.get_long()) {
+            (Some(short), Some(long)) => format!(
+                "\\fB\\-{}\\fR|\\fB\\-\\-{}\\fR",
+                roff_escape(&short.to_string()),
+                roff_escape(long)
+            ),
+            (Some(short), None) => format!("\\fB\\-{}\\fR", roff_escape(&short.to_string())),
+            (None, Some(long)) => format!("\\fB\\-\\-{}\\fR", roff_escape(long)),
+            (None, None) => continue,
+        };
+        // A switch carries a value name after `build()` even though it takes
+        // no value, so `--json` came out as `--json <JSON>`. The action is
+        // what says whether anything is typed after the flag.
+        if arg.get_action().takes_values() {
+            if let Some(values) = arg.get_value_names() {
+                piece.push_str(&format!(" \\fI<{}>\\fR", roff_escape(&values.join("> <"))));
+            }
+        }
+        if matches!(
+            arg.get_num_args().map(|r| r.max_values()),
+            Some(n) if n > 1
+        ) {
+            piece.push_str("...");
+        }
+        parts.push(wrap(&piece, arg.is_required_set()));
+    }
+    for arg in cmd.get_positionals().filter(|a| !a.is_hide_set()) {
+        let name = match arg.get_value_names() {
+            Some(values) => values.join("> <"),
+            None => arg.get_id().to_string(),
+        };
+        let mut piece = format!("\\fI<{}>\\fR", roff_escape(&name));
+        if matches!(arg.get_num_args().map(|r| r.max_values()), Some(n) if n > 1) {
+            piece.push_str("...");
+        }
+        parts.push(wrap(&piece, arg.is_required_set()));
+    }
+    if cmd.has_subcommands() {
+        let required = cmd.is_subcommand_required_set();
+        parts.push(wrap("\\fI<COMMAND>\\fR", required));
+    }
+    parts.join(" ")
+}
+
+/// Square brackets for optional, bare for required.
+///
+/// A required flag is not wrapped at all: brackets around it would say the
+/// opposite of what it is, and there is no third bracket in the convention.
+fn wrap(piece: &str, required: bool) -> String {
+    if required {
+        piece.to_string()
+    } else {
+        format!("[{piece}]")
+    }
+}
+
+/// A backslash in roff starts an escape, so one in a name has to be doubled.
+fn roff_escape(text: &str) -> String {
+    text.replace('\\', "\\e").replace('-', "\\-")
 }
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {

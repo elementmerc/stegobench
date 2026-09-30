@@ -77,7 +77,9 @@ stegobench fetch stegobench-starter --tier nano
 
 That writes the corpus to `./stegobench-starter`; `--dest` puts it somewhere
 else. It's six synthetic greyscale covers and the twelve LSB stego images made
-from them, eighteen files in total, under CC0. You don't need a clone of this
+from them, eighteen images in total, under CC0. Each image has a JSON record
+beside it, and there's a manifest, a README and the script that built them, so
+`fetch` reports thirty nine files written. You don't need a clone of this
 repository for any of it; the bytes are inside the binary you installed. (If
 you happen to have a clone, they're also at `corpora/starter`, and they're the
 same bytes.)

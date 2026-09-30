@@ -47,8 +47,8 @@ anyone could apply to themselves:
 
 ## What a submission must carry
 
-A `result-v1` document (see `crates/stegobench-core/src/result.rs` and
-`stegobench schema result-v1`), with the fields that make a division
+A `result-v1` document (`stegobench schema result-v1` prints the schema it is
+checked against), with the fields that make a division
 determination possible: `subject`, `corpus` (including its digest),
 `arm`, `metrics` (including `n_error`, required rather than optional, so a
 partly failed run cannot be reported as a clean one), `provenance` (the
