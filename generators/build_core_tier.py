@@ -44,10 +44,13 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
 from concurrent import futures
+
+import tiers
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -56,6 +59,12 @@ SECONDS_PER_ADAPTIVE_PAIR = 1.96
 #: The JPEG tool arms shell out to containers and are I/O bound, so they cost
 #: far less CPU per pair and parallelise further than the adaptive ones.
 SECONDS_PER_JPEG_COVER = 3.0
+
+#: Derived from the measured Core build: 10,000 covers came to 48 GB across
+#: every arm, so 4.8 MB per cover. A FLOOR rather than a budget. The working
+#: tree also holds the clean JPEG pool and each builder's manifest, and a
+#: resumed build keeps whatever the interrupted one had already written.
+BYTES_PER_COVER = 4_800_000
 
 SPATIAL_SCHEMES = ("hugo", "wow", "suniward", "hill", "mipod")
 JPEG_SCHEMES = ("juniward", "uerd")
@@ -112,6 +121,50 @@ def plan_jobs(count: int, out: pathlib.Path, covers: pathlib.Path,
             })
 
     return jobs
+
+
+def preflight(count: int, covers: pathlib.Path, manifest: pathlib.Path,
+              out: pathlib.Path) -> list[str]:
+    """Everything a run needs, checked before the first job starts.
+
+    A dry run planned thirty five jobs and said how long they would take
+    without once looking at whether any of them could start. The real command
+    then fired all thirty five, and each one refused separately with the same
+    reason, so the answer arrived thirty five times over and an hour later than
+    the plan that promised it.
+
+    Returns the problems as sentences. An empty list means the run can start.
+    """
+    problems: list[str] = []
+
+    if not covers.is_dir():
+        problems.append(f"no cover directory at {covers}. Fetch covers first, "
+                        f"with `pentimento fetch-commons`.")
+    if not manifest.is_file():
+        problems.append(f"no manifest at {manifest}. Every job selects its "
+                        f"covers through it, so none of them can start.")
+    else:
+        # The tier selector owns this rule and already explains each way it
+        # fails, so ask it rather than restating it here and drifting.
+        try:
+            tiers.tier_cover_names(manifest, count)
+        except tiers.TierError as problem:
+            problems.append(str(problem))
+
+    wanted = count * BYTES_PER_COVER
+    try:
+        free = shutil.disk_usage(out).free
+    except OSError as problem:
+        # Not fatal. A build that can't be sized is still a build worth
+        # attempting, and refusing over a stat is worse than running.
+        print(f"could not check free space on {out}: {problem}", file=sys.stderr)
+    else:
+        if free < wanted:
+            problems.append(
+                f"{out} has {free / 1e9:.1f} GB free and this build writes at "
+                f"least {wanted / 1e9:.1f} GB. A build that fills the disk "
+                f"partway leaves arms that look finished and are not.")
+    return problems
 
 
 def run_job(job: dict, log_dir: pathlib.Path, timeout: int) -> dict:
@@ -181,10 +234,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"estimated {total_cpu / 3600:.1f} CPU-hours, "
           f"about {total_cpu / 3600 / args.jobs:.1f} hours wall clock at "
           f"--jobs {args.jobs}")
+    print(f"at least {args.count * BYTES_PER_COVER / 1e9:.1f} GB of disk, "
+          f"measured from the Core build and not counting a resume")
+
+    problems = preflight(args.count, covers, manifest, out)
     if args.dry_run:
         for j in pending:
             print(f"  {j['name']:<20} {j['kind']:<14} ~{j['est_seconds'] / 3600:.1f}h")
+        if problems:
+            print("", file=sys.stderr)
+            for problem in problems:
+                print(problem, file=sys.stderr)
+            print("This plan cannot run as it stands.", file=sys.stderr)
+            return 3
         return 0
+
+    if problems:
+        # Refused here, once, rather than by every job separately.
+        print("", file=sys.stderr)
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        print("Nothing was started.", file=sys.stderr)
+        return 3
 
     # The DCT arms need clean JPEGs, which the jpeg-tools job produces. Running
     # them first is a dependency, not an optimisation, so it is a separate wave
