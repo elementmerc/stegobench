@@ -332,11 +332,36 @@ fn collect_toml(
     Ok(())
 }
 
+/// A roff trailer naming where the project lives, appended to every page.
+///
+/// A man page is often the only thing an offline reader has: no browser tab
+/// open on the repository, no `--help` scrollback, nothing that says where to
+/// report what they just found. `clap_mangen` renders no such section, so it
+/// is appended here rather than left to the reader to guess.
+///
+/// Every page carries it, not only the root, because `man stegobench-score`
+/// is a destination in its own right and a reader who lands there should not
+/// have to know that another page exists to find the address.
+///
+/// Plain text rather than the `.UR`/`.UE` hyperlink macros, which come from
+/// the `www.tmac` package and render as literal macro names where it is
+/// absent.
+fn reporting_section() -> String {
+    format!(
+        ".SH \"REPORTING BUGS\"\nReport bugs, read the source and check the \
+         documentation at:\n.PP\n{}\n",
+        env!("CARGO_PKG_REPOSITORY")
+    )
+}
+
 fn write_man_pages(cmd: &clap::Command, dir: &std::path::Path) -> std::io::Result<()> {
+    let trailer = reporting_section();
+
     // stegobench(1): the root page.
     let root_page = dir.join(format!("{}.1", cmd.get_name()));
     let mut buf: Vec<u8> = Vec::new();
     clap_mangen::Man::new(cmd.clone()).render(&mut buf)?;
+    buf.extend_from_slice(trailer.as_bytes());
     fs::write(&root_page, &buf)?;
 
     // One page per subcommand group, named stegobench-<name>.1, which is the
@@ -359,6 +384,7 @@ fn write_man_pages(cmd: &clap::Command, dir: &std::path::Path) -> std::io::Resul
         // function returns; it would be the wrong call in the shipped binary.
         let name: &'static str = Box::leak(name.into_boxed_str());
         clap_mangen::Man::new(sub.clone().name(name)).render(&mut buf)?;
+        buf.extend_from_slice(trailer.as_bytes());
         fs::write(&page, &buf)?;
     }
     Ok(())

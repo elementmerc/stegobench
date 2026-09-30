@@ -327,8 +327,14 @@ pub struct Accepts {
 
 /// What one image costs, which is what the governor multiplies by the run size.
 ///
-/// Declared values are estimates and are replaced by measured ones once a run
-/// has been seen on this machine. They exist so that `stegobench plan` can
+/// Every value here is DECLARED by the registry entry, by whoever wrote it.
+/// Nothing measures a run and writes a corrected figure back: there is no
+/// such mechanism, and `plan` presents these as a lower bound the entry
+/// claims rather than as a rate anything observed. An entry that understates
+/// its own cost produces an estimate that is wrong in the optimistic
+/// direction, and only a real run will say so.
+///
+/// They exist so that `stegobench plan` can
 /// refuse before the damage: on 2026-09-17 a run became 128 Octave workers on
 /// 16 cores and produced 298 OOM kills, for a measured 1.2x speedup, and
 /// nothing in the tooling could have said so in advance.

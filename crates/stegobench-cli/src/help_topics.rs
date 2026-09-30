@@ -282,6 +282,36 @@ of zero width means every answer was identical, so the AUC is 0.5 by \
 construction rather than by measurement: the detector did not separate \
 anything. `score` says so out loud when it happens.
 
+An AUC below 0.5 is not a detector that sees nothing. It is usually one \
+wired up backwards: every stego image scored under every clean one, which \
+takes as much signal as getting it the right way round. Check the adapter's \
+sign before reading it as a measurement.
+
+HOW FINE A FALSE-ALARM RATE YOUR CORPUS CAN ACTUALLY SHOW
+
+`TPR@1%FA` is the detection rate you get while wrongly flagging 1 clean \
+image in 100, and it is the figure most people are really after. It has a \
+floor nobody mentions: a corpus of N clean images can only ever show \
+false-alarm rates that are multiples of 1/N.
+
+Six clean images means the only rates that exist are 0, 16.7%, 33.3% and so \
+on. Ask such a corpus for 1% and the honest answer is the 0% answer, because \
+1% buys nothing that 0% did not already buy. The arithmetic is right; a \
+column headed \"TPR@1%FA\" over it is not.
+
+So `score` says so when it happens, `report` marks the cell, and both \
+`score` and `metrics` record the rate the figure actually came from beside \
+the one you asked for. Where the two differ, read the achieved one.
+
+  clean images    finest rate it can show
+  6               16.7%
+  100             1%
+  1,000           0.1%
+  10,000          0.01%
+
+There is no fix except more clean images. A number quoted at a budget the \
+corpus could not express is a claim about a measurement nobody made.
+
 1. WAS IT MEASURED ON THE CORPUS IT NAMES?
 
   stegobench verify their-result.json --corpus ./the-corpus
