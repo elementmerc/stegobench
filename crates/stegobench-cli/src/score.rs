@@ -48,9 +48,9 @@ use stegobench_core::corpus::CorpusEntry;
 use stegobench_core::header::{self, Shape};
 use stegobench_core::registry::{Entry, Kind};
 use stegobench_core::result::{
-    Arm, ArmMetrics, Configuration, CorpusRef, CorpusSource, Declarations, Determinism, Domain,
-    Host, Isolation, Metrics, Pairing, PinnedBy, PluginRef, Provenance, Rate, RateUnit, Result1,
-    SelfTest, SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
+    AdapterRef, Arm, ArmMetrics, Configuration, CorpusRef, CorpusSource, Declarations, Determinism,
+    Domain, Host, Isolation, Metrics, Pairing, PinnedBy, PluginRef, Provenance, Rate, RateUnit,
+    Result1, SelfTest, SplitDiscipline, Subject, SubjectKind, RESULT_SCHEMA_ID,
 };
 use stegobench_core::samples::{Role, Sample, Samples};
 use stegobench_plugin::runner::{self, JsonLines, Tally};
@@ -941,7 +941,7 @@ where
     }
 
     let mut tpr_at_fpr = BTreeMap::new();
-    let mut tpr_at_fpr_achieved = BTreeMap::new();
+    let mut fpr_achieved = BTreeMap::new();
     // A budget finer than one clean image cannot be spent, and the figure
     // then belongs to a rate nobody asked for. Collected so it is said once
     // with all three rates rather than three times.
@@ -952,7 +952,7 @@ where
                 let key = format!("{fpr:.2}");
                 tpr_at_fpr.insert(key.clone(), tpr);
                 if let Some(point) = stegobench_metrics::operating_point(&scores, &labels, fpr) {
-                    tpr_at_fpr_achieved.insert(key, point.achieved_fpr);
+                    fpr_achieved.insert(key, point.achieved_fpr);
                     if !point.budget_was_expressible(n_clean as usize) {
                         unspendable.push(format!("{:.0}%", fpr * 100.0));
                     }
@@ -994,7 +994,28 @@ where
         ));
     }
 
+    // Said where a reader is looking, because the two timing fields in the
+    // document are about to be true and misleading at the same time. A
+    // reviewer read `elapsed_seconds: 0.004` over eighteen images and asked,
+    // correctly, when the detection had actually run.
+    if tally.resumed > 0 && tally.scored == 0 {
+        progress(&format!(
+            "every one of the {} answer(s) came from the existing records, so \
+             nothing was scored. The run time and start time below are this \
+             command's, not the measurement's",
+            tally.resumed
+        ));
+    } else if tally.resumed > 0 {
+        progress(&format!(
+            "{} answer(s) came from the existing records and {} were scored \
+             now, so the run time below covers this command rather than the \
+             whole measurement",
+            tally.resumed, tally.scored
+        ));
+    }
+
     let (version, pinned_by) = pinning(entry);
+    let adapter = adapter_ref(entry, adapter_roots);
 
     let mut result = Result1 {
         schema: RESULT_SCHEMA_ID.to_string(),
@@ -1042,7 +1063,7 @@ where
             auc,
             auc_ci95,
             tpr_at_fpr,
-            tpr_at_fpr_achieved,
+            fpr_achieved,
             verdict_rate: None,
             n_clean,
             n_stego,
@@ -1056,6 +1077,11 @@ where
                 image: version,
                 determinism: entry.determinism.unwrap_or(Determinism::Unstated),
                 selftest,
+                adapter,
+                // Declared, not expanded: the expanded form carries this
+                // machine's absolute paths and this document is written to be
+                // given away.
+                argv: entry.invoke.as_ref().map(|i| i.argv.clone()),
                 // Two fields because an entry can declare an image AND
                 // `invoke.host`: the image digest names the subject while what
                 // executes is an adapter here that posts to a running
@@ -1071,6 +1097,17 @@ where
             // work this number rests on. What it does NOT include is time
             // spent on the other detectors of the same command: waiting for a
             // different measurement is not part of making this one.
+            // THIS INVOCATION, which on a resumed run is not the
+            // measurement. A resume re-reads the existing records and scores
+            // nothing, so a document written by one says eighteen images were
+            // scored in four milliseconds and dates itself to the moment of
+            // the resume rather than of the detection. Both fields are then
+            // true about a run that measured nothing and read as though they
+            // describe the one that did.
+            //
+            // The honest figure needs the first run's start carried forward,
+            // and there is nowhere trustworthy to carry it yet, so what this
+            // does instead is say so out loud where a reader will see it.
             elapsed_seconds: prepared.preflight.as_secs_f64() + own_started.elapsed().as_secs_f64(),
             // Three routes, three answers, and the one-line version used to
             // get two of them wrong.
@@ -1085,6 +1122,9 @@ where
             // three.
             network_reachable: !runs_in_container(entry),
             host: Some(host()),
+            // Filled in after the run, below: the file is still being
+            // appended to at this point.
+            records: None,
         },
         declarations: Declarations {
             split_discipline: checks.split,
@@ -1099,6 +1139,15 @@ where
         },
         content_digest: None,
     };
+    // AFTER THE RUN, because the file is appended to as each item is scored
+    // and a digest taken before the last write names a file nobody has.
+    //
+    // Failing to read it back is not a reason to lose the measurement, which
+    // is finished and correct. The field is left absent and the document then
+    // says nothing about its records rather than saying something wrong: an
+    // absent digest and a digest that does not match are different, and only
+    // one of them is an accusation.
+    result.provenance.records = stegobench_core::result::records_digest(records).ok();
     // Last, because it covers every other field. Sealing earlier would digest
     // a document that did not exist yet.
     result.seal();
@@ -2056,6 +2105,27 @@ fn host() -> Host {
 }
 
 /// How the subject identifies itself: an image digest, or the binary's hash.
+/// The adapter that read the tool's output, hashed.
+///
+/// A pinned container plus an unpinned adapter is not a pinned measurement: the
+/// adapter is what decides which number in the tool's output is the score, and
+/// the sandbox is handed it from the host at run time. Nothing recorded it, so
+/// a reader with the exact image still could not reproduce a figure.
+///
+/// Returns `None` where the entry needs no adapter, and also where the file
+/// cannot be read or hashed. That second case is deliberate: an entry saying
+/// "there was an adapter and here is its hash" and one saying nothing are
+/// different statements, and a hash-shaped "unknown" would be neither.
+fn adapter_ref(entry: &Entry, roots: &[PathBuf]) -> Option<AdapterRef> {
+    let declared = entry.invoke.as_ref()?.adapter.as_ref()?;
+    let path = stegobench_plugin::adapter::resolve(declared, roots).ok()?;
+    let sha256 = stegobench_plugin::hash_file(&path).ok()?;
+    Some(AdapterRef {
+        declared: declared.clone(),
+        sha256,
+    })
+}
+
 fn pinning(entry: &Entry) -> (String, PinnedBy) {
     if let Some(image) = &entry.image {
         // AN IMAGE IS ONLY A PIN WHERE THIS HARNESS ACTUALLY RAN IT. A

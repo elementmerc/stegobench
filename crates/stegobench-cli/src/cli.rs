@@ -707,6 +707,20 @@ pub enum Command {
         /// an id becomes a directory.
         #[arg(short = 'c', long, value_name = "DIR")]
         corpus: std::path::PathBuf,
+        /// Also check the per-item scores against the digest the document
+        /// records for them.
+        ///
+        /// Every metric in a result is a summary of one score per image, and
+        /// those live in a separate file. This says whether the file you were
+        /// given is the one this document was computed from, which is what
+        /// anybody re-deriving a figure has to establish first.
+        ///
+        /// It does NOT say the scores are the detector's. Whoever ran the
+        /// measurement wrote that file and could have written anything into
+        /// it, and a digest taken afterwards agrees with whatever they wrote.
+        /// `declarations.self_reported` is the field that speaks to that.
+        #[arg(long, value_name = "FILE")]
+        records: Option<std::path::PathBuf>,
         /// Compare the records only, without re-reading the images.
         ///
         /// The default re-reads every image and checks it against the digest

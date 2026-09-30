@@ -1499,7 +1499,7 @@ fn cmd_validate(file: &Path) -> Output {
 /// unless the caller passes `shallow`, every image is re-read and checked
 /// against the digest its record states before this says the bytes are the
 /// bytes.
-fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
+fn cmd_verify(file: &Path, corpus: &Path, records: Option<&Path>, shallow: bool) -> Output {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -1543,6 +1543,55 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                     file.display()
                 ),
             );
+        }
+    }
+
+    // Also about the document rather than the corpus, so it sits with the
+    // seal check and before any image is read. Only when asked for: a reader
+    // who was not given the per-item scores still gets the corpus checks, and
+    // silently skipping a file they did pass would be the worse failure.
+    if let Some(path) = records {
+        let Some(claimed) = result.provenance.records.as_ref() else {
+            return Output::err_because(
+                exit::VERIFY_MISMATCH,
+                "records-unrecorded",
+                format!(
+                    "{} records no digest for its per-item scores, so {} \
+                     cannot be checked against it. The document was written \
+                     before this was recorded, or by a run that wrote no \
+                     records file",
+                    file.display(),
+                    path.display()
+                ),
+            );
+        };
+        match stegobench_core::result::records_digest(path) {
+            Err(e) => {
+                return Output::err(
+                    exit::FAILURE,
+                    format!("cannot read {}: {e}", path.display()),
+                )
+            }
+            Ok(found) if found.digest != claimed.digest => {
+                return Output::err_because(
+                    exit::VERIFY_MISMATCH,
+                    "records-mismatch",
+                    format!(
+                        "{} is not the scores {} was computed from.\n  the \
+                         document names {} over {} record(s)\n  that file is \
+                         {} over {}\nThe metrics in the document \
+                         were computed from a different file, so re-deriving \
+                         them from this one gives different numbers",
+                        path.display(),
+                        file.display(),
+                        claimed.digest,
+                        claimed.count,
+                        found.digest,
+                        found.count
+                    ),
+                );
+            }
+            Ok(_) => {}
         }
     }
 
@@ -1664,11 +1713,28 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                 out.json = json;
                 return out;
             }
+            // WHAT THIS SENTENCE MAY CLAIM.
+            //
+            // It said the document "was measured on" the corpus, which is
+            // more than anything here checked. Every check above is about the
+            // CORPUS: that the document names these bytes, and that the bytes
+            // are what their records say. Nothing reads the scores, and
+            // nothing could: they are a text file on the machine that ran it,
+            // and whoever ran it could write anything into it and re-run.
+            //
+            // A reviewer fabricated a perfect AUC by editing that file and
+            // this command exited 0 over it, correctly by its own rules and
+            // under a sentence that read as an endorsement of the number.
+            // `declarations.self_reported` is what actually speaks to who
+            // produced the scores, and the submission path is what clears it.
             let mut out = Output::ok(
                 json,
                 format!(
-                    "{} was measured on the corpus at {}. Both name {claimed}, \
-                     and all {read} image(s) hash to what their records state",
+                    "{} names the corpus at {}. Both name {claimed}, and all \
+                     {read} image(s) hash to what their records state.\nThat \
+                     is a check on the corpus, not on the scores: nothing here \
+                     read them, and `declarations.self_reported` says who \
+                     produced them",
                     file.display(),
                     corpus.display()
                 ),
@@ -1699,7 +1765,8 @@ fn cmd_verify(file: &Path, corpus: &Path, shallow: bool) -> Output {
                 "{} names the same records as the corpus at {}. Both name \
                  {claimed}.\nThe images were NOT re-read, because --shallow \
                  was given, so this says the two describe the same list of \
-                 records rather than the same bytes",
+                 records rather than the same bytes. Nothing here read the \
+                 scores either",
                 file.display(),
                 corpus.display()
             ),
@@ -2998,7 +3065,34 @@ fn resolve_out(corpus: &Path, out: Option<&Path>, many: bool) -> Result<Option<P
     let dir = match out {
         // A path was named and it is not an existing directory, so it is the
         // file this one detector writes to. Still `None`; the caller owns it.
-        Some(_) if !many => return Ok(None),
+        //
+        // ITS PARENT IS CHECKED HERE, which is the whole point of this
+        // function running before anything is scored. `--records` creates its
+        // parent and `--out` did not, so a single misspelt directory was
+        // discovered by the write AFTER the last image, with the same
+        // `No such file or directory (os error 2)` in front of the user that
+        // the comment above this function was written about. Eighteen images
+        // cost six seconds; a Core tier run is 344,357 pairs and twenty two
+        // hours.
+        Some(p) if !many => {
+            if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                if !parent.is_dir() {
+                    return Err(Output::err_because(
+                        exit::PREFLIGHT_REFUSED,
+                        "out-parent-missing",
+                        format!(
+                            "there is no directory at {} to write {} into. \
+                             Create it, or name a path whose parent exists. \
+                             Checked now rather than after the scoring, which \
+                             is where it used to be found",
+                            parent.display(),
+                            p.display()
+                        ),
+                    ));
+                }
+            }
+            return Ok(None);
+        }
         Some(p) => p.to_path_buf(),
         // Beside the corpus and named after it, so two corpora scored on one
         // machine cannot write over each other's documents.
@@ -3789,6 +3883,7 @@ fn run(cli: &Cli) -> Output {
         Command::Verify {
             file,
             corpus,
+            records,
             shallow,
         } => {
             // The registry is resolved leniently here and nowhere else in this
@@ -3801,7 +3896,7 @@ fn run(cli: &Cli) -> Output {
             let reg = registry::resolve(cli.registry.as_deref()).ok();
             match corpus_argument_problem(reg.as_ref().map(|r| &r.registry), corpus) {
                 Some(refused) => refused,
-                None => cmd_verify(file, corpus, *shallow),
+                None => cmd_verify(file, corpus, records.as_deref(), *shallow),
             }
         }
         Command::List { kind } => with_registry(cli, |r| cmd_list(r, kind)),
@@ -6052,7 +6147,7 @@ mod tests {
         sealed.metrics.auc = 0.99;
         std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
 
-        let out = cmd_verify(&doc, &corpus, false);
+        let out = cmd_verify(&doc, &corpus, None, false);
         assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
         assert!(
             out.human.contains("does not match its own content digest"),
@@ -6075,8 +6170,104 @@ mod tests {
         sealed.seal();
         std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
 
-        let out = cmd_verify(&doc, &corpus, false);
+        let out = cmd_verify(&doc, &corpus, None, false);
         assert_eq!(out.code, exit::OK, "{}", out.human);
+    }
+
+    #[test]
+    fn an_edited_records_file_is_not_the_one_the_document_names() {
+        // THE REVIEWER'S ATTACK, and it is the cheap one. The per-item scores
+        // are a plain text file with no digest. They rewrote every score to
+        // produce a perfect AUC, re-ran `score`, which resumed from the file
+        // without re-checking it, and `verify` exited 0 over the result. Every
+        // check `verify` ran was about the corpus, which was untouched.
+        //
+        // What this closes is the disclosure half: a document and a records
+        // file can now be shown to be about each other. It does NOT make the
+        // scores the detector's, because whoever ran the measurement wrote
+        // that file; `declarations.self_reported` is the field for that.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+
+        let records = dir.path().join("r.records.jsonl");
+        std::fs::write(
+            &records,
+            "{\"id\":\"covers/000000\",\"score\":0.01}\n\
+             {\"id\":\"stego/000000\",\"score\":0.02}\n",
+        )
+        .unwrap();
+        let honest = stegobench_core::result::records_digest(&records).unwrap();
+        assert_eq!(honest.count, 2);
+
+        let mut sealed: Result1 =
+            serde_json::from_str(&std::fs::read_to_string(&doc).unwrap()).unwrap();
+        sealed.provenance.records = Some(honest);
+        sealed.seal();
+        std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
+
+        let out = cmd_verify(&doc, &corpus, Some(&records), false);
+        assert_eq!(out.code, exit::OK, "the honest pair: {}", out.human);
+
+        // One score rewritten, which is all it took.
+        std::fs::write(
+            &records,
+            "{\"id\":\"covers/000000\",\"score\":0.01}\n\
+             {\"id\":\"stego/000000\",\"score\":0.99}\n",
+        )
+        .unwrap();
+        let out = cmd_verify(&doc, &corpus, Some(&records), false);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
+        assert!(
+            out.human.contains("not the scores"),
+            "the refusal should name what disagreed: {}",
+            out.human
+        );
+    }
+
+    #[test]
+    fn a_records_file_offered_to_a_document_that_names_none_is_refused() {
+        // Not silently skipped. A reader who passed the file is asking a
+        // question, and answering a different one with exit 0 is how a check
+        // that never ran reads as a check that passed.
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = dir.path().join("corpus");
+        corpus_honest(&corpus, &[b"cover bytes", b"stego bytes"]);
+        let digest = score::corpus_digest(&corpus).unwrap().unwrap();
+        let doc = dir.path().join("r.json");
+        result_claiming(&doc, &digest);
+        let records = dir.path().join("r.records.jsonl");
+        std::fs::write(&records, "{\"id\":\"covers/000000\",\"score\":0.01}\n").unwrap();
+
+        let out = cmd_verify(&doc, &corpus, Some(&records), false);
+        assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
+        assert!(out.human.contains("records no digest"), "{}", out.human);
+    }
+
+    #[test]
+    fn a_trailing_newline_is_not_counted_as_a_record() {
+        // The count sits beside the digest so a truncated file is obvious by
+        // eye. A file that ends properly would otherwise be reported with one
+        // record more than it has, every time.
+        let dir = tempfile::tempdir().unwrap();
+        let records = dir.path().join("r.jsonl");
+        std::fs::write(&records, "{\"id\":\"a\"}\n{\"id\":\"b\"}\n").unwrap();
+        assert_eq!(
+            stegobench_core::result::records_digest(&records)
+                .unwrap()
+                .count,
+            2
+        );
+        std::fs::write(&records, "{\"id\":\"a\"}\n{\"id\":\"b\"}").unwrap();
+        assert_eq!(
+            stegobench_core::result::records_digest(&records)
+                .unwrap()
+                .count,
+            2
+        );
     }
 
     #[test]
@@ -6094,7 +6285,7 @@ mod tests {
             .unwrap()
             .contains("content_digest"));
 
-        let out = cmd_verify(&doc, &corpus, false);
+        let out = cmd_verify(&doc, &corpus, None, false);
         assert_eq!(out.code, exit::OK, "{}", out.human);
     }
 
@@ -6200,7 +6391,7 @@ mod tests {
         let doc = dir.path().join("r.json");
         result_claiming(&doc, &digest);
 
-        let out = cmd_verify(&doc, &corpus, false);
+        let out = cmd_verify(&doc, &corpus, None, false);
         assert_eq!(out.code, exit::OK, "{}", out.human);
         assert_eq!(out.json["checked"], serde_json::json!("bytes"));
         assert!(
@@ -6235,7 +6426,7 @@ mod tests {
             .expect("named");
         assert_eq!(after, digest, "the swap changed the record level digest");
 
-        let out = cmd_verify(&doc, &corpus, false);
+        let out = cmd_verify(&doc, &corpus, None, false);
         assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
         assert_eq!(out.json["ok"], serde_json::json!(false));
         assert!(
@@ -6246,7 +6437,7 @@ mod tests {
 
         // And the cheap check still passes, which is why it says what it
         // checked rather than claiming more.
-        let shallow = cmd_verify(&doc, &corpus, true);
+        let shallow = cmd_verify(&doc, &corpus, None, true);
         assert_eq!(shallow.code, exit::OK, "{}", shallow.human);
         assert!(
             shallow.human.contains("NOT re-read"),
@@ -6290,7 +6481,7 @@ mod tests {
             .expect("named");
         let doc = dir.path().join("r.json");
         result_claiming(&doc, &digest);
-        let out = cmd_verify(&doc, &corpus, true);
+        let out = cmd_verify(&doc, &corpus, None, true);
         assert_eq!(out.code, exit::OK, "{}", out.human);
         assert_eq!(out.json["ok"], serde_json::json!(true));
     }
@@ -6311,7 +6502,7 @@ mod tests {
         let doc = dir.path().join("r.json");
         result_claiming(&doc, &digest);
 
-        let out = cmd_verify(&doc, &other, true);
+        let out = cmd_verify(&doc, &other, None, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH);
         assert!(out.human.contains("not about each other"), "{}", out.human);
         assert_eq!(out.json["ok"], serde_json::json!(false));
@@ -6327,7 +6518,7 @@ mod tests {
         corpus_named(&corpus, &["aa", "bb"]);
         let doc = dir.path().join("r.json");
         result_claiming(&doc, "");
-        let out = cmd_verify(&doc, &corpus, true);
+        let out = cmd_verify(&doc, &corpus, None, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH);
         assert!(
             out.human.contains("names no corpus digest"),
@@ -6345,7 +6536,7 @@ mod tests {
         std::fs::write(corpus.join("a.json"), r#"{"role":"clean"}"#).unwrap();
         let doc = dir.path().join("r.json");
         result_claiming(&doc, "sha256:whatever");
-        let out = cmd_verify(&doc, &corpus, true);
+        let out = cmd_verify(&doc, &corpus, None, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH);
         assert!(out.human.contains("cannot be named"), "{}", out.human);
     }
@@ -6355,7 +6546,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let doc = dir.path().join("x.json");
         std::fs::write(&doc, r#"{"hello":"world"}"#).unwrap();
-        let out = cmd_verify(&doc, dir.path(), true);
+        let out = cmd_verify(&doc, dir.path(), None, true);
         assert_eq!(out.code, exit::SCHEMA_INVALID);
         assert!(out.human.contains("stegobench validate"), "{}", out.human);
     }
@@ -7756,7 +7947,7 @@ mod tests {
         sealed.metrics.auc = 0.99;
         std::fs::write(&doc, serde_json::to_string(&sealed).unwrap()).unwrap();
 
-        let out = cmd_verify(&doc, &corpus, true);
+        let out = cmd_verify(&doc, &corpus, None, true);
         assert_eq!(out.code, exit::VERIFY_MISMATCH, "{}", out.human);
         assert!(
             !out.human.contains("   "),

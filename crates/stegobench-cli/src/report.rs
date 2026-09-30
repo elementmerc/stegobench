@@ -230,7 +230,7 @@ pub struct Row {
     pub tpr_at_fpr: BTreeMap<String, f64>,
     /// The false-alarm rate each of those figures actually came from, keyed
     /// identically. Empty for a document written before the field existed.
-    pub tpr_at_fpr_achieved: BTreeMap<String, f64>,
+    pub fpr_achieved: BTreeMap<String, f64>,
     /// The same measurement taken again within each arm, ordered by arm name.
     ///
     /// Empty for a document whose corpus holds fewer than two named arms, and
@@ -641,7 +641,7 @@ fn to_row(source: &Path, r: Result1) -> Row {
         auc: r.metrics.auc,
         auc_ci95: r.metrics.auc_ci95,
         tpr_at_fpr: r.metrics.tpr_at_fpr,
-        tpr_at_fpr_achieved: r.metrics.tpr_at_fpr_achieved,
+        fpr_achieved: r.metrics.fpr_achieved,
         per_arm,
         pairing: r.declarations.pairing,
         split: r.declarations.split_discipline,
@@ -856,7 +856,7 @@ fn tpr_at(map: &BTreeMap<String, f64>, target: f64) -> Option<f64> {
 /// arithmetic is right and conservative; the heading is what it cannot
 /// support, and this is the column somebody acts on.
 fn budget_unexpressible(row: &Row, target: f64) -> Option<f64> {
-    tpr_at(&row.tpr_at_fpr_achieved, target).filter(|a| *a < target - 1e-9)
+    tpr_at(&row.fpr_achieved, target).filter(|a| *a < target - 1e-9)
 }
 
 fn tpr_cell(row: &Row, target: f64) -> String {
@@ -1405,7 +1405,7 @@ fn csv_line(row: &Row, arm: Option<&ArmMetrics>, rates: &[(String, f64)]) -> Vec
             Some(_) => (None, None),
             None => (
                 tpr_at(&row.tpr_at_fpr, *rate),
-                tpr_at(&row.tpr_at_fpr_achieved, *rate),
+                tpr_at(&row.fpr_achieved, *rate),
             ),
         };
         curve.push(tpr.map(|v| format!("{v:.4}")).unwrap_or_default());
@@ -1595,7 +1595,7 @@ pub fn to_json(report: &Report) -> serde_json::Value {
                 // Always present, empty object and all, for the reason
                 // `per_arm` is: a key that appears for some documents and not
                 // others makes every consumer handle two shapes of one answer.
-                "tpr_at_fpr_achieved": r.tpr_at_fpr_achieved,
+                "fpr_achieved": r.fpr_achieved,
                 // Always present, empty array and all, because the key being
                 // absent for most documents would make every consumer handle
                 // two shapes of the same answer. The values are the schema's
@@ -2600,7 +2600,7 @@ mod tests {
         // column an engineer acts on.
         let dir = tempfile::tempdir().unwrap();
         write_with(dir.path(), "a.json", |v| {
-            v["metrics"]["tpr_at_fpr_achieved"] = serde_json::json!({"0.01": 0.0, "0.1": 0.1});
+            v["metrics"]["fpr_achieved"] = serde_json::json!({"0.01": 0.0, "0.1": 0.1});
         });
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         for format in [ReportFormat::Text, ReportFormat::Markdown] {
@@ -2630,7 +2630,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_with(dir.path(), "a.json", |v| {
             v["metrics"]["tpr_at_fpr"] = serde_json::json!({"0.01": 0.11, "0.1": 0.55});
-            v["metrics"]["tpr_at_fpr_achieved"] = serde_json::json!({"0.01": 0.0, "0.1": 0.1});
+            v["metrics"]["fpr_achieved"] = serde_json::json!({"0.01": 0.0, "0.1": 0.1});
         });
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         let csv = render(&report, ReportFormat::Csv);

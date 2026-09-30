@@ -308,8 +308,20 @@ pub struct Metrics {
     ///
     /// Empty where nobody recorded it, which is every document written before
     /// this field existed. Empty is not a claim that the budgets were met.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tpr_at_fpr_achieved: BTreeMap<String, f64>,
+    ///
+    /// The alias reads documents written under the first name this carried,
+    /// `tpr_at_fpr_achieved`, which said "true-positive rate" over a false-alarm
+    /// rate and had an examiner disclosing raw JSON read 0.0 as a detection rate
+    /// of zero. Without the alias those documents would still parse, because
+    /// this field is optional, and would come back empty: the qualifier that
+    /// keeps `0.0833` from being read as detection at one per cent would go
+    /// missing silently, which is the overclaim the field exists to stop.
+    #[serde(
+        default,
+        alias = "tpr_at_fpr_achieved",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub fpr_achieved: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict_rate: Option<f64>,
     pub n_clean: u64,
@@ -381,6 +393,70 @@ pub struct Provenance {
     pub network_reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<Host>,
+    /// The per-item answers this document's metrics were computed from.
+    ///
+    /// Every number above is a summary of one score per image, and those live
+    /// in a separate file that nothing in the document referred to. So a
+    /// result and a records file could be handed over together with no way to
+    /// tell whether they were about each other, which is the first thing
+    /// anybody re-deriving a figure needs to know.
+    ///
+    /// READ WHAT THIS IS AND IS NOT. It ties a records file to this document.
+    /// It does not say the scores are the detector's: whoever ran this wrote
+    /// that file and could have written anything into it, and a digest taken
+    /// afterwards would agree with whatever they wrote.
+    /// `declarations.self_reported` is the field that speaks to that, and the
+    /// submission path is what clears it.
+    ///
+    /// Absent where the run wrote no records file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<RecordsRef>,
+}
+
+/// The digest and record count of a per-item scores file.
+///
+/// ONE IMPLEMENTATION ON PURPOSE. `score` writes this field and `verify`
+/// recomputes it to compare, and those were briefly two copies of the same
+/// loop in two crates. Two implementations of a digest that must agree is a
+/// silent mismatch waiting to happen: they drift by one blank line and
+/// `verify` starts refusing honest pairs, which is worse than not checking at
+/// all because it teaches a reader to ignore the refusal.
+///
+/// Streams rather than reading the file in. A Core tier run writes 344,357
+/// records and a digest is not a reason to hold them all in memory.
+pub fn records_digest(path: &std::path::Path) -> std::io::Result<RecordsRef> {
+    use sha2::Digest;
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut hasher = sha2::Sha256::new();
+    let mut count = 0u64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        hasher.update(&line);
+        // A trailing newline is not a record. Counting it would put every
+        // properly terminated file one over, every time.
+        if !line.iter().all(|b| b.is_ascii_whitespace()) {
+            count += 1;
+        }
+    }
+    Ok(RecordsRef {
+        digest: format!("sha256:{:x}", hasher.finalize()),
+        count,
+    })
+}
+
+/// The per-item answers a document's metrics were computed from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordsRef {
+    /// SHA-256 of the records file as this run left it.
+    pub digest: String,
+    /// How many records it held. Cheap to check by eye, and it catches a
+    /// truncated file before anybody computes a digest and wonders why.
+    pub count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -411,6 +487,53 @@ pub struct PluginRef {
     /// fixtures could be found to ask with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selftest: Option<SelfTest>,
+    /// The script that turned the tool's output into the numbers above.
+    ///
+    /// A detector prints text. Something has to read that text and decide
+    /// which part of it is the score, and that something is a file on the
+    /// machine that ran it, resolved from `invoke.adapter`. Change one line of
+    /// it and every number in this document changes, while `image` and
+    /// `pinned_by` stay exactly as they are.
+    ///
+    /// It was recorded nowhere, so a reader holding a pinned container image
+    /// still could not reproduce the measurement: the sandbox is handed that
+    /// file from the host at run time, which also makes it the one part of a
+    /// hardened run that is neither pinned nor examined.
+    ///
+    /// Absent where the tool needs no adapter, or where the file could not be
+    /// read to hash it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AdapterRef>,
+    /// How the tool was asked, as the registry entry declares it.
+    ///
+    /// One image can serve several detectors. `aletheia-rs` and
+    /// `aletheia-spa` run the same container from the same digest through the
+    /// same adapter file, and differ only in a trailing word, so two results
+    /// measuring two different things carried identical `image`, identical
+    /// `adapter` and identical `subject.version`. Nothing in either document
+    /// said which of the two had been measured.
+    ///
+    /// The DECLARED form, with its `{file}` and `{adapter}` placeholders
+    /// still in it, rather than the command as it ran. The expanded form
+    /// carries absolute paths from the machine that ran it, and this is a
+    /// document written to be handed to somebody else.
+    ///
+    /// Absent where the entry declares no argv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+}
+
+/// The script that read the tool's output, and what it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AdapterRef {
+    /// As the registry entry declares it, which is how somebody else would
+    /// find the same one. Not the absolute path it resolved to here: that
+    /// names a directory on one machine and tells a reader nothing they can
+    /// act on.
+    pub declared: String,
+    /// SHA-256 of the file that actually ran. The point of the hash is that
+    /// two people who think they have the same adapter can find out.
+    pub sha256: String,
 }
 
 /// How the bytes that ran are named, and how somebody else would get them.
@@ -714,10 +837,10 @@ impl Result1 {
                 ));
             }
         }
-        for (fpr, achieved) in &self.metrics.tpr_at_fpr_achieved {
+        for (fpr, achieved) in &self.metrics.fpr_achieved {
             if !self.metrics.tpr_at_fpr.contains_key(fpr) {
                 bad.push(format!(
-                    "tpr_at_fpr_achieved names {fpr:?} and tpr_at_fpr carries no \
+                    "fpr_achieved names {fpr:?} and tpr_at_fpr carries no \
                      figure for it, so this document describes a measurement it \
                      does not report"
                 ));
@@ -730,14 +853,14 @@ impl Result1 {
                     // figure measured outside the budget it is filed under.
                     if *achieved > requested + 1e-9 {
                         bad.push(format!(
-                            "tpr_at_fpr_achieved[{fpr}] = {achieved} is above the \
+                            "fpr_achieved[{fpr}] = {achieved} is above the \
                              rate it is filed under, and a false-alarm budget is \
                              a ceiling rather than a target"
                         ));
                     }
                 }
                 Ok(_) => bad.push(format!(
-                    "tpr_at_fpr_achieved[{fpr}] = {achieved} is outside 0 to 1, \
+                    "fpr_achieved[{fpr}] = {achieved} is outside 0 to 1, \
                      which is not a false-alarm rate"
                 )),
                 // The key itself is already reported against `tpr_at_fpr`
@@ -1029,7 +1152,7 @@ mod tests {
         // A false-alarm budget is a ceiling. Landing above it is a figure
         // measured outside the column it is being reported in.
         let mut d = sample();
-        d.metrics.tpr_at_fpr_achieved = BTreeMap::from([("0.01".into(), 0.1667)]);
+        d.metrics.fpr_achieved = BTreeMap::from([("0.01".into(), 0.1667)]);
         let bad = d.validate().expect_err("refused");
         assert!(bad.iter().any(|m| m.contains("is a ceiling")), "{bad:?}");
     }
@@ -1037,7 +1160,7 @@ mod tests {
     #[test]
     fn an_achieved_rate_for_a_figure_the_document_does_not_carry_is_refused() {
         let mut d = sample();
-        d.metrics.tpr_at_fpr_achieved = BTreeMap::from([("0.05".into(), 0.0)]);
+        d.metrics.fpr_achieved = BTreeMap::from([("0.05".into(), 0.0)]);
         let bad = d.validate().expect_err("refused");
         assert!(bad.iter().any(|m| m.contains("does not report")), "{bad:?}");
     }
@@ -1045,7 +1168,7 @@ mod tests {
     #[test]
     fn an_achieved_rate_outside_zero_to_one_is_refused() {
         let mut d = sample();
-        d.metrics.tpr_at_fpr_achieved = BTreeMap::from([("0.01".into(), -0.5)]);
+        d.metrics.fpr_achieved = BTreeMap::from([("0.01".into(), -0.5)]);
         let bad = d.validate().expect_err("refused");
         assert!(
             bad.iter().any(|m| m.contains("not a false-alarm rate")),
@@ -1059,27 +1182,58 @@ mod tests {
         // budget at zero, and that is an honest measurement to be labelled
         // rather than a fault to be rejected.
         let mut d = sample();
-        d.metrics.tpr_at_fpr_achieved =
-            BTreeMap::from([("0.01".into(), 0.0), ("0.10".into(), 0.0833)]);
+        d.metrics.fpr_achieved = BTreeMap::from([("0.01".into(), 0.0), ("0.10".into(), 0.0833)]);
         assert_eq!(d.validate(), Ok(()));
     }
 
     #[test]
     fn a_document_written_before_the_achieved_rates_existed_still_parses_and_validates() {
         let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        v["metrics"]
-            .as_object_mut()
-            .unwrap()
-            .remove("tpr_at_fpr_achieved");
+        v["metrics"].as_object_mut().unwrap().remove("fpr_achieved");
         let parsed: Result1 = serde_json::from_value(v).expect("an older document still reads");
-        assert!(parsed.metrics.tpr_at_fpr_achieved.is_empty());
+        assert!(parsed.metrics.fpr_achieved.is_empty());
+        assert_eq!(parsed.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_achieved_rates_are_not_written_under_a_name_that_says_detection_rate() {
+        // The finding: this field went out as `tpr_at_fpr_achieved`, which
+        // names a true-positive rate and holds a false-alarm rate. An examiner
+        // disclosing the raw JSON read the 0.0 beside a 0.0833 detection rate
+        // as a detection rate of zero. The rendered table was never wrong; the
+        // bytes that get disclosed were.
+        let mut d = sample();
+        d.metrics.fpr_achieved = BTreeMap::from([("0.01".into(), 0.0)]);
+        let text = serde_json::to_string(&d).unwrap();
+        assert!(text.contains(r#""fpr_achieved":{"0.01":0.0}"#), "{text}");
+        assert!(!text.contains("tpr_at_fpr_achieved"), "{text}");
+    }
+
+    #[test]
+    fn a_document_written_under_the_old_achieved_rate_name_keeps_its_figures() {
+        // The field is optional, so a rename without an alias would let an
+        // already-written document parse with the rates silently gone, and a
+        // reader would get the bare detection rate back with nothing saying
+        // which false-alarm rate it came from.
+        let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        let metrics = v["metrics"].as_object_mut().unwrap();
+        metrics.remove("fpr_achieved");
+        metrics.insert(
+            "tpr_at_fpr_achieved".into(),
+            serde_json::json!({"0.01": 0.0}),
+        );
+        let parsed: Result1 = serde_json::from_value(v).expect("an older document still reads");
+        assert_eq!(
+            parsed.metrics.fpr_achieved,
+            BTreeMap::from([("0.01".to_string(), 0.0)])
+        );
         assert_eq!(parsed.validate(), Ok(()));
     }
 
     #[test]
     fn empty_achieved_rates_are_left_out_of_the_serialised_document() {
         let text = serde_json::to_string(&sample()).unwrap();
-        assert!(!text.contains("tpr_at_fpr_achieved"), "{text}");
+        assert!(!text.contains("fpr_achieved"), "{text}");
     }
 
     #[test]
@@ -1211,7 +1365,7 @@ mod tests {
                 auc: 0.9634,
                 auc_ci95: None,
                 tpr_at_fpr: BTreeMap::from([("0.01".into(), 0.4133), ("0.10".into(), 0.9033)]),
-                tpr_at_fpr_achieved: BTreeMap::new(),
+                fpr_achieved: BTreeMap::new(),
                 verdict_rate: None,
                 n_clean: 300,
                 n_stego: 300,
@@ -1226,6 +1380,8 @@ mod tests {
                     determinism: Determinism::Exact,
                     selftest: None,
                     pinned_by: PinnedBy::ImageDigest,
+                    adapter: None,
+                    argv: None,
                     isolation: Isolation::SandboxNoNetwork,
                 }],
                 harness_version: "0.1.0".into(),
@@ -1233,6 +1389,7 @@ mod tests {
                 elapsed_seconds: 10754.8,
                 network_reachable: false,
                 host: None,
+                records: None,
             },
             declarations: Declarations {
                 split_discipline: SplitDiscipline::ByCover,
@@ -1293,6 +1450,46 @@ mod tests {
         r.provenance.plugins[0].image =
             "sha256:e5cb26609a59ac554cb4bca9763fa206977f3e5e584eb8bf62afa260c1cb36f0".into();
         assert!(r.validate().is_ok(), "{:?}", r.validate());
+    }
+
+    #[test]
+    fn two_detectors_sharing_one_image_are_told_apart_by_what_was_asked() {
+        // ONE IMAGE CAN SERVE SEVERAL DETECTORS. `aletheia-rs` and
+        // `aletheia-spa` run the same container from the same digest through
+        // the same adapter file and differ only in a trailing word, so two
+        // documents measuring two different things carried identical `image`,
+        // identical `adapter` and identical `subject.version`. Nothing in
+        // either said which had been measured, and a reader comparing them
+        // had no way to find out.
+        let mut rs = sample();
+        rs.provenance.plugins[0].argv =
+            Some(vec!["{adapter}".into(), "{file}".into(), "rs".into()]);
+        let mut spa = sample();
+        spa.provenance.plugins[0].argv =
+            Some(vec!["{adapter}".into(), "{file}".into(), "spa".into()]);
+        assert_eq!(
+            rs.provenance.plugins[0].image,
+            spa.provenance.plugins[0].image
+        );
+        assert_ne!(
+            rs.provenance.plugins[0].argv,
+            spa.provenance.plugins[0].argv
+        );
+        assert!(rs.validate().is_ok(), "{:?}", rs.validate());
+    }
+
+    #[test]
+    fn the_recorded_argv_is_the_declared_one_and_carries_no_host_path() {
+        // DECLARED, with its placeholders still in it. The expanded command
+        // bind mounts the adapter from an absolute path on the machine that
+        // ran it, and this document exists to be handed to somebody else: a
+        // disclosure package is the last place to put somebody's home
+        // directory.
+        let mut r = sample();
+        r.provenance.plugins[0].argv = Some(vec!["{adapter}".into(), "{file}".into(), "rs".into()]);
+        let written = serde_json::to_string(&r).unwrap();
+        assert!(written.contains("{adapter}"), "{written}");
+        assert!(!written.contains("/home/"), "{written}");
     }
 
     #[test]
