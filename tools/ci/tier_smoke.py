@@ -57,6 +57,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 GENERATORS = HERE.parent.parent / "generators"
 sys.path.insert(0, str(GENERATORS))
 
+from manifest_repair import stable_split  # noqa: E402
 from tiers import TierError, covers_in_tier_order, tier_name  # noqa: E402
 
 #: Sizes named in `distribution.md`. Full is left out: a pool of 100,000
@@ -84,7 +85,13 @@ def build_pool(root: pathlib.Path, count: int, size: int,
     for index in range(count):
         name = f"{index:05d}.png"
         synth_cover(root / name, size, seed=index)
-        row = {"file": name, "tier_order": index}
+        # SPLIT, because the real manifest carries one and this pool claims
+        # to be shaped like it. Assigned by the same rule rather than
+        # alternated, so the fixture exercises the real function: a fixture
+        # that agrees with the code by coincidence stops agreeing the moment
+        # the code changes, and says nothing when it does.
+        row = {"file": name, "tier_order": index,
+               "split": stable_split({"file": name}, "stegobench-ci", 0.25)}
         if licence:
             row.update({
                 "licence": "CC BY-SA 4.0",
