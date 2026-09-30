@@ -209,6 +209,9 @@ pub struct Row {
     /// different claim from one that runs from 0.59 to 0.61.
     pub auc_ci95: Option<[f64; 2]>,
     pub tpr_at_fpr: BTreeMap<String, f64>,
+    /// The false-alarm rate each of those figures actually came from, keyed
+    /// identically. Empty for a document written before the field existed.
+    pub tpr_at_fpr_achieved: BTreeMap<String, f64>,
     /// The same measurement taken again within each arm, ordered by arm name.
     ///
     /// Empty for a document whose corpus holds fewer than two named arms, and
@@ -611,6 +614,7 @@ fn to_row(source: &Path, r: Result1) -> Row {
         auc: r.metrics.auc,
         auc_ci95: r.metrics.auc_ci95,
         tpr_at_fpr: r.metrics.tpr_at_fpr,
+        tpr_at_fpr_achieved: r.metrics.tpr_at_fpr_achieved,
         per_arm,
         pairing: r.declarations.pairing,
         split: r.declarations.split_discipline,
@@ -817,22 +821,55 @@ fn tpr_at(map: &BTreeMap<String, f64>, target: f64) -> Option<f64> {
         .map(|(_, v)| *v)
 }
 
-fn tpr_cell(map: &BTreeMap<String, f64>, target: f64) -> String {
-    match tpr_at(map, target) {
-        Some(v) => format!("{v:.4}"),
+/// Whether a figure filed under `target` was measured at a lower false-alarm
+/// rate than `target`, because the corpus is too coarse to express it.
+///
+/// With six clean images the only rates that exist are multiples of one sixth,
+/// so a one per cent budget buys exactly what a zero per cent budget buys. The
+/// arithmetic is right and conservative; the heading is what it cannot
+/// support, and this is the column somebody acts on.
+fn budget_unexpressible(row: &Row, target: f64) -> Option<f64> {
+    tpr_at(&row.tpr_at_fpr_achieved, target).filter(|a| *a < target - 1e-9)
+}
+
+fn tpr_cell(row: &Row, target: f64) -> String {
+    match tpr_at(&row.tpr_at_fpr, target) {
+        // The achieved rate goes in the cell rather than in a footnote,
+        // because the cell is what gets copied out on its own.
+        Some(v) => match budget_unexpressible(row, target) {
+            Some(achieved) => format!("{v:.4} at {} FA", percent(achieved)),
+            None => format!("{v:.4}"),
+        },
         // Not a dash and not a zero. Both read as an answer, and the truth is
         // that this run did not report that point on the curve.
         None => "not reported".to_string(),
     }
 }
 
-/// The whole `tpr_at_fpr` map, for the format that carries everything.
-fn tpr_all(map: &BTreeMap<String, f64>) -> String {
-    map.iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(";")
+/// A false-alarm rate as the headings write one, so the cell and the column it
+/// sits under are in the same units.
+fn percent(rate: f64) -> String {
+    let shown = format!("{:.2}", rate * 100.0);
+    format!("{}%", shown.trim_end_matches('0').trim_end_matches('.'))
 }
+
+/// The sentence under a table holding at least one such cell.
+const FA_NOTE: &str = "Where a cell names a false-alarm rate after the figure, \
+                       the run was measured at that rate rather than at the one \
+                       its column asks for: this corpus has too few clean \
+                       images to express that budget, so the figure is real and \
+                       the heading is not.";
+
+fn any_budget_unexpressible(group: &Group) -> bool {
+    group.rows.iter().any(|r| {
+        FIXED_FPR_COLUMNS
+            .iter()
+            .any(|t| budget_unexpressible(r, *t).is_some())
+    })
+}
+
+/// The two points on the curve every table carries a column for.
+const FIXED_FPR_COLUMNS: [f64; 2] = [0.01, 0.10];
 
 /// The flags, joined for a single cell.
 fn flags_cell(flags: &[String]) -> String {
@@ -882,8 +919,8 @@ fn cells(row: &Row) -> [String; 12] {
         row.arm(),
         domain_str(row.domain).to_string(),
         auc_cell(row.auc, row.auc_ci95),
-        tpr_cell(&row.tpr_at_fpr, 0.01),
-        tpr_cell(&row.tpr_at_fpr, 0.10),
+        tpr_cell(row, FIXED_FPR_COLUMNS[0]),
+        tpr_cell(row, FIXED_FPR_COLUMNS[1]),
         pairing_str(row.pairing).to_string(),
         split_str(row.split).to_string(),
         format!("{}/{}/{}", row.n_clean, row.n_stego, row.n_error),
@@ -1042,6 +1079,9 @@ fn render_text(report: &Report) -> String {
         for line in stegobench_core::table::align_with(&table, "  ") {
             let _ = writeln!(out, "{line}");
         }
+        if any_budget_unexpressible(group) {
+            let _ = writeln!(out, "\n{}", wrap(FA_NOTE, 78));
+        }
 
         if let Some((lines, withheld)) = arm_table(group) {
             let _ = write!(out, "\n{}\n\n", wrap(&format!("Per arm. {ARM_INTRO}"), 78));
@@ -1174,6 +1214,9 @@ fn render_markdown(report: &Report) -> String {
             let _ = writeln!(out, "| {} |", line.join(" | "));
         }
         out.push('\n');
+        if any_budget_unexpressible(group) {
+            let _ = writeln!(out, "{FA_NOTE}\n");
+        }
 
         if let Some((lines, withheld)) = arm_table(group) {
             let _ = write!(out, "### Per arm\n\n{ARM_INTRO}\n\n");
@@ -1211,7 +1254,8 @@ fn render_csv(report: &Report) -> String {
     // of their own with a `record_type` that a consumer has to look at. A
     // comment line would be dropped by a strict parser, and the one thing
     // that must not be droppable is the fact that the table is short.
-    let columns = [
+    let rates = fpr_columns(report);
+    let mut columns: Vec<String> = [
         "record_type",
         "corpus_name",
         "corpus_digest",
@@ -1232,20 +1276,32 @@ fn render_csv(report: &Report) -> String {
         "auc",
         "auc_ci95_low",
         "auc_ci95_high",
-        "tpr_at_fpr",
-        "pairing",
-        "split_discipline",
-        "n_clean",
-        "n_stego",
-        "n_error",
-        "trained_on",
-        "self_reported",
-        "network_reachable",
-        "harness_version",
-        "started_utc",
-        "conditions",
-        "source_path",
-    ];
+    ]
+    .iter()
+    .map(|c| (*c).to_string())
+    .collect();
+    for (name, _) in &rates {
+        columns.push(name.clone());
+        columns.push(format!("{name}_achieved_fpr"));
+    }
+    columns.extend(
+        [
+            "pairing",
+            "split_discipline",
+            "n_clean",
+            "n_stego",
+            "n_error",
+            "trained_on",
+            "self_reported",
+            "network_reachable",
+            "harness_version",
+            "started_utc",
+            "conditions",
+            "source_path",
+        ]
+        .iter()
+        .map(|c| (*c).to_string()),
+    );
     let mut out = String::new();
     let _ = writeln!(out, "{}", columns.join(","));
 
@@ -1277,12 +1333,12 @@ fn render_csv(report: &Report) -> String {
                         .join(",")
                 );
             };
-            emit(csv_line(row, None));
+            emit(csv_line(row, None, &rates));
             // Straight after the document they break down, and uncapped:
             // this is the format a script reads, and a script that asked for
             // every field is not helped by a figure being left out of it.
             for arm in &row.per_arm {
-                emit(csv_line(row, Some(arm)));
+                emit(csv_line(row, Some(arm), &rates));
             }
         }
     }
@@ -1295,7 +1351,7 @@ fn render_csv(report: &Report) -> String {
 /// than pointing back at a line above it. A spreadsheet gets sorted, and a row
 /// whose conditions live in a neighbouring row loses them the first time
 /// somebody clicks a column heading.
-fn csv_line(row: &Row, arm: Option<&ArmMetrics>) -> Vec<String> {
+fn csv_line(row: &Row, arm: Option<&ArmMetrics>, rates: &[(String, f64)]) -> Vec<String> {
     let (rate_value, rate_unit) = match row.rate {
         Some((v, u)) => (v.to_string(), unit_str(u).to_string()),
         None => (String::new(), String::new()),
@@ -1310,7 +1366,26 @@ fn csv_line(row: &Row, arm: Option<&ArmMetrics>) -> Vec<String> {
         // any number here would be one nobody measured.
         None => (String::new(), String::new()),
     };
-    vec![
+    // The curve was reported for the run rather than per arm, so an arm line
+    // leaves these empty instead of repeating a figure that is about a
+    // different population. An empty cell is also what a run that never
+    // reported a given rate gets: the same "nobody measured this" the interval
+    // columns already use, and a rate a document does not carry must not read
+    // as a zero.
+    let mut curve: Vec<String> = Vec::with_capacity(rates.len() * 2);
+    for (_, rate) in rates {
+        let (tpr, achieved) = match arm {
+            Some(_) => (None, None),
+            None => (
+                tpr_at(&row.tpr_at_fpr, *rate),
+                tpr_at(&row.tpr_at_fpr_achieved, *rate),
+            ),
+        };
+        curve.push(tpr.map(|v| format!("{v:.4}")).unwrap_or_default());
+        curve.push(achieved.map(|v| format!("{v:.4}")).unwrap_or_default());
+    }
+
+    let mut line = vec![
         match arm {
             Some(_) => "arm".to_string(),
             None => "result".to_string(),
@@ -1334,13 +1409,9 @@ fn csv_line(row: &Row, arm: Option<&ArmMetrics>) -> Vec<String> {
         format!("{auc:.4}"),
         ci_low,
         ci_high,
-        // The curve was reported for the run rather than per arm, so an arm
-        // line says nothing about it instead of repeating a figure that is
-        // about a different population.
-        match arm {
-            Some(_) => String::new(),
-            None => tpr_all(&row.tpr_at_fpr),
-        },
+    ];
+    line.extend(curve);
+    line.extend([
         pairing_str(row.pairing).to_string(),
         split_str(row.split).to_string(),
         match arm {
@@ -1364,7 +1435,38 @@ fn csv_line(row: &Row, arm: Option<&ArmMetrics>) -> Vec<String> {
         row.started_utc.clone(),
         flags_cell(&row.flags),
         row.source.clone(),
-    ]
+    ]);
+    line
+}
+
+/// One column per false-alarm rate any document in this report was scored at,
+/// in numerical order.
+///
+/// The union across every row rather than the set the first row happened to
+/// carry. Two documents scored at different budgets are ordinary, and a column
+/// set taken from one of them would drop the other's figures with nothing in
+/// the file saying so, which is the failure the whole module is built around.
+///
+/// The rate is rendered from the parsed number rather than copied from the
+/// key, so "0.1" and "0.10" are one column rather than two names for one rate.
+fn fpr_columns(report: &Report) -> Vec<(String, f64)> {
+    let mut rates: Vec<f64> = Vec::new();
+    for group in &report.groups {
+        for row in &group.rows {
+            // A key that is not a decimal fraction is refused by
+            // `Result1::validate`, so nothing reaching here loses a column.
+            for rate in row.tpr_at_fpr.keys().filter_map(|k| k.parse::<f64>().ok()) {
+                if !rates.iter().any(|r| (r - rate).abs() < 1e-9) {
+                    rates.push(rate);
+                }
+            }
+        }
+    }
+    rates.sort_by(|a, b| a.total_cmp(b));
+    rates
+        .into_iter()
+        .map(|rate| (format!("tpr_at_fpr_{rate}"), rate))
+        .collect()
 }
 
 /// RFC 4180 quoting, written here rather than pulled in as a dependency: a
@@ -1463,6 +1565,10 @@ pub fn to_json(report: &Report) -> serde_json::Value {
                 "auc": r.auc,
                 "auc_ci95": r.auc_ci95,
                 "tpr_at_fpr": r.tpr_at_fpr,
+                // Always present, empty object and all, for the reason
+                // `per_arm` is: a key that appears for some documents and not
+                // others makes every consumer handle two shapes of one answer.
+                "tpr_at_fpr_achieved": r.tpr_at_fpr_achieved,
                 // Always present, empty array and all, because the key being
                 // absent for most documents would make every consumer handle
                 // two shapes of the same answer. The values are the schema's
@@ -1659,6 +1765,26 @@ mod tests {
             std::fs::write(&path, serde_json::to_string_pretty(&self.value()).unwrap()).unwrap();
             path
         }
+    }
+
+    /// A default document with one edit applied before it is written.
+    fn write_with(dir: &Path, name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+        let mut v = Doc::default().value();
+        edit(&mut v);
+        let path = dir.join(name);
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        path
+    }
+
+    /// The same, sealed the way `score` seals what it writes.
+    fn write_sealed(dir: &Path, name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+        let mut v = Doc::default().value();
+        edit(&mut v);
+        let mut doc: Result1 = serde_json::from_value(v).expect("the fixture is a result-v1");
+        doc.seal();
+        let path = dir.join(name);
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        path
     }
 
     /// How many documents `results/v1` actually holds.
@@ -2369,6 +2495,179 @@ mod tests {
     }
 
     #[test]
+    fn a_forged_document_is_named_as_skipped_rather_than_tabled() {
+        // The finding: one field edited after the run, and the document came
+        // out as an ordinary row under an exit code of zero.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sealed(dir.path(), "a.json", |_| {});
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["metrics"]["auc"] = serde_json::json!(0.99);
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert!(report.groups.is_empty(), "the forgery made a table");
+        assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+        assert!(report.skipped[0].invalid_document);
+        assert!(
+            report.skipped[0]
+                .reason
+                .contains("does not match its own content digest"),
+            "{:?}",
+            report.skipped[0]
+        );
+        assert_eq!(report.exit_code(), exit::SCHEMA_INVALID);
+        for format in [
+            ReportFormat::Text,
+            ReportFormat::Markdown,
+            ReportFormat::Csv,
+        ] {
+            let out = render(&report, format);
+            assert!(!out.contains("0.9900"), "{format:?} tabled the forgery");
+            assert!(
+                flat(&out).contains("content digest"),
+                "{format:?} did not name it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sealed_document_nobody_touched_makes_an_ordinary_row() {
+        let dir = tempfile::tempdir().unwrap();
+        write_sealed(dir.path(), "a.json", |_| {});
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.exit_code(), exit::OK);
+    }
+
+    #[test]
+    fn an_auc_outside_its_own_interval_never_reaches_a_table() {
+        // Visible with no digest at all, and it used to render as a row.
+        let dir = tempfile::tempdir().unwrap();
+        write_with(dir.path(), "a.json", |v| {
+            v["metrics"]["auc"] = serde_json::json!(0.99);
+            v["metrics"]["auc_ci95"] = serde_json::json!([0.5, 0.5]);
+        });
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        assert!(report.groups.is_empty());
+        assert_eq!(report.exit_code(), exit::SCHEMA_INVALID);
+        assert!(
+            report.skipped[0]
+                .reason
+                .contains("outside its own interval"),
+            "{:?}",
+            report.skipped[0]
+        );
+    }
+
+    #[test]
+    fn a_budget_the_corpus_could_not_express_is_said_in_the_cell() {
+        // "TPR@1%FA" over six clean images is TPR@0%FA, and this is the
+        // column an engineer acts on.
+        let dir = tempfile::tempdir().unwrap();
+        write_with(dir.path(), "a.json", |v| {
+            v["metrics"]["tpr_at_fpr_achieved"] = serde_json::json!({"0.01": 0.0, "0.1": 0.1});
+        });
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        for format in [ReportFormat::Text, ReportFormat::Markdown] {
+            let out = flat(&render(&report, format));
+            assert!(out.contains("0.1100 at 0% FA"), "{format:?}: {out}");
+            // The rate that was met is left alone, or the mark means nothing.
+            assert!(out.contains("0.5500 "), "{format:?}: {out}");
+            assert!(!out.contains("0.5500 at"), "{format:?}: {out}");
+            assert!(out.contains("too few clean images"), "{format:?}: {out}");
+        }
+    }
+
+    #[test]
+    fn a_document_that_recorded_no_achieved_rates_renders_as_it_always_did() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc::default().write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        for format in [ReportFormat::Text, ReportFormat::Markdown] {
+            let out = flat(&render(&report, format));
+            assert!(!out.contains(" FA"), "{format:?} invented a mark: {out}");
+            assert!(!out.contains("too few clean images"), "{format:?}: {out}");
+        }
+    }
+
+    #[test]
+    fn the_csv_gives_every_false_alarm_rate_its_own_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_with(dir.path(), "a.json", |v| {
+            v["metrics"]["tpr_at_fpr"] = serde_json::json!({"0.01": 0.11, "0.1": 0.55});
+            v["metrics"]["tpr_at_fpr_achieved"] = serde_json::json!({"0.01": 0.0, "0.1": 0.1});
+        });
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let csv = render(&report, ReportFormat::Csv);
+        let header: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+        for column in [
+            "tpr_at_fpr_0.01",
+            "tpr_at_fpr_0.01_achieved_fpr",
+            "tpr_at_fpr_0.1",
+            "tpr_at_fpr_0.1_achieved_fpr",
+        ] {
+            assert!(header.contains(&column), "no {column} in {header:?}");
+        }
+        assert!(!header.contains(&"tpr_at_fpr"), "the packed cell survived");
+        let row: Vec<&str> = csv.lines().nth(1).unwrap().split(',').collect();
+        let at = |name: &str| row[header.iter().position(|h| *h == name).unwrap()];
+        assert_eq!(at("tpr_at_fpr_0.01"), "0.1100");
+        assert_eq!(at("tpr_at_fpr_0.01_achieved_fpr"), "0.0000");
+        assert_eq!(at("tpr_at_fpr_0.1"), "0.5500");
+        assert_eq!(at("tpr_at_fpr_0.1_achieved_fpr"), "0.1000");
+    }
+
+    #[test]
+    fn the_csv_columns_cover_the_rates_of_every_document_not_just_the_first() {
+        // A column set taken from the first row would drop the second
+        // document's figures with nothing in the file saying so.
+        let dir = tempfile::tempdir().unwrap();
+        write_with(dir.path(), "a.json", |v| {
+            v["metrics"]["tpr_at_fpr"] = serde_json::json!({"0.01": 0.11});
+        });
+        write_with(dir.path(), "b.json", |v| {
+            v["subject"]["name"] = serde_json::json!("detector-b");
+            v["metrics"]["tpr_at_fpr"] = serde_json::json!({"0.05": 0.33});
+        });
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let csv = render(&report, ReportFormat::Csv);
+        let header: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+        assert!(header.contains(&"tpr_at_fpr_0.01"), "{header:?}");
+        assert!(header.contains(&"tpr_at_fpr_0.05"), "{header:?}");
+        assert!(
+            csv.contains("0.3300"),
+            "the second document's figure: {csv}"
+        );
+        // A rate a document never reported is empty rather than zero.
+        let a_line = csv
+            .lines()
+            .find(|l| l.contains("detector-a"))
+            .expect("a row for detector-a");
+        let cells: Vec<&str> = a_line.split(',').collect();
+        let at = |name: &str| cells[header.iter().position(|h| *h == name).unwrap()];
+        assert_eq!(at("tpr_at_fpr_0.05"), "");
+    }
+
+    #[test]
+    fn a_csv_arm_line_leaves_the_curve_columns_empty() {
+        // The curve was measured for the run, not for the arm, and an arm
+        // line repeating it would describe a different population.
+        let dir = tempfile::tempdir().unwrap();
+        with_arms(dir.path(), two_arms());
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let csv = render(&report, ReportFormat::Csv);
+        let header: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+        let index = header
+            .iter()
+            .position(|h| *h == "tpr_at_fpr_0.01")
+            .expect("a column for the rate the fixture reports");
+        for line in csv.lines().filter(|l| l.starts_with("arm,")) {
+            assert_eq!(line.split(',').nth(index).unwrap(), "", "{line}");
+        }
+    }
+
+    #[test]
     fn a_pipe_in_a_cell_cannot_shift_a_markdown_row() {
         assert_eq!(escape_md("a|b"), "a\\|b");
         assert_eq!(escape_md("a\nb"), "a b");
@@ -2498,7 +2797,26 @@ mod tests {
         assert_eq!(tpr_at(&map, 0.10), Some(0.9));
         assert_eq!(tpr_at(&map, 0.01), Some(0.4));
         assert_eq!(tpr_at(&map, 0.05), None);
-        assert_eq!(tpr_all(&map), "0.010=0.4;0.10=0.9");
+    }
+
+    #[test]
+    fn a_rate_written_two_ways_is_one_csv_column() {
+        // "0.1" and "0.10" are one rate, and two columns for it would put
+        // half the figures under each.
+        let dir = tempfile::tempdir().unwrap();
+        write_with(dir.path(), "a.json", |v| {
+            v["metrics"]["tpr_at_fpr"] = serde_json::json!({"0.1": 0.5});
+        });
+        write_with(dir.path(), "b.json", |v| {
+            v["metrics"]["tpr_at_fpr"] = serde_json::json!({"0.10": 0.6});
+        });
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let header = render(&report, ReportFormat::Csv)
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(header.matches("tpr_at_fpr_0.1,").count(), 1, "{header}");
     }
 
     #[test]

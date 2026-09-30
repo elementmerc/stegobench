@@ -55,13 +55,13 @@ pub struct Result1 {
 }
 
 impl Result1 {
-    /// What [`Result1::content_digest`] should hold for this document.
+    /// The bytes [`Result1::content_digest`] covers.
     ///
     /// Excludes the two timing fields and the digest itself, since a digest
     /// cannot cover its own value. `serde_json` orders object keys, so two
     /// runs serialise identically without a canonicalisation pass of our own.
-    pub fn compute_content_digest(&self) -> String {
-        use sha2::{Digest, Sha256};
+    ///
+    fn content_bytes(&self) -> Vec<u8> {
         let mut v = serde_json::to_value(self).expect("a result document serialises");
         if let Some(o) = v.as_object_mut() {
             o.remove("content_digest");
@@ -70,14 +70,39 @@ impl Result1 {
                 p.remove("elapsed_seconds");
             }
         }
-        let bytes = serde_json::to_vec(&v).expect("a json value serialises");
-        format!("{:x}", Sha256::new().chain_update(&bytes).finalize())
+        serde_json::to_vec(&v).expect("a json value serialises")
+    }
+
+    /// What [`Result1::content_digest`] should hold for this document.
+    ///
+    /// IT IS A DIGEST OF THE PARSED DOCUMENT, NOT OF THE FILE
+    ///
+    /// The document is deserialised, two timing fields and the digest itself
+    /// are dropped, and what remains is re-serialised and hashed. So the
+    /// digest is defined as "what this implementation recomputes" rather than
+    /// "a hash of these bytes", and the difference is not academic: a writer
+    /// whose float printer differs from `serde_json`'s can emit
+    /// `0.9074239216648787` where this emits `...788`. The two parse to
+    /// identical bits and hash differently, so a document sealed by that
+    /// writer could never match here.
+    ///
+    /// That is the right trade, because the alternative makes reformatting
+    /// a file break its seal, and it is why nothing outside this crate should
+    /// compute one. If a generator ever needs to seal a document it must call
+    /// this rather than hash its own output.
+    pub fn compute_content_digest(&self) -> String {
+        digest_of(&self.content_bytes())
     }
 
     /// Fill in [`Result1::content_digest`] from the document's own contents.
     pub fn seal(&mut self) {
         self.content_digest = Some(self.compute_content_digest());
     }
+}
+
+fn digest_of(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::new().chain_update(bytes).finalize())
 }
 
 /// What was measured.
@@ -231,6 +256,20 @@ pub struct Metrics {
     /// Detection rate keyed by false-alarm rate, the key written as the decimal
     /// fraction ("0.01" for one per cent) so the map sorts in a sane order.
     pub tpr_at_fpr: BTreeMap<String, f64>,
+    /// The false-alarm rate each figure in `tpr_at_fpr` actually came from.
+    ///
+    /// Keyed identically to `tpr_at_fpr`. A value below its key means the
+    /// corpus could not express the budget that was asked for: with six clean
+    /// images the only rates that exist are multiples of 1/6, so a request for
+    /// 0.01 is answered at 0.0 and the heading "TPR@1%FA" is a claim the
+    /// measurement cannot support. The figure is real and conservative; the
+    /// label is what it cannot carry, and a reader acting on the column is
+    /// entitled to know which of the two they have.
+    ///
+    /// Empty where nobody recorded it, which is every document written before
+    /// this field existed. Empty is not a claim that the budgets were met.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tpr_at_fpr_achieved: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict_rate: Option<f64>,
     pub n_clean: u64,
@@ -504,6 +543,23 @@ impl Result1 {
                 self.metrics.auc
             ));
         }
+        if let Some([lo, hi]) = self.metrics.auc_ci95 {
+            if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) || lo > hi {
+                bad.push(format!(
+                    "auc_ci95 [{lo}, {hi}] is not an interval inside 0 to 1"
+                ));
+            } else if self.metrics.auc < lo || self.metrics.auc > hi {
+                // Arithmetically impossible, so the document is reporting two
+                // numbers that cannot both have come from one run. The per-arm
+                // rows were checked for this and the headline was not, which
+                // let `0.9900 [0.500, 0.500]` through validation and into a
+                // rendered table.
+                bad.push(format!(
+                    "auc {} is outside its own interval [{lo}, {hi}]",
+                    self.metrics.auc
+                ));
+            }
+        }
         // The same checks the headline gets. An arm figure reaches a reader
         // through `report` looking exactly as measured as the pooled one, so
         // a per-arm AUC of 1.4 slipping through validation would be the very
@@ -554,6 +610,37 @@ impl Result1 {
                     "tpr_at_fpr[{fpr}] = {tpr} is outside 0 to 1, which is not a \
                      valid detection rate; check the scorer that computed it"
                 ));
+            }
+        }
+        for (fpr, achieved) in &self.metrics.tpr_at_fpr_achieved {
+            if !self.metrics.tpr_at_fpr.contains_key(fpr) {
+                bad.push(format!(
+                    "tpr_at_fpr_achieved names {fpr:?} and tpr_at_fpr carries no \
+                     figure for it, so this document describes a measurement it \
+                     does not report"
+                ));
+                continue;
+            }
+            match fpr.parse::<f64>() {
+                Ok(requested) if (0.0..=1.0).contains(achieved) => {
+                    // A budget is a ceiling, so the rate the run landed on is
+                    // at or below it. Above it is not a coarse corpus, it is a
+                    // figure measured outside the budget it is filed under.
+                    if *achieved > requested + 1e-9 {
+                        bad.push(format!(
+                            "tpr_at_fpr_achieved[{fpr}] = {achieved} is above the \
+                             rate it is filed under, and a false-alarm budget is \
+                             a ceiling rather than a target"
+                        ));
+                    }
+                }
+                Ok(_) => bad.push(format!(
+                    "tpr_at_fpr_achieved[{fpr}] = {achieved} is outside 0 to 1, \
+                     which is not a false-alarm rate"
+                )),
+                // The key itself is already reported against `tpr_at_fpr`
+                // above, so nothing is added here.
+                Err(_) => {}
             }
         }
         if self.metrics.n_clean == 0 || self.metrics.n_stego == 0 {
@@ -647,6 +734,23 @@ impl Result1 {
                  wrong"
                     .into(),
             );
+        }
+        // A digest is the document's own statement about its own bytes, so a
+        // claimed one that does not match is not a document to be judged on
+        // its other merits: something changed after the run wrote it, and
+        // every other field in it is a number nobody can stand behind. Absent
+        // is not a fault, because absent means nobody offered one.
+        if let Some(claimed) = &self.content_digest {
+            let actual = self.compute_content_digest();
+            if *claimed != actual {
+                bad.push(format!(
+                    "this document does not match its own content digest: it \
+                     declares {claimed} and its contents come to {actual}. Every \
+                     field except the two recording when the run happened is \
+                     covered, so something in it changed after it was written. \
+                     Re-run the measurement rather than trusting the number in it"
+                ));
+            }
         }
         if bad.is_empty() {
             Ok(())
@@ -784,6 +888,140 @@ mod tests {
         assert_eq!(back.content_digest, None);
     }
 
+    #[test]
+    fn a_headline_interval_that_does_not_contain_its_own_auc_is_refused() {
+        // `0.9900 [0.500, 0.500]` reached a rendered table because only the
+        // per-arm rows were checked for this.
+        let mut d = sample();
+        d.metrics.auc = 0.99;
+        d.metrics.auc_ci95 = Some([0.5, 0.5]);
+        let bad = d.validate().expect_err("refused");
+        assert!(
+            bad.iter().any(|m| m.contains("outside its own interval")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn a_headline_interval_outside_the_unit_interval_is_refused() {
+        for ci in [[-0.1, 0.9], [0.5, 1.4], [0.9, 0.2]] {
+            let mut d = sample();
+            d.metrics.auc_ci95 = Some(ci);
+            let bad = d.validate().expect_err("refused");
+            assert!(
+                bad.iter().any(|m| m.contains("not an interval inside")),
+                "{ci:?} gave {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_headline_interval_that_contains_its_own_auc_validates() {
+        let mut d = sample();
+        d.metrics.auc_ci95 = Some([0.9312, 0.9821]);
+        assert_eq!(d.validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_achieved_rate_above_the_budget_it_is_filed_under_is_refused() {
+        // A false-alarm budget is a ceiling. Landing above it is a figure
+        // measured outside the column it is being reported in.
+        let mut d = sample();
+        d.metrics.tpr_at_fpr_achieved = BTreeMap::from([("0.01".into(), 0.1667)]);
+        let bad = d.validate().expect_err("refused");
+        assert!(bad.iter().any(|m| m.contains("is a ceiling")), "{bad:?}");
+    }
+
+    #[test]
+    fn an_achieved_rate_for_a_figure_the_document_does_not_carry_is_refused() {
+        let mut d = sample();
+        d.metrics.tpr_at_fpr_achieved = BTreeMap::from([("0.05".into(), 0.0)]);
+        let bad = d.validate().expect_err("refused");
+        assert!(bad.iter().any(|m| m.contains("does not report")), "{bad:?}");
+    }
+
+    #[test]
+    fn an_achieved_rate_outside_zero_to_one_is_refused() {
+        let mut d = sample();
+        d.metrics.tpr_at_fpr_achieved = BTreeMap::from([("0.01".into(), -0.5)]);
+        let bad = d.validate().expect_err("refused");
+        assert!(
+            bad.iter().any(|m| m.contains("not a false-alarm rate")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn an_achieved_rate_below_its_budget_is_recorded_rather_than_refused() {
+        // The whole point of the field: a coarse corpus answers a 1 per cent
+        // budget at zero, and that is an honest measurement to be labelled
+        // rather than a fault to be rejected.
+        let mut d = sample();
+        d.metrics.tpr_at_fpr_achieved =
+            BTreeMap::from([("0.01".into(), 0.0), ("0.10".into(), 0.0833)]);
+        assert_eq!(d.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_document_written_before_the_achieved_rates_existed_still_parses_and_validates() {
+        let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        v["metrics"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tpr_at_fpr_achieved");
+        let parsed: Result1 = serde_json::from_value(v).expect("an older document still reads");
+        assert!(parsed.metrics.tpr_at_fpr_achieved.is_empty());
+        assert_eq!(parsed.validate(), Ok(()));
+    }
+
+    #[test]
+    fn empty_achieved_rates_are_left_out_of_the_serialised_document() {
+        let text = serde_json::to_string(&sample()).unwrap();
+        assert!(!text.contains("tpr_at_fpr_achieved"), "{text}");
+    }
+
+    #[test]
+    fn a_tampered_document_no_longer_matches_its_own_seal() {
+        // The finding: one edited field, and `validate` said the document was
+        // valid while only `verify` noticed.
+        let mut d = sample();
+        d.seal();
+        d.metrics.auc = 0.99;
+        let bad = d.validate().expect_err("refused");
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("does not match its own content digest")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn a_sealed_document_nobody_touched_validates() {
+        let mut d = sample();
+        d.seal();
+        assert_eq!(d.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_two_timing_fields_may_change_after_a_seal_without_breaking_it() {
+        // They are the two fields the digest deliberately leaves out, so a
+        // document re-timed by a rerun is still the same measurement.
+        let mut d = sample();
+        d.seal();
+        d.provenance.started_utc = "2030-01-01T00:00:00Z".into();
+        d.provenance.elapsed_seconds += 41.5;
+        assert_eq!(d.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_document_carrying_no_seal_is_not_accused_of_breaking_one() {
+        // Absent means nobody offered a digest, which is legitimate for a
+        // hand-written or submitted document.
+        let d = sample();
+        assert_eq!(d.content_digest, None);
+        assert_eq!(d.validate(), Ok(()));
+    }
+
     fn sample() -> Result1 {
         Result1 {
             schema: RESULT_SCHEMA_ID.into(),
@@ -814,6 +1052,7 @@ mod tests {
                 auc: 0.9634,
                 auc_ci95: None,
                 tpr_at_fpr: BTreeMap::from([("0.01".into(), 0.4133), ("0.10".into(), 0.9033)]),
+                tpr_at_fpr_achieved: BTreeMap::new(),
                 verdict_rate: None,
                 n_clean: 300,
                 n_stego: 300,
