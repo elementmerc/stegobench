@@ -138,5 +138,119 @@ class SaltHelpTests(unittest.TestCase):
         self.assertIn("EXISTING one", text)
 
 
+class CaptureClassTests(unittest.TestCase):
+    """The capture device a row claims, and the one it actually had."""
+
+    @staticmethod
+    def classify(make: str, model: str, title: str = "File:Example.jpg"):
+        return manifest_repair.capture_class(
+            {"exif": {"Make": make, "Model": model}, "title": title})
+
+    def test_a_scanned_cover_is_not_recorded_as_a_camera(self):
+        """Flatbed and film scanners that the observed list missed.
+
+        Every one of these landed in `camera` because the scanner patterns were
+        drawn from the 10,000 covers to hand and nothing else. An unmatched
+        scanner doesn't fall into `unknown`, it falls through to the camera
+        branch, so the corpus published a scanned page as sensor capture and a
+        user calibrating on it inherited a domain shift with no field to see it
+        in. The Epson Expression pair is the shape in miniature: the old
+        pattern required an XL suffix, so the 12000XL was a scanner and the
+        1680 beside it was a camera.
+        """
+        for make, model in (("EPSON", "Expression 1680"),
+                            ("Seiko Epson Corp.", "EPSON Expression 12000XL"),
+                            ("UMAX", "Astra 4000U"),
+                            ("Mustek", "BearPaw 2448TA Pro"),
+                            ("AGFA", "SnapScan e50"),
+                            ("FUJITSU", "fi-7160"),
+                            ("Nikon", "LS-2000")):
+            with self.subTest(model=model):
+                cls, basis = self.classify(make, model)
+                self.assertEqual(cls, "scanner")
+                self.assertEqual(basis, "scanner hardware in EXIF")
+
+    def test_a_camera_is_still_recorded_as_a_camera(self):
+        """The other half of the same failure, and the costlier one.
+
+        Widening the scanner patterns is only safe if it cannot swallow a
+        sensor capture. A camera wrongly filed as a scanner is worse than the
+        defect it fixes, because the camera population is what the corpus is
+        for and these rows would be quietly excluded from it.
+        """
+        for make, model in (("NIKON CORPORATION", "NIKON D750"),
+                            ("Canon", "Canon EOS 5D Mark IV"),
+                            ("Apple", "iPhone 13 Pro"),
+                            ("Panasonic", "DMC-LS80"),
+                            ("Nikon", "COOLPIX L820"),
+                            ("Fujifilm", "FinePix S2000HD"),
+                            ("Xiaomi", "Redmi Note 8")):
+            with self.subTest(model=model):
+                cls, basis = self.classify(make, model)
+                self.assertEqual(cls, "camera")
+                self.assertEqual(basis, "camera hardware in EXIF")
+
+    def test_a_row_with_no_capture_hardware_is_unknown_rather_than_guessed(self):
+        """An absent make is a gap, and a gap is not a camera.
+
+        The class is published and acted on, so the honest answer where there
+        is no evidence has to stay distinguishable from an answer there is
+        evidence for.
+        """
+        cls, basis = manifest_repair.capture_class({"exif": {}, "title": "x"})
+        self.assertEqual(cls, "unknown")
+        self.assertEqual(basis, "no capture hardware recorded")
+
+
+class AttributionTests(unittest.TestCase):
+    """Whether a downstream user owes the author a credit, per licence."""
+
+    @staticmethod
+    def row(licence: str) -> dict:
+        return {"licence": licence, "artist": "A. Photographer",
+                "title": "File:Example.jpg",
+                "descriptionurl": "https://example.invalid/1"}
+
+    def test_a_share_alike_cover_still_requires_attribution(self):
+        """CC BY-SA came out of the repair pass with the flag set to false.
+
+        Share-alike adds an obligation on top of attribution and never removes
+        it, but the set this is derived from held only the plain CC BY
+        versions. The corpus is published to three public archives, so a false
+        flag here is credit withheld from an author whose licence demands it,
+        and it silences `select_unpublishable.py` too: that tool only checks
+        whether an author was recorded on rows the flag says need one.
+        """
+        for licence in ("CC BY-SA 1.0", "CC BY-SA 2.0", "CC BY-SA 2.5",
+                        "CC BY-SA 3.0", "CC BY-SA 4.0"):
+            with self.subTest(licence=licence):
+                line, required = manifest_repair.attribution_for(self.row(licence))
+                self.assertTrue(required)
+                self.assertIn(licence, line)
+
+    def test_a_share_alike_credit_line_links_the_licence_it_names(self):
+        """A short name is not a licence, and by-sa resolves elsewhere to by.
+
+        The credit line asks for a link because CC BY-SA section 3(a)(1)(A)(iv)
+        does. Leaving CC BY-SA out of the URL table produced a line naming a
+        share-alike licence with no way to reach it, which is the failure the
+        table exists to prevent.
+        """
+        line, _ = manifest_repair.attribution_for(self.row("CC BY-SA 3.0"))
+        self.assertIn("https://creativecommons.org/licenses/by-sa/3.0/", line)
+
+    def test_a_public_domain_cover_requires_no_attribution(self):
+        """The widening must not turn every licence into an obligation.
+
+        CC0 and public domain rows carry a credit line as a courtesy and no
+        duty, and a user who cannot tell the two apart gets no value from
+        either.
+        """
+        for licence in ("CC0", "Public domain"):
+            with self.subTest(licence=licence):
+                _, required = manifest_repair.attribution_for(self.row(licence))
+                self.assertFalse(required)
+
+
 if __name__ == "__main__":
     unittest.main()

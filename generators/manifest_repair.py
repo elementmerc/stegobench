@@ -84,10 +84,29 @@ LICENCE_URLS = {
     "CC BY 2.5": "https://creativecommons.org/licenses/by/2.5/",
     "CC BY 3.0": "https://creativecommons.org/licenses/by/3.0/",
     "CC BY 4.0": "https://creativecommons.org/licenses/by/4.0/",
+    "CC BY-SA 1.0": "https://creativecommons.org/licenses/by-sa/1.0/",
+    "CC BY-SA 2.0": "https://creativecommons.org/licenses/by-sa/2.0/",
+    "CC BY-SA 2.5": "https://creativecommons.org/licenses/by-sa/2.5/",
+    "CC BY-SA 3.0": "https://creativecommons.org/licenses/by-sa/3.0/",
+    "CC BY-SA 4.0": "https://creativecommons.org/licenses/by-sa/4.0/",
 }
 
 #: Licences that oblige a downstream user to credit the author.
-ATTRIBUTION_REQUIRED = {"CC BY 1.0", "CC BY 2.0", "CC BY 2.5", "CC BY 3.0", "CC BY 4.0"}
+#:
+#: SHARE-ALIKE IS LISTED BECAUSE IT ALSO REQUIRES THE CREDIT. The first version
+#: of this set held only the plain CC BY versions, so a CC BY-SA cover, which
+#: `fetch_commons.py --licences any` accepts and which pack_arms already
+#: expects to carry a credit line, was written out with
+#: `attribution_required: false`. Every consumer of that flag then agreed the
+#: author needed no credit: the published licence page counted the cover as
+#: unencumbered, and `select_unpublishable.py` stopped asking whether the
+#: author was even recorded. Share-alike adds an obligation on top of
+#: attribution; it never removes it.
+ATTRIBUTION_REQUIRED = {
+    "CC BY 1.0", "CC BY 2.0", "CC BY 2.5", "CC BY 3.0", "CC BY 4.0",
+    "CC BY-SA 1.0", "CC BY-SA 2.0", "CC BY-SA 2.5", "CC BY-SA 3.0",
+    "CC BY-SA 4.0",
+}
 
 #: Artist values that name nobody. A CC BY credit line asks for the author as
 #: designated, and "Unknown author" designates no one, so a row carrying it
@@ -105,15 +124,26 @@ UNUSABLE_ARTIST = {"", "unknown", "unknown author", "various",
 
 #: Scanner and reprographic hardware, matched against EXIF Make and Model.
 #:
-#: These are not guesses. Every string here was observed in this corpus by the
-#: review that prompted this file, and each one is a device that photographs a
-#: flat original rather than a scene. The Phase One backs are the subtle case:
-#: they are cameras, and on a book copy rig they are producing scans, so the
-#: title patterns below carry that decision rather than the hardware string.
+#: The first group is not guesses. Every string in it was observed in this
+#: corpus by the review that prompted this file, and each one is a device that
+#: photographs a flat original rather than a scene. The Phase One backs are the
+#: subtle case: they are cameras, and on a book copy rig they are producing
+#: scans, so the title patterns below carry that decision rather than the
+#: hardware string.
+#:
+#: The second group closes the gap that only observing this corpus leaves. A
+#: family absent from the 10,000 covers is not a family that cannot arrive, and
+#: the failure is silent in the worst way: an unmatched scanner does not land in
+#: `unknown`, it falls through to the camera branch and is published as sensor
+#: capture. A scanned page and a photograph carry different noise, so a user
+#: calibrating on this corpus inherits a domain shift they have no field to see.
+#: `expression\s*\d+xl` was the clearest case of the same shape: it recognised
+#: the Epson Expression 12000XL and not the Expression 1680 beside it.
 SCANNER_PATTERNS = re.compile(
-    r"coolscan|canoscan|scanjet|perfection|expression\s*\d+xl|digibook|copibook"
+    r"coolscan|canoscan|scanjet|perfection|expression\s*\d|digibook|copibook"
     r"|suprascan|cruse|plustek|scanntech|imacon|flextight|epson\s*gt-|microtek"
-    r"|opticfilm|scanner|scanmaker|powerlook|duoscan",
+    r"|opticfilm|scanner|scanmaker|powerlook|duoscan"
+    r"|snapscan|bearpaw|scanexpress|astra\s*\d{4}|\bfi-\d{4}\b|\bls-\d{2,4}\b",
     re.I,
 )
 
