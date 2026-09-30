@@ -28,6 +28,7 @@ import json
 import pathlib
 import tarfile
 import tempfile
+import io
 import unittest
 
 import pack_arms
@@ -304,6 +305,21 @@ def png(extra_chunk: bytes | None = None, idat: bytes = b"\x00" * 16,
     return out + chunk(b"IEND", b"")
 
 
+def _real_png(width: int, height: int, mode: str) -> bytes:
+    """A PNG written by the same library the builders write with."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new(mode, (width, height)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _real_jpeg(width: int, height: int, mode: str) -> bytes:
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new(mode, (width, height)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
 class TestContainerOf(unittest.TestCase):
     """The shape comparison, on its own."""
 
@@ -321,6 +337,46 @@ class TestContainerOf(unittest.TestCase):
         # A re-encode at another quality, which is the outguess defect.
         self.assertNotEqual(pack_arms.container_of(jpeg(quant=67)),
                             pack_arms.container_of(jpeg(quant=132)))
+
+    def test_a_resized_half_is_a_different_container(self) -> None:
+        """The check that has to fire, and did not.
+
+        The length of an IHDR is 13 for every PNG ever written, so recording
+        the length rather than the contents made every PNG structurally
+        identical. `verify-release` reported "containers identical" for a
+        256x256 clean half paired with a 512x512 stego twin, and exited 0.
+
+        Real images here rather than a synthetic header, because the defect
+        was in what the reader read and a hand-built fixture can agree with a
+        wrong reader.
+        """
+        self.assertNotEqual(
+            pack_arms.container_of(_real_png(256, 256, "L")),
+            pack_arms.container_of(_real_png(512, 512, "L")),
+        )
+
+    def test_a_recoloured_half_is_a_different_container(self) -> None:
+        # Greyscale against RGB: same dimensions, different colour type, and
+        # the colour type lives in the same header the size does.
+        self.assertNotEqual(
+            pack_arms.container_of(_real_png(256, 256, "L")),
+            pack_arms.container_of(_real_png(256, 256, "RGB")),
+        )
+
+    def test_a_resized_jpeg_half_is_a_different_container(self) -> None:
+        # The frame header carries the dimensions and its length does not
+        # change with them, so the same hole existed on the JPEG side.
+        self.assertNotEqual(
+            pack_arms.container_of(_real_jpeg(256, 256, "L")),
+            pack_arms.container_of(_real_jpeg(512, 512, "L")),
+        )
+
+    def test_two_halves_of_the_same_shape_still_match(self) -> None:
+        # The guard against fixing this by making everything mismatch.
+        self.assertEqual(
+            pack_arms.container_of(_real_png(256, 256, "L")),
+            pack_arms.container_of(_real_png(256, 256, "L")),
+        )
 
     def test_a_png_payload_may_change_idat_length(self) -> None:
         # Embedding changes pixels, which changes the compressed size. That is
@@ -489,6 +545,22 @@ class TestRecordCompleteness(TestPackArm):
         self.pack([row], {"00000.jpg": "09710.png"})
         sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
         self.assertEqual(sample["pairing"], "no-clean-half")
+
+    def test_a_named_clean_half_that_is_missing_is_not_called_unpaired(self):
+        """Two different states were collapsed into one word.
+
+        The stamp was recomputed from the row rather than taken from the gate,
+        so a row naming a clean half that is not on disk came out as
+        `no-clean-half`: indistinguishable in the shipped record from a clean
+        arm that legitimately has none, and the one case where a reader most
+        needs to know the comparison never ran.
+        """
+        row = self._stego("uerd/0050/00000.jpg", jpeg())
+        row["source_jpeg"] = "00000.jpg"
+        row["clean"] = "clean_jpeg/nothing-here.jpg"
+        self.pack([row], {"00000.jpg": "09710.png"})
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        self.assertEqual(sample["pairing"], "clean-half-missing")
 
     def test_the_credit_line_says_the_image_was_modified(self):
         """CC BY asks for it, and everything here is a derivative twice over.

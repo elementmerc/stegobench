@@ -86,7 +86,7 @@ import tarfile
 import time
 
 from publish_tier import canonical_licence
-from tiers import TierError, tier_cover_names, tier_name
+from tiers import TierError, tier_cover_names, tier_name, tier_slug
 
 #: Licence-bearing fields lifted from the cover row onto every derivative. If
 #: the cover manifest gains a field that the licence depends on, it belongs
@@ -265,6 +265,13 @@ def restate(cover: dict, arm: str) -> dict:
     return out
 
 
+# Every start-of-frame marker. 0xC4 is a Huffman table, 0xC8 is reserved and
+# 0xCC is arithmetic coding conditioning: none of them is a frame header.
+SOF_MARKERS = frozenset(
+    m for m in range(0xC0, 0xD0) if m not in (0xC4, 0xC8, 0xCC)
+)
+
+
 def container_of(payload: bytes) -> tuple | None:
     """Everything about a file that the payload should NOT have changed.
 
@@ -311,7 +318,15 @@ def container_of(payload: bytes) -> tuple | None:
                 i += 2
                 continue
             length = int.from_bytes(payload[i + 2:i + 4], "big")
-            markers.append((marker, length))
+            # A frame header carries the dimensions, the sample precision and
+            # the component layout, and its LENGTH alone does not: two frames
+            # of different sizes are the same number of bytes. Those bytes are
+            # the ones a payload must not touch, so they are compared rather
+            # than counted.
+            if marker in SOF_MARKERS:
+                markers.append((marker, payload[i + 4:i + 2 + length]))
+            else:
+                markers.append((marker, length))
             i += 2 + length
         return ("jpeg", tuple(markers))
 
@@ -328,6 +343,22 @@ def container_of(payload: bytes) -> tuple | None:
             if kind == b"IDAT":
                 if not chunks or chunks[-1][0] != b"IDAT":
                     chunks.append((kind, None))
+            elif kind == b"IHDR":
+                # THE LENGTH OF AN IHDR IS ALWAYS 13, WHATEVER IS IN IT
+                #
+                # Width, height, bit depth, colour type, compression, filter
+                # and interlace all live in the CONTENTS. Recording the length
+                # meant every PNG ever written produced the identical
+                # signature, so this check reported "containers identical" for
+                # a 256x256 greyscale clean half paired with a 512x512 stego
+                # twin, and for a greyscale half paired with an RGB one.
+                #
+                # That is not a corner case. Every one of the three
+                # measurements this project lost to a broken pair was the
+                # BUILDER writing the two halves through different code paths,
+                # with correct recorded digests, so the digest check passes and
+                # this is the only check that could ever catch it.
+                chunks.append((kind, payload[i + 8:i + 8 + length]))
             else:
                 chunks.append((kind, length))
             if kind == b"IEND":
@@ -420,8 +451,10 @@ def pack_arm(
                 # out any pair that does not match rather than describing it as
                 # a pair.
                 clean_rel = row.get("clean")
+                pairing = "no-clean-half"
                 if clean_rel:
                     clean_path = arms_root / clean_rel
+                    pairing = "clean-half-missing"
                     if clean_path.exists():
                         clean_shape = container_of(clean_path.read_bytes())
                         stego_shape = container_of(payload)
@@ -437,6 +470,7 @@ def pack_arm(
                             container_mismatches.append(rel)
                             position += 1
                             continue
+                        pairing = "container-verified"
 
                 sample = dict(row)
                 # THE ARM NAME THE RELEASE PUBLISHES, not the one the builder
@@ -464,9 +498,14 @@ def pack_arm(
                 # this line has had its container compared with its clean
                 # half, so the field says what was verified rather than what
                 # the builder intended.
-                sample["pairing"] = (
-                    "container-verified" if clean_rel and (arms_root / clean_rel).exists()
-                    else "no-clean-half")
+                # Set by the gate above and by nothing else. It was
+                # recomputed here from `clean_rel` and a second stat, which is
+                # a second source of truth for one fact: any row naming a
+                # clean half was stamped `container-verified` whether the
+                # comparison had run or not, and a row naming a clean half
+                # that is not on disk was stamped `no-clean-half`, which reads
+                # as an unpaired arm rather than as a missing file.
+                sample["pairing"] = pairing
                 sample.setdefault("domain", DOMAINS.get(
                     str(row.get("tool", "")), "unknown"))
                 sample.setdefault("rate_unit", RATE_UNITS.get(
@@ -591,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
               f"fail its licence join", file=sys.stderr)
 
     tier = tier_name(args.count)
-    slug = tier.lower()
+    slug = tier_slug(args.count)
     try:
         in_tier = tier_cover_names(pathlib.Path(args.covers_manifest), args.count)
     except TierError as e:
