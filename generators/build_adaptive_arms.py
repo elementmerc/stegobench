@@ -61,6 +61,7 @@ measures the gap.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import os
 import json
@@ -119,8 +120,20 @@ def _scratch(dest: pathlib.Path, suffix: str) -> pathlib.Path:
 def write_png(array: np.ndarray, dest: pathlib.Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = _scratch(dest, ".png.part")
-    Image.fromarray(array.astype(np.uint8), mode="L").save(part, format="PNG")
-    part.replace(dest)
+    try:
+        Image.fromarray(array.astype(np.uint8), mode="L").save(part, format="PNG")
+        part.replace(dest)
+    except OSError:
+        # THE SCRATCH FILE IS THE SIZE OF THE PROBLEM
+        #
+        # The rename is atomic, so a failed write never becomes a real image,
+        # and that half was already right. What was not: the part file stayed
+        # behind. The failure that produces one is usually a full disk, and
+        # each orphan is a full-size image holding down the space that was
+        # already the problem. Over a run of hundreds of thousands they
+        # accumulate with nothing sweeping them.
+        part.unlink(missing_ok=True)
+        raise
 
 
 def jpeg_passthrough(source: pathlib.Path, dest: pathlib.Path) -> None:
@@ -131,8 +144,12 @@ def jpeg_passthrough(source: pathlib.Path, dest: pathlib.Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     im = jpeglib.read_dct(str(source))
     part = _scratch(dest, ".jpg.part")
-    im.write_dct(str(part))
-    part.replace(dest)
+    try:
+        im.write_dct(str(part))
+        part.replace(dest)
+    except OSError:
+        part.unlink(missing_ok=True)
+        raise
 
 
 def jpeg_clean_pair(source: pathlib.Path, working: pathlib.Path,
@@ -168,7 +185,7 @@ def jpeg_clean_pair(source: pathlib.Path, working: pathlib.Path,
     jpeg_passthrough(working, dest)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--covers", required=True, help="Pentimento PNG covers")
     ap.add_argument("--jpeg-covers", default=None,
@@ -204,8 +221,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         chosen = covers_in_tier_order(manifest, covers_dir, args.count)
     except TierError as e:
+        # Refused before any work started, which is a different thing from a
+        # run that started and broke. Same code the Rust half uses for a
+        # pre-flight refusal, so one vocabulary spans both halves.
         print(f"cannot select a tier: {e}", file=sys.stderr)
-        return 1
+        return 3
     print(f"{len(chosen)} covers, tier order 0..{len(chosen) - 1} "
           f"[{tier_name(len(chosen))}], from {manifest}")
 
@@ -427,7 +447,44 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"built {counts['pairs']} pairs into {out}")
     print(f"  {counts}")
-    return 0 if counts["pairs"] else 1
+    # NOTHING LEFT TO DO IS SUCCESS, AND USED TO BE FAILURE
+    #
+    # This returned 1 whenever no NEW pair was built, so the run that confirms
+    # a finished build reported failure, and reported it with the same code as
+    # a refusal and as an uncaught write error. Anybody supervising a multi-day
+    # build cannot tell "done" from "the disk filled at 3am", and `set -e`
+    # turns a successful completion check into an abort.
+    #
+    # `fetch-commons` already exits 0 when it resumes with nothing to do, so
+    # there was not even a convention to learn.
+    return 1 if counts["failed"] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`main`, with the errors a long build actually meets turned into words.
+
+    A full disk used to arrive as a raw `OSError` traceback naming a line of
+    this file, which tells somebody supervising an overnight build nothing
+    they can act on and leaks internal paths to a terminal. The exception is
+    still the truth of what happened, so the message carries it; what changes
+    is that it arrives as a sentence with a next step.
+    """
+    try:
+        return _build(argv)
+    except KeyboardInterrupt:
+        # Interrupting is a legitimate way to stop a multi-day build. What is
+        # on disk stays resumable, because every image is written through a
+        # rename and every manifest row is flushed behind its file.
+        print("\ninterrupted. Re-run the same command to carry on from here.",
+              file=sys.stderr)
+        return 130
+    except OSError as e:
+        room = ""
+        if e.errno in (errno.ENOSPC, errno.EFBIG, errno.EDQUOT):
+            room = " Free some space, then re-run the same command to carry " \
+                   "on from where this stopped."
+        print(f"the build stopped writing: {e}.{room}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
