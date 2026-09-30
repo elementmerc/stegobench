@@ -272,6 +272,18 @@ pub enum Command {
         /// and cannot tell a working tool from a broken one.
         #[arg(long)]
         no_selftest: bool,
+        /// Fail unless every registered tool is installed and working.
+        ///
+        /// Without this, a tool you have not installed is reported and is
+        /// not a failure, because you can measure with the ones you have.
+        /// Exit 8 is then reserved for a machine that can measure nothing,
+        /// and for a tool that is installed and fails its own self-test.
+        ///
+        /// With it, anything missing or undetermined fails too, which is
+        /// what a release gate wants and what a person at a terminal does
+        /// not.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Score a corpus with one detector, several, or every registered one

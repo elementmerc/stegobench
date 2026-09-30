@@ -62,9 +62,13 @@ nothing else.\
 
 [obtain]
 instructions = """
-It is already here. Point `stegobench score` at `corpora/starter` in a checkout \
-of this repository; there is nothing to download, which is the entire point of \
-it existing.
+It is already here, inside the binary, and there is nothing to download, which \
+is the entire point of it existing.
+
+`stegobench fetch stegobench-starter --tier nano` writes it to a directory and \
+prints the command to score it with; `--dest` chooses where. In a checkout of \
+this repository it is also just `corpora/starter`, and the two are the same \
+bytes.
 
 `python3 corpora/starter/build.py --check` rebuilds it into a temporary \
 directory and compares the result byte for byte, so the shipped files can be \

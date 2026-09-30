@@ -327,6 +327,13 @@ pub fn of_corpus(corpus: &CorpusEntry) -> Needs {
     match (&corpus.obtain.doi, &corpus.obtain.url) {
         (Some(doi), _) => steps.push(Step::just(format!("Download it, citing {doi}"))),
         (None, Some(url)) => steps.push(Step::just(format!("Download it from {url}"))),
+        // The starter corpus travels inside the binary, so "yours to arrange"
+        // is true of every other routeless entry and false of the one entry
+        // a first run depends on.
+        (None, None) if corpus.id == crate::STARTER_ID => steps.push(Step::just(
+            "No download: this one is compiled into the binary. \
+             `stegobench fetch stegobench-starter --tier nano` writes it out.",
+        )),
         (None, None) => steps.push(Step::just(
             "This entry records no download route; obtaining it is yours to \
              arrange.",

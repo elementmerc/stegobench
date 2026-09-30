@@ -35,6 +35,7 @@ use stegobench_cli::registry;
 use stegobench_cli::registry::Resolved;
 use stegobench_cli::report;
 use stegobench_cli::score;
+use stegobench_cli::STARTER_ID;
 use stegobench_core::registry::{Kind, Registry};
 use stegobench_core::{exit, ManifestV1, Result1, RunV1};
 use stegobench_plugin::availability::Presence;
@@ -452,7 +453,7 @@ fn describe_block<T: serde::Serialize + std::fmt::Debug>(
 /// ones answered: a stale `./fixtures` beside a checkout and the copy compiled
 /// into the binary are different bytes, and a self-test result is about the
 /// ones it actually read.
-fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>) -> Output {
+fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>, strict: bool) -> Output {
     let reg = &resolved.registry;
     let no_selftest = fixtures.is_none();
 
@@ -617,12 +618,45 @@ fn cmd_doctor(resolved: &Resolved, fixtures: Option<&fixtures::Fixtures>) -> Out
     });
 
     let mut out = Output::ok(json, human.join("\n"));
-    // An undetermined tool counts, and it did not used to only because it was
-    // being counted as missing. A machine where a service's address has never
-    // been set is not a machine `doctor` should pronounce fit: nothing has
-    // established that the tool can be reached at all.
-    if missing > 0 || broken > 0 || undetermined > 0 {
+    // WHAT "UNFIT" MEANS, AND WHAT IT USED TO MEAN
+    //
+    // It used to mean any registered tool being absent, which no machine
+    // will ever satisfy: thirteen tools are registered, most of them
+    // containers, and a reader who has installed one detector and can
+    // measure with it was told their machine was unfit and handed exit 8.
+    // The front page recommends running this, so the first thing a newcomer
+    // saw was a failure code for a working install, and anybody wiring it
+    // into CI had to special case it.
+    //
+    // So the default now answers the question the command asks in its own
+    // summary line, "can this machine run what it claims to": nothing usable
+    // is unfit, and so is a tool that is installed and fails its own
+    // self-test, because that one is not absent, it is lying. A tool you
+    // simply have not installed is reported and is not a failure.
+    //
+    // `--strict` keeps the old meaning for the caller that wants it, which is
+    // a release gate rather than a person at a terminal.
+    let usable = passed + answered;
+    let unfit = broken > 0 || usable == 0 || (strict && (missing > 0 || undetermined > 0));
+    if unfit {
         out.code = exit::ENVIRONMENT_UNFIT;
+    }
+    if out.code == exit::ENVIRONMENT_UNFIT {
+        let why = if broken > 0 {
+            format!("{broken} installed tool(s) failed their own self-test")
+        } else if usable == 0 {
+            "no tool here is usable, so nothing could be measured".to_string()
+        } else {
+            "--strict was given and something is missing or undetermined".to_string()
+        };
+        out.human.push_str(&format!("\n\nUNFIT (exit 8): {why}."));
+    } else if missing > 0 || undetermined > 0 {
+        out.human.push_str(
+            "\n\nFIT (exit 0): the tools above that are not installed are \
+             listed rather than treated as faults, because you can measure \
+             with the ones you have. `--strict` fails on any of them, which \
+             is what a release gate wants.",
+        );
     }
     out
 }
@@ -2118,6 +2152,38 @@ fn fetch_dest(named: Option<&Path>, from_env: Option<&str>) -> PathBuf {
         .unwrap_or_else(fetch::default_dest)
 }
 
+include!(concat!(env!("OUT_DIR"), "/embedded_starter.rs"));
+
+/// Write the compiled-in starter corpus to `dest`, returning how many files.
+///
+/// Refuses a destination that already holds files rather than merging into
+/// it: a half-overwritten corpus whose records describe images from two
+/// different copies is worse than no corpus, and it is the kind of thing
+/// nobody notices until a number comes out wrong.
+fn write_embedded_starter(dest: &Path) -> Result<usize, String> {
+    if let Ok(mut entries) = std::fs::read_dir(dest) {
+        if entries.next().is_some() {
+            return Err(format!(
+                "{} already has something in it. Name an empty directory \
+                 with --dest, or move that one aside: writing over half of a \
+                 corpus leaves records describing images from two different \
+                 copies, and nothing downstream can tell.",
+                dest.display()
+            ));
+        }
+    }
+    for (rel, bytes) in EMBEDDED_STARTER {
+        let path = dest.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    }
+    Ok(EMBEDDED_STARTER.len())
+}
+
 /// Download one tier of one corpus.
 ///
 /// THE ORDER HERE IS THE POINT.
@@ -2144,6 +2210,38 @@ fn cmd_fetch(
             ),
         );
     };
+    // A corpus carried inside this binary is obtained by writing it out, not
+    // by downloading it, and this is the verb somebody reaches for either
+    // way. Before the refusal, because the refusal is about a download route
+    // and this corpus needs none: `describe` used to tell the reader to point
+    // `score` at a path "in a checkout of this repository", which is false
+    // for anybody who installed the binary, and that is everybody the starter
+    // corpus exists for.
+    if entry.id == STARTER_ID && !EMBEDDED_STARTER.is_empty() {
+        let dest = dest
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(STARTER_ID));
+        return match write_embedded_starter(&dest) {
+            Err(e) => Output::err(exit::FAILURE, e),
+            Ok(n) => Output::ok(
+                serde_json::json!({
+                    "corpus": entry.id,
+                    "dest": dest.display().to_string(),
+                    "files": n,
+                    "source": "compiled into this binary",
+                }),
+                format!(
+                    "wrote {n} file(s) to {}, from the copy compiled into \
+                     this binary rather than from a download.\n\nScore it \
+                     with:\n  stegobench score --corpus {} --detector \
+                     <name>\n\nEighteen images is a demonstration that the \
+                     machinery works, not a measurement of anything.",
+                    dest.display(),
+                    dest.display()
+                ),
+            ),
+        };
+    }
     if let Some(refused) = fetch::refusal(entry) {
         return Output::err(refused.exit_code(), refused.to_string());
     }
@@ -2303,17 +2401,18 @@ fn run(cli: &Cli) -> Output {
         Command::Doctor {
             fixtures,
             no_selftest,
+            strict,
         } => with_registry(cli, |r| {
             if *no_selftest {
                 // Nothing will read the fixtures, so nothing looks for them.
                 // Unpacking the built-in copy here would be work done to
                 // satisfy a parameter rather than a question.
-                return cmd_doctor(r, None);
+                return cmd_doctor(r, None, *strict);
             }
             match fixtures::resolve(fixtures.as_deref()) {
                 // Held for the whole call: for the built-in copy this owns the
                 // scratch directory the images were unpacked into.
-                Ok(found) => cmd_doctor(r, Some(&found)),
+                Ok(found) => cmd_doctor(r, Some(&found), *strict),
                 Err(e) => Output::err(exit::PREFLIGHT_REFUSED, e.to_string()),
             }
         }),
@@ -3283,7 +3382,7 @@ mod tests {
             shipped_registry().display().to_string()
         );
 
-        let doctor = cmd_doctor(&resolved, None);
+        let doctor = cmd_doctor(&resolved, None, false);
         assert!(
             doctor.human.starts_with("registry  "),
             "doctor does not open by naming the registry: {}",
@@ -3364,6 +3463,39 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn the_starter_corpus_is_carried_in_the_binary_and_can_be_written_out() {
+        // The first run for anybody who installed a binary. `describe` used
+        // to tell them to look in a checkout they do not have.
+        assert!(
+            !EMBEDDED_STARTER.is_empty(),
+            "no starter corpus was compiled in, so a first run needs a checkout"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        let n = write_embedded_starter(&dest).expect("written");
+        assert_eq!(n, EMBEDDED_STARTER.len());
+
+        // It has to be a corpus, not just files: every image needs the record
+        // beside it or `score` will refuse what we just produced.
+        let digest = score::corpus_digest(&dest)
+            .expect("readable")
+            .expect("every record states a digest");
+        assert!(digest.starts_with("sha256:"), "got {digest}");
+    }
+
+    #[test]
+    fn writing_the_starter_corpus_over_something_is_refused() {
+        // Merging into a directory that already holds a corpus leaves records
+        // describing images from two copies, and nothing downstream can tell.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("something.txt"), b"mine").unwrap();
+        let err = write_embedded_starter(&dest).expect_err("should have refused");
+        assert!(err.contains("already has something in it"), "got {err}");
     }
 
     /// A corpus whose records state the digest their image actually has.
@@ -4227,7 +4359,7 @@ mod tests {
     #[test]
     fn doctor_and_describe_both_say_what_a_tool_needs_and_agree() {
         let dir = shipped_registry();
-        let doctor = cmd_doctor(&resolved_at(&dir), None);
+        let doctor = cmd_doctor(&resolved_at(&dir), None, false);
         assert!(
             doctor.json["needing_action"].is_number(),
             "doctor does not report how many tools need something"

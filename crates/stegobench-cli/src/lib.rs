@@ -7,6 +7,13 @@
 //! source the binary parses against. There is no other reason for a lib
 //! target here; the behaviour lives in the binary.
 
+/// The registry id of the corpus this binary carries a copy of.
+///
+/// Here rather than in `main.rs` because both halves need it: the binary
+/// writes the corpus out and `needs` has to stop telling the reader that
+/// obtaining it is theirs to arrange.
+pub const STARTER_ID: &str = "stegobench-starter";
+
 pub mod cli;
 pub mod fetch;
 pub mod fixtures;
