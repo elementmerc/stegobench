@@ -26,7 +26,7 @@ nobody has to take our neutrality on faith.
 
 | Division | What a submission needs | What a reader may conclude |
 |---|---|---|
-| **Reproducible** | The corpus is publicly available, every plugin is pinned by digest (never a tag), and the seed is recorded. **We re-ran it ourselves and got the same number.** | The number is a fact, not a claim. |
+| **Reproducible** | The corpus is publicly available, every plugin is pinned by digest (never a tag), and the submitter has declared the seed their plugin used. **We re-ran it ourselves and got the same number.** | The number is a fact, not a claim. |
 | **Reported** | The submitter ran it and sent a `result-v1` document. Their setup may otherwise be private. | The number is a claim made by a named party, worth exactly as much as that party's credibility. |
 | **Reference** | Produced by us, including our own rich-model baseline and Stegcore itself. | A calibration point other numbers can be read against. **Never ranked.** |
 
@@ -55,6 +55,25 @@ partly failed run cannot be reported as a clean one), `provenance` (the
 plugin's image pinned by digest, the seed, whether the run had network
 access), and `declarations` (split discipline, pairing, whether the detector
 trained on the corpus it was scored against, and `self_reported`).
+
+### About the seed
+
+`provenance.seed` is the submitter's declaration of the seed their own plugin
+used. The harness has no `--seed` flag and will not grow one: nothing in
+scoring is random, so a seed the harness invented and nothing consumed would
+make a document look more controlled than the run was. The randomness, where
+there is any, belongs to the detector: a learned model's initialisation, a
+sampling step, a randomised feature. Whoever owns that is the only party who
+can say what it was set to.
+
+A plugin that is deterministic declares no seed at all. Leaving the field out
+is the right answer there, and it is not treated as a missing field.
+
+**This is a declaration, and we cannot check it.** Nothing in the document
+ties the number back to a seed, and a submitter who writes down the wrong one
+will not be caught by any gate here. What catches it is the re-run: if we
+cannot get the same number, the submission does not enter Reproducible. The
+seed is there so a reader knows which knob to turn, not as evidence.
 
 A submission that wants the Reproducible division additionally needs the
 corpus to be one we can pull ourselves and re-score, and the plugin to be an
@@ -100,7 +119,7 @@ image we can pull and run under the same sandboxing (`--network=none`,
 A table with a handful of rows, all from the author, reads as marketing
 regardless of how the divisions are labelled, and this project would rather
 have no public table than that one. The realistic path to a genuine
-multi-party seed is the work already in motion: the free reference panel
+multi-party start is the work already in motion: the free reference panel
 (Aletheia's SPA and RS, StegExpose, zsteg) plus StegaShield as a Reported
 entry once FiveInsights consents to it being scored. That is a real
 multi-party table on day one, once it exists; it does not exist yet.

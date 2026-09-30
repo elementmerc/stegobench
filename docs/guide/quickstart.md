@@ -105,13 +105,32 @@ out `named` or `custom`.
 ### Score it
 
 ```sh
-stegobench score --corpus stegobench-starter --detector zsteg --out result.json
+stegobench score --corpus stegobench-starter --detector aletheia-rs --out result.json
 ```
 
 It asks the detector about every image, writes each answer to a records file as
 it goes, and emits a validated `result-v1` document naming the exact bytes it
 measured. Interrupt it and run the same command again and it picks up where it
 stopped.
+
+The headline line of that run:
+
+```
+aletheia-rs      AUC 1.0000 [1.0000, 1.0000]  6 clean / 12 stego / 0 unanswered  result.json
+```
+
+A perfect score, because plain LSB in a synthetic greyscale cover is the
+easiest thing in this field to spot. Six clean images is also too few to be
+wrong on, which is why the run says so itself. `aletheia-rs` is the detector
+`doctor` is most likely to have found on a fresh machine; if it didn't,
+`doctor` printed the line to type, and `--detector all` scores with whatever
+this installation can actually run.
+
+Not every detector suits every corpus. `zsteg` reads the structural tricks
+that hide data in PNG channel and bit-plane orderings, so on these images it
+answers the same thing eighteen times and lands on an AUC of exactly 0.5. That
+figure is 0.5 by construction rather than by measurement, and the run says so
+rather than leaving it to be read as chance.
 
 Useful flags:
 

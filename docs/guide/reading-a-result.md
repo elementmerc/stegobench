@@ -108,6 +108,13 @@ library dispatches on the instruction set.
 container runs with no network; a locally installed program is one the operator
 installed, and the harness can't speak for it.
 
+`provenance.seed` is the seed the detector's own plugin was run with, as the
+person who ran it declared it. The harness has no seed of its own, because
+nothing in scoring is random. A deterministic plugin leaves the field out,
+which is an answer rather than an omission. Nothing checks the value, so read
+it as a note about how to set the tool up again rather than as evidence about
+the number beside it.
+
 `provenance.plugins[].determinism` says whether two runs of that tool agree at
 all. Most say `unstated`, which means nobody has checked. That's different
 from `nondeterministic`, which means somebody did check and it varies, and
