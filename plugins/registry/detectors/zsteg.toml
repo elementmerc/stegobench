@@ -33,7 +33,13 @@ peak_rss_mb = 120
 cores_per_worker = 1
 
 [invoke]
-argv = ["zsteg", "-a", "{file}"]
+# No leading `zsteg`. The image's ENTRYPOINT is already `["zsteg"]` and docker
+# appends argv to it, so naming the program here ran `zsteg zsteg -a <file>`:
+# zsteg took the extra word as a second filename, failed to open it, and
+# printed an ENOENT before it got to the real image. The scan itself was
+# unaffected, which is why it went unnoticed, but every run carried a Ruby
+# error somebody reading the output would reasonably think was theirs.
+argv = ["-a", "{file}"]
 parser = "zsteg"
 
 [selftest]

@@ -43,6 +43,39 @@ pub enum Verified {
     Answered(String),
 }
 
+/// The flags every containerised run in this project is locked down with.
+///
+/// Public, and the ONE place they are written. `stegobench describe` prints a
+/// command a reader can paste, and the only thing that makes that command
+/// worth printing is that it is the command the harness runs. A second copy
+/// of this list somewhere else is a copy that drifts, and a printed sandbox
+/// weaker than the real one is worse than printing nothing.
+///
+/// THERE IS NO WRITABLE /tmp HERE, AND THAT WAS TRIED
+///
+/// zsteg writes a tempfile while identifying extracted data, and under
+/// `--read-only` it dies on that with a Ruby traceback and exit 1, partway
+/// through any image carrying trailing data. Adding `--tmpfs /tmp` removes
+/// the traceback and lets it finish. It also turns zsteg into a detector that
+/// answers stego to everything: with the tempfile available it identifies
+/// random bits extracted from a CLEAN image as an OpenPGP key or an archive
+/// and reports a hit. Its own two-sided self-test caught this immediately,
+/// `must_clear` failing where `must_detect` still passed, which is the whole
+/// reason that check has two sides.
+///
+/// So the strict sandbox is load-bearing for what zsteg measures, which is an
+/// uncomfortable thing to be true and is recorded here rather than
+/// rediscovered. Anybody loosening this must re-run every self-test and
+/// expect the numbers to move. See DEFERRED.md.
+pub const SANDBOX: &[&str] = &[
+    "--network=none",
+    "--cap-drop=ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--read-only",
+    "--memory=2g",
+];
+
 /// Runs one image through a containerised tool and parses what comes back.
 ///
 /// The container is locked down the way every run in this project is: no
@@ -87,18 +120,10 @@ fn run_one(
     };
     let inner = format!("/work/{name}");
 
-    let mut args: Vec<String> = vec![
-        "run".into(),
-        "--rm".into(),
-        "--network=none".into(),
-        "--cap-drop=ALL".into(),
-        "--security-opt".into(),
-        "no-new-privileges".into(),
-        "--read-only".into(),
-        "--memory=2g".into(),
-        "-v".into(),
-        mount,
-    ];
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+    args.extend(SANDBOX.iter().map(|s| s.to_string()));
+    args.push("-v".into());
+    args.push(mount);
 
     // An adapter is mounted read-only beside the image it reads.
     let mut adapter_inner = String::new();

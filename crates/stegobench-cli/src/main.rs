@@ -655,17 +655,12 @@ fn runnable_command(
         words.push("--user".into());
         words.push("$(id -u):$(id -g)".into());
     }
-    for flag in [
-        "--network=none",
-        "--cap-drop=ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--read-only",
-        "--memory=2g",
-        "-v",
-    ] {
-        words.push(flag.into());
+    // The harness's own list, not a copy of it. What makes this command worth
+    // printing is that it is the command the harness runs.
+    for flag in stegobench_plugin::selftest::SANDBOX {
+        words.push((*flag).into());
     }
+    words.push("-v".into());
     words.push(if i.writable_workdir {
         "\"$PWD\":/work".into()
     } else {
@@ -4272,7 +4267,11 @@ mod tests {
         // to be kept by the TOML dump, so the summary has to keep it now.
         let zsteg = cmd_describe(&resolved_at(&dir), "zsteg", false);
         assert_eq!(zsteg.code, exit::OK);
-        for expected in ["Runs as", "Costs", "Run it", "zsteg -a"] {
+        // The arguments, not the program name. zsteg's image already has
+        // `zsteg` as its entrypoint, so naming it again in the registry ran
+        // it twice; asserting on the doubled form would hold that bug in
+        // place.
+        for expected in ["Runs as", "Costs", "Run it", "-a /work/{file}"] {
             assert!(
                 zsteg.human.contains(expected),
                 "the summary drops {expected:?}: {}",
