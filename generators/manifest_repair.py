@@ -65,6 +65,7 @@ import pathlib
 import random
 import re
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 # The licence vocabulary lives there. It belongs beside LICENCE_URLS below
@@ -259,13 +260,27 @@ def stable_split(row: dict, salt: str, test_fraction: float) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("manifest")
-    ap.add_argument("--out", default=None, help="default: rewrite in place, atomically")
+    ap.add_argument("--out", default=None,
+                    help="where to write the repaired manifest. Without it the "
+                         "manifest is rewritten in place, atomically, keeping "
+                         "a timestamped copy of what was there")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="rewrite in place without keeping the previous "
+                         "manifest. Only the in-place path writes one")
     ap.add_argument("--salt", default="pentimento-v1",
-                    help="fixed, recorded, and never changed once published: "
-                         "changing it reassigns every cover's split")
-    ap.add_argument("--test-fraction", type=float, default=0.2)
-    ap.add_argument("--order-seed", type=int, default=20260918)
-    ap.add_argument("--dry-run", action="store_true")
+                    help="what the train/test split is keyed on, recorded in "
+                         "every row. Building a NEW corpus: give it your own "
+                         "name. Repairing an EXISTING one: keep whatever that "
+                         "corpus recorded, because changing it reassigns every "
+                         "cover and invalidates every result already built on it")
+    ap.add_argument("--test-fraction", type=float, default=0.2,
+                    help="share of covers assigned to the test side of the split")
+    ap.add_argument("--order-seed", type=int, default=20260918,
+                    help="seeds the shuffle that assigns tier_order to covers "
+                         "that do not have one yet. Existing positions are "
+                         "never reassigned, so this only affects new covers")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what would change and write nothing")
     args = ap.parse_args(argv)
 
     # A caller that redirected stdout may have put something there that
@@ -358,10 +373,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     out = pathlib.Path(args.out) if args.out else path
+    backup = None
+    if out == path and not args.no_backup:
+        # The cover manifest is the only record of every licence, credit line
+        # and split assignment, and this tool rewrites all three. An atomic
+        # rename makes the write safe against a crash; it does nothing about a
+        # mistyped --salt, which reassigns every split and is not detectable
+        # afterwards from the file itself. The copy is timestamped rather than
+        # a single `.bak`, so a second wrong run cannot overwrite the good one.
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        backup = out.with_name(f"{out.name}.bak.{stamp}")
+        # Second resolution is not enough on its own: two runs inside one
+        # second would leave the wrong-salt copy sitting where the good one was.
+        attempt = 1
+        while backup.exists():
+            attempt += 1
+            backup = out.with_name(f"{out.name}.bak.{stamp}-{attempt}")
+        backup.write_bytes(path.read_bytes())
+
     tmp = out.with_suffix(out.suffix + f".repair-{os.getpid()}")
     tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     tmp.replace(out)
     print(f"\nwritten: {out}")
+    if backup is not None:
+        print(f"previous: {backup}")
     return 0
 
 

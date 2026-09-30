@@ -14,7 +14,17 @@ that is what changes the corpus.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import itertools
+import pathlib
+import random
+import shutil
+import tempfile
 import unittest
+import unittest.mock
+
+from PIL import Image
 
 import fetch_commons
 from fetch_commons import DiversityCaps, exif_of, strip_html, suitable
@@ -295,6 +305,83 @@ class PermissiveSetTests(unittest.TestCase):
         for lic in fetch_commons.PERMISSIVE:
             self.assertNotIn("-nc", lic)
             self.assertNotIn("-nd", lic)
+
+
+class HeartbeatTests(unittest.TestCase):
+    """A run measured in hours must not be indistinguishable from a wedged one.
+
+    The beat fires on elapsed time rather than on progress, so a stretch where
+    every candidate is refused still says so. That is the case that matters:
+    the fetcher refuses roughly four candidates for every cover it keeps, and
+    the old beat only ran after a cover was written.
+    """
+
+    def fetch(self, pages, count=2):
+        """Run the fetcher against a fabricated Commons, with the clock moved
+        on a minute between candidates so the beat is reached."""
+        work = pathlib.Path(tempfile.mkdtemp(prefix="pentimento-test-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        # Textured rather than flat: the cover suitability gate refuses a crop
+        # with no gradients, so a plain rectangle never reaches the write path.
+        noise = random.Random(7)
+        pixels = bytes(noise.randrange(40, 216) for _ in range(600 * 600 * 3))
+        image = io.BytesIO()
+        Image.frombytes("RGB", (600, 600), pixels).save(image, format="PNG")
+
+        ticks = itertools.count(0, 60)
+        out, err = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(fetch_commons, "random_candidates",
+                                        return_value=iter(pages)), \
+             unittest.mock.patch.object(fetch_commons, "fetch_bytes",
+                                        return_value=image.getvalue()), \
+             unittest.mock.patch.object(fetch_commons.time, "monotonic",
+                                        side_effect=lambda: next(ticks)), \
+             unittest.mock.patch.object(fetch_commons.time, "sleep",
+                                        lambda _s: None), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = fetch_commons.main(
+                ["--out", str(work), "--count", str(count), "--strategy",
+                 "random", "--allow-scans"])
+        return code, out.getvalue()
+
+    @staticmethod
+    def page(pageid, licence="CC0 1.0"):
+        return ({"pageid": pageid, "title": f"File:{pageid}.png"},
+                {"url": f"https://example.invalid/{pageid}.png",
+                 "descriptionurl": f"https://example.invalid/{pageid}",
+                 "mime": "image/png", "size": 1024 * 1024,
+                 "width": 600, "height": 600, "sha1": f"{pageid:040x}",
+                 "user": f"Uploader{pageid}",
+                 "extmetadata": {"LicenseShortName": {"value": licence}},
+                 "metadata": [{"name": "Make", "value": "Canon"}]})
+
+    def beats(self, text):
+        return [l for l in text.splitlines() if "candidates," in l]
+
+    def test_the_run_says_what_it_is_doing_before_it_starts(self):
+        _, out = self.fetch([self.page(1), self.page(2)])
+        self.assertIn("fetching 2 covers into", out)
+
+    def test_a_beat_names_progress_and_a_rate(self):
+        _, out = self.fetch([self.page(i) for i in range(1, 6)], count=4)
+        beats = self.beats(out)
+        self.assertTrue(beats, out)
+        self.assertRegex(beats[0], r"^  \d+/4 covers, \d+ candidates, "
+                                   r"\d+\.\d/min$")
+
+    def test_a_stretch_where_nothing_is_kept_still_beats(self):
+        """Every one of these is refused on licence, so nothing is written."""
+        refused = [self.page(i, licence="CC BY-SA 4.0") for i in range(1, 8)]
+        _, out = self.fetch(refused, count=2)
+        beats = self.beats(out)
+        self.assertTrue(beats, "a run that keeps nothing went silent")
+        self.assertIn("0/2 covers", beats[0])
+
+    def test_nothing_a_terminal_would_have_to_interpret_is_printed(self):
+        _, out = self.fetch([self.page(i) for i in range(1, 6)], count=4)
+        for line in self.beats(out):
+            self.assertNotIn("\r", line)
+            self.assertNotIn("\x1b", line)
 
 
 if __name__ == "__main__":

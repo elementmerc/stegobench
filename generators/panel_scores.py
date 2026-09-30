@@ -354,7 +354,8 @@ def main(argv: list[str] | None = None) -> int:
                          "needs the memory; the per container ceiling follows")
     ap.add_argument("--shards", type=int, default=4,
                     help="parallel Aletheia containers per directory. Each one\n                         starts its own worker pool inside, so this multiplies:\n                         12 here put a 16 core box at a load average of 76")
-    ap.add_argument("--timeout", type=int, default=14400)
+    ap.add_argument("--timeout", type=int, default=14400,
+                    help="seconds one container may run before it is killed")
     ap.add_argument("--report-only", action="store_true")
     args = ap.parse_args(argv)
 

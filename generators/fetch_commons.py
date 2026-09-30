@@ -453,10 +453,14 @@ def random_candidates(limit: int, min_kb: int, max_kb: int, size: int,
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True,
+                    help="directory to write the covers and manifest.jsonl "
+                         "into. Re-running against it resumes")
     ap.add_argument("--count", type=int, default=400, help="total covers wanted")
     ap.add_argument("--size", type=int, default=512, help="square crop side")
-    ap.add_argument("--categories", default=",".join(DEFAULT_CATEGORIES))
+    ap.add_argument("--categories", default=",".join(DEFAULT_CATEGORIES),
+                    help="comma separated Commons categories to draw from. "
+                         "Only read when --strategy is categories")
     ap.add_argument("--min-kb", type=int, default=300,
                     help="skip files smaller than this; tiny files are often graphics")
     ap.add_argument("--max-kb", type=int, default=6000,
@@ -499,10 +503,16 @@ def main(argv: list[str] | None = None) -> int:
                          "detection, so a corpus that is nearly all base ISO "
                          "measures one noise regime and calls it steganalysis")
     ap.add_argument("--split-salt", default="pentimento-v1",
-                    help="fixed and recorded. Changing it after publication "
-                         "reassigns every cover's train/test split, which "
-                         "silently invalidates every result built on the corpus")
-    ap.add_argument("--test-fraction", type=float, default=0.2)
+                    help="what the train/test split is keyed on, recorded in "
+                         "every row. Building a NEW corpus: give it your own "
+                         "name, so your split is yours rather than the "
+                         "published corpus's. Extending an EXISTING one: keep "
+                         "whatever that corpus recorded, because changing it "
+                         "reassigns every cover and invalidates every result "
+                         "already built on it")
+    ap.add_argument("--test-fraction", type=float, default=0.2,
+                    help="share of covers assigned to the test side of the "
+                         "split")
     ap.add_argument("--dedup-db", default=None,
                     help="path to the shared dedup store. Without it this fetcher "
                          "cannot tell that a cover already arrived from another "
@@ -550,7 +560,27 @@ def main(argv: list[str] | None = None) -> int:
                "over_quota": 0, "error": 0,
                "download": 0, "decode": 0, "too_small": 0, "flat": 0,
                "duplicate": 0}
-    last_beat = time.monotonic()
+    considered = 0
+    started = time.monotonic()
+    last_beat = started
+
+    # A run of 10,000 covers at one polite request per second is measured in
+    # hours, and a long silence reads the same whether the fetcher is working
+    # or wedged on a stalled socket. The beat below fires on elapsed time
+    # rather than on progress, so a stretch where every candidate is refused
+    # still says so.
+    def beat() -> None:
+        nonlocal last_beat
+        now = time.monotonic()
+        if now - last_beat < 30:
+            return
+        last_beat = now
+        minutes = (now - started) / 60
+        rate = written / minutes if minutes else 0.0
+        print(f"  {written}/{args.count} covers, {considered} candidates, "
+              f"{rate:.1f}/min", flush=True)
+
+    print(f"fetching {args.count} covers into {out}, strategy {args.strategy}")
 
     if args.strategy == "random":
         # The budget must cover the measured yield with room to spare. A random
@@ -574,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
         for page, ii in source:
             if written >= args.count:
                 break
+            considered += 1
+            beat()
             if page["pageid"] in seen_ids:
                 continue
             # This run is measured in hours and one malformed API record has
@@ -763,11 +795,6 @@ def main(argv: list[str] | None = None) -> int:
                 caps.record(uploader, camera)
                 iso_quota.record(band)
                 written += 1
-
-                if time.monotonic() - last_beat >= 60:
-                    print(f"  ... {written}/{args.count} covers, skipped {skipped}",
-                          flush=True)
-                    last_beat = time.monotonic()
                 time.sleep(args.delay)
             except Exception as e:  # noqa: BLE001 - one bad record, not one dead run
                 skipped["error"] += 1

@@ -32,11 +32,11 @@ publish is then inflated by an amount nobody can recover afterwards.
 
 WHAT THE ORDER IS
 -----------------
-`tier_order`, assigned once by `manifest_repair.py` over the covers present and
-appended to as the corpus grows. It is not recomputed and not derived from a
-hash of the filename, because either would reshuffle every position each time a
-cover arrived, and a prefix that stops being a prefix between releases is worse
-than having no tiers at all.
+`tier_order`, assigned once by `pentimento manifest-repair` over the covers
+present and appended to as the corpus grows. It is not recomputed and not
+derived from a hash of the filename, because either would reshuffle every
+position each time a cover arrived, and a prefix that stops being a prefix
+between releases is worse than having no tiers at all.
 """
 from __future__ import annotations
 
@@ -60,7 +60,8 @@ def covers_in_tier_order(manifest: pathlib.Path, covers_dir: pathlib.Path,
     if not manifest.is_file():
         raise TierError(
             f"no manifest at {manifest}. Tier order lives in the manifest, so "
-            "without it a tier cannot be selected. Run manifest_repair.py first."
+            "without it a tier cannot be selected. Run `pentimento "
+            "manifest-repair <manifest>` first."
         )
 
     rows = []
@@ -71,7 +72,8 @@ def covers_in_tier_order(manifest: pathlib.Path, covers_dir: pathlib.Path,
         if "tier_order" not in row:
             raise TierError(
                 f"{manifest} has rows without a tier_order field. Run "
-                "manifest_repair.py to assign it, then rebuild."
+                f"`pentimento manifest-repair {manifest}` to assign it, then "
+                "run this command again."
             )
         rows.append(row)
 
@@ -126,7 +128,8 @@ def tier_cover_names(manifest: pathlib.Path, count: int) -> set[str]:
         if "tier_order" not in row:
             raise TierError(
                 f"{manifest} has rows without a tier_order field. Run "
-                "manifest_repair.py to assign it, then rebuild."
+                f"`pentimento manifest-repair {manifest}` to assign it, then "
+                "run this command again."
             )
         rows.append(row)
 

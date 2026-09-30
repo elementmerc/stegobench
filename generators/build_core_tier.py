@@ -24,10 +24,15 @@ orchestrator additionally records which jobs have finished, so a rerun does not
 re-enter a completed arm just to discover it has nothing to do.
 
 **Bounded, and the bound costs something.** `--jobs` is not a free dial. Each
-adaptive worker is one busy core and roughly half a gigabyte, so the default
-leaves headroom rather than claiming the machine. The failure this avoids has a
-name in this repo: eight extractor containers with no ceiling took out dbus,
-pipewire, syncthing and a peer's language model for an afternoon.
+adaptive worker is one busy core and roughly half a gigabyte, so the ceiling is
+memory rather than core count. The default of 10 wants about 5.5 GB free at the
+MiPOD peak, which the machine that built the published corpus had; on a smaller
+one, set it lower. Three workers peak around 1.6 GB together, which is the
+number `docs/design/pentimento.md` sizes a build against. `--dry-run` prints
+the wall clock for the number you actually chose, so choose it before a run
+rather than after. The failure this avoids has a name in this repo: eight
+extractor containers with no ceiling took out dbus, pipewire, syncthing and a
+peer's language model for an afternoon.
 
 **Ordered so a partial result is still a release.** Jobs run cheapest first and
 in tier order, so an interrupted build leaves complete arms rather than thirty
@@ -126,18 +131,29 @@ def run_job(job: dict, log_dir: pathlib.Path, timeout: int) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--covers", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--count", type=int, default=10000)
-    ap.add_argument("--manifest", default=None)
+    ap.add_argument("--covers", required=True,
+                    help="directory of cover PNGs, as fetch-commons wrote it")
+    ap.add_argument("--out", required=True,
+                    help="directory to build the arms and the job logs into")
+    ap.add_argument("--count", type=int, default=10000,
+                    help="covers in the tier, taken as a prefix of tier_order. "
+                         "200 is Nano, 1000 is Lite, 10000 is Core")
+    ap.add_argument("--manifest", default=None,
+                    help="the cover manifest. Defaults to manifest.jsonl "
+                         "inside --covers")
     ap.add_argument("--jpeg-covers", default=None,
                     help="clean JPEG covers for the DCT arms. Defaults to the "
                          "ones the jpeg-tools job writes")
     ap.add_argument("--jobs", type=int, default=10,
                     help="concurrent builders. Each adaptive worker is one busy "
-                         "core and about half a gigabyte, so this is a real cost "
-                         "and not a free dial")
-    ap.add_argument("--timeout", type=int, default=172800, help="per job")
+                         "core and about half a gigabyte, peaking at 546 MB for "
+                         "MiPOD, so memory is the ceiling rather than core "
+                         "count. The default of 10 wants about 5.5 GB free; on "
+                         "a smaller machine use 3, which peaks around 1.6 GB")
+    ap.add_argument("--timeout", type=int, default=172800,
+                    help="seconds one arm job may run before it is killed. The "
+                         "default is 48 hours, roughly five times the slowest "
+                         "measured arm at Core")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 

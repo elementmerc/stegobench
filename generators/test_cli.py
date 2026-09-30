@@ -16,13 +16,16 @@ is not installed.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import contextlib
 import inspect
 import io
 import pathlib
+import re
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -84,10 +87,174 @@ class ListingTests(unittest.TestCase):
                           f"{name} cannot be imported here and was not named "
                           f"in the listing, so it looks like it does not exist")
 
+    def test_nothing_is_printed_above_the_listing_s_own_header(self):
+        """A module that complains at import complained over the header.
+
+        Two lines of "conseal is not installed" arriving before `pentimento`
+        has said what it is read as a crash. The reason belongs beside the
+        command it is about, and that is where it now goes.
+        """
+        code, out, err = run()
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("pentimento "), out[:120])
+        self.assertEqual(err, "")
+
     def test_the_count_reported_matches_the_commands_listed(self):
         _, out, _ = run()
         runnable = [n for n in candidates() if isinstance(describe(n), tuple)]
         self.assertIn(f"{len(runnable)} commands", out)
+
+
+class VersionTests(unittest.TestCase):
+    """A corpus is quoted for years. Which toolkit built it has to be askable."""
+
+    def test_every_spelling_of_the_question_is_answered(self):
+        for spelling in ("--version", "-V", "version"):
+            code, out, _ = run(spelling)
+            self.assertEqual(code, 0, spelling)
+            self.assertTrue(out.startswith("pentimento "), out)
+
+    def test_the_listing_carries_the_version_too(self):
+        _, out, _ = run()
+        self.assertIn(f"pentimento {cli.version()}", out)
+
+
+class SummaryTests(unittest.TestCase):
+    """A hard cut at a fixed column lands mid-word and reads as corruption."""
+
+    ROW = re.compile(r"^  ([a-z][a-z0-9-]+) {2,}(\S.*)$")
+
+    def summaries(self) -> list[str]:
+        _, out, _ = run()
+        listed = {n.replace("_", "-") for n in candidates()}
+        found = []
+        for line in out.splitlines():
+            m = self.ROW.match(line)
+            if m and m.group(1) in listed:
+                found.append(m.group(2))
+        return found
+
+    def test_the_listing_was_actually_parsed(self):
+        self.assertGreater(len(self.summaries()), 20)
+
+    def test_no_summary_runs_past_the_column_it_is_given(self):
+        for summary in self.summaries():
+            self.assertLessEqual(len(summary), cli.SUMMARY_WIDTH, summary)
+
+    def test_a_summary_that_had_to_be_shortened_says_so(self):
+        shortened = [s for s in self.summaries() if s.endswith("...")]
+        self.assertTrue(shortened, "nothing here was long enough to shorten")
+        for summary in shortened:
+            self.assertTrue(summary.endswith(" ..."), summary)
+            self.assertNotIn("  ", summary)
+
+
+class SuggestionTests(unittest.TestCase):
+    """`did you mean` earns its place only by refusing to guess wildly."""
+
+    def test_the_distance_is_the_ordinary_one(self):
+        self.assertEqual(cli.edit_distance("", ""), 0)
+        self.assertEqual(cli.edit_distance("", "list"), 4)
+        self.assertEqual(cli.edit_distance("list", ""), 4)
+        self.assertEqual(cli.edit_distance("lst", "list"), 1)
+        self.assertEqual(cli.edit_distance("kitten", "sitting"), 3)
+
+    def test_a_transposition_is_caught(self):
+        code, _, err = run("buidl-core-tier")
+        self.assertEqual(code, 2)
+        self.assertIn("did you mean: build-core-tier", err)
+
+    def test_an_unrelated_word_gets_silence_rather_than_a_wrong_answer(self):
+        for typed in ("wibble", "zzzz", "steganography"):
+            code, _, err = run(typed)
+            self.assertEqual(code, 2, typed)
+            self.assertNotIn("did you mean", err, typed)
+
+    def test_an_abbreviation_is_completed(self):
+        self.assertEqual(cli.nearest("pack", candidates()),
+                         ["pack_arms", "pack_tier"])
+
+    def test_at_most_three_are_offered(self):
+        self.assertLessEqual(len(cli.nearest("build", candidates())), 3)
+
+
+class HelpConventionTests(unittest.TestCase):
+    """What this dispatcher adds to a subcommand's parser without editing it."""
+
+    def setUp(self):
+        cli.with_defaults_in_help()
+        original = sys.argv[0]
+        self.addCleanup(lambda: sys.argv.__setitem__(0, original))
+
+    def parser(self):
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--count", type=int, default=10000, help="covers")
+        ap.add_argument("--bare", type=int, default=7)
+        ap.add_argument("--required", required=True)
+        ap.add_argument("--flag", action="store_true")
+        return ap
+
+    def test_an_option_with_prose_gains_its_default(self):
+        self.assertIn("covers (default: 10000)", self.parser().format_help())
+
+    def test_an_option_with_no_prose_still_states_its_default(self):
+        self.assertIn("(default: 7)", self.parser().format_help())
+
+    def test_a_flag_is_left_alone(self):
+        """`(default: False)` on a switch is noise, not information."""
+        self.assertNotIn("default: False", self.parser().format_help())
+
+    def test_an_option_with_no_default_says_nothing(self):
+        self.assertNotIn("default: None", self.parser().format_help())
+
+    def test_the_usage_line_names_the_subcommand(self):
+        with self.assertRaises(SystemExit) as cm:
+            run("verify-release", "--help")
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(sys.argv[0], "pentimento verify-release")
+
+
+class LockWarningTests(unittest.TestCase):
+    """A build outside the locked compiler set says so before it starts."""
+
+    def test_the_lock_names_the_compilers_the_warning_is_about(self):
+        pinned = cli.locked_versions()
+        self.assertEqual(sorted(pinned), ["llvmlite", "numba"])
+
+    def test_a_command_that_reads_rather_than_embeds_is_left_quiet(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cli.warn_if_unlocked("verify_release")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_a_drifted_environment_is_named_and_the_fix_given(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with unittest.mock.patch.object(
+                    cli, "locked_versions",
+                    return_value={"numba": "0.0.0-not-a-real-version"}):
+                cli.warn_if_unlocked("build_adaptive_arms")
+        text = err.getvalue()
+        self.assertIn("numba", text)
+        self.assertIn("requirements.lock", text)
+
+    def test_asking_what_a_command_does_is_not_warned_about(self):
+        """Nothing is about to be built, so the environment does not matter."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with unittest.mock.patch.object(
+                    cli, "locked_versions", return_value={"numba": "0.0.0"}):
+                cli.warn_if_unlocked("build_adaptive_arms", ["--help"])
+                cli.warn_if_unlocked("build_adaptive_arms", ["-h"])
+        self.assertEqual(err.getvalue(), "")
+
+    def test_an_unreadable_lock_is_silence_rather_than_a_false_alarm(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with unittest.mock.patch.object(cli, "locked_versions",
+                                            return_value={}):
+                cli.warn_if_unlocked("build_adaptive_arms")
+        self.assertEqual(err.getvalue(), "")
 
 
 class DispatchTests(unittest.TestCase):

@@ -268,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="GiB the whole run may use, across all containers")
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--timeout", type=int, default=86400,
-                    help="per extraction; rich models are slow and this is a whole job")
+                    help="seconds per extraction; rich models are slow and this "
+                         "is a whole working day")
     args = ap.parse_args(argv)
 
     # A caller that redirected stdout may have put something there that
