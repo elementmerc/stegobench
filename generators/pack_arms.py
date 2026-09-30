@@ -112,13 +112,20 @@ class PackError(RuntimeError):
 
 
 def load_cover_licences(manifest: pathlib.Path) -> dict[str, dict]:
-    """The licence half of every cover row, keyed by filename."""
+    """The licence half of every cover row, plus its split, keyed by filename.
+
+    The split rides along because it comes from the same rows and the manifest
+    is hundreds of thousands of lines long, so reading it a second time to
+    fetch one more field would cost more than it's worth.
+    """
     out: dict[str, dict] = {}
     for line in manifest.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
         entry = {k: row[k] for k in INHERITED if k in row}
+        if "split" in row:
+            entry["split"] = row["split"]
         # One spelling per licence in what ships, so a reader grouping by the
         # field gets one group per licence rather than one per spelling.
         if "licence" in entry:
@@ -386,6 +393,7 @@ def pack_arm(
     mismatches: list[str] = []
     missing: list[str] = []
     unlicensed: list[str] = []
+    unsplit: list[str] = []
     mispaired: list[str] = []
     container_mismatches: list[str] = []
     position = 0
@@ -430,6 +438,16 @@ def pack_arm(
                 cover = licences.get(cover_name or "")
                 if not cover:
                     unlicensed.append(rel)
+                    position += 1
+                    continue
+
+                # Left out rather than shipped without a side, for the same
+                # reason an unlicensed cover is: a sample a user cannot place
+                # on either side of the boundary is one they will place on
+                # both. Reported by count so the omission is visible rather
+                # than inferred from a total that came out low.
+                if not cover.get("split"):
+                    unsplit.append(rel)
                     position += 1
                     continue
 
@@ -506,6 +524,23 @@ def pack_arm(
                 # that is not on disk was stamped `no-clean-half`, which reads
                 # as an unpaired arm rather than as a missing file.
                 sample["pairing"] = pairing
+                # THE SPLIT, CARRIED INTO THE SHARD.
+                #
+                # It lived only in the cover manifest, which nobody who
+                # downloads a shard has. So the second of this project's two
+                # load-bearing rules, that a cover and its stego twin land on
+                # the same side of the train and test boundary, was documented
+                # and then made impossible to follow: the shards carried the
+                # image, the arm, the licence and the pairing, and no way at
+                # all to tell which side of the split an image belonged to.
+                #
+                # A user who cannot see the boundary trains across it, and the
+                # inflation that produces is not recoverable from the
+                # published number afterwards. That's the exact failure the
+                # nesting rule exists to prevent, arriving by a different
+                # door.
+                sample["split"] = cover["split"]
+
                 sample.setdefault("domain", DOMAINS.get(
                     str(row.get("tool", "")), "unknown"))
                 sample.setdefault("rate_unit", RATE_UNITS.get(
@@ -535,6 +570,7 @@ def pack_arm(
         "digest_mismatches": mismatches,
         "missing": missing,
         "unlicensed": unlicensed,
+        "unsplit": unsplit,
         "mispaired": mispaired,
         "container_mismatches": container_mismatches,
     }
@@ -690,6 +726,7 @@ def main(argv: list[str] | None = None) -> int:
     bad = sum(len(i["digest_mismatches"]) for i in indices)
     gone = sum(len(i["missing"]) for i in indices)
     bare = sum(len(i["unlicensed"]) for i in indices)
+    sideless = sum(len(i.get("unsplit", [])) for i in indices)
     odd = sum(len(i["mispaired"]) for i in indices)
     boxed = sum(len(i.get("container_mismatches", [])) for i in indices)
 
@@ -708,7 +745,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{len(indices)} arm(s), {total_samples} samples, "
           f"{total_bytes / 1e9:.1f} GB, {time.monotonic() - started:.0f}s")
     print(f"index: {index_path}")
-    if bad or gone or bare or odd or boxed:
+    if bad or gone or bare or sideless or odd or boxed:
         # Three different failures, reported as three. An earlier version
         # counted the licence gaps as missing files and said "80000 missing
         # file(s)" when every file was present, which sent the diagnosis the
@@ -725,6 +762,12 @@ def main(argv: list[str] | None = None) -> int:
                   f"They are derivatives of licensed photographs, so they were "
                   f"left out rather than shipped without attribution.",
                   file=sys.stderr)
+        if sideless:
+            print(f"{sideless} sample(s) come from a cover with no train or "
+                  f"test side recorded. Without it a user cannot keep a cover "
+                  f"and its stego twin on the same side, so they were left "
+                  f"out. Run `pentimento manifest-repair <manifest>` to "
+                  f"assign the split, then pack again.", file=sys.stderr)
         if odd:
             print(f"{odd} sample(s) are paired against a different encoder from "
                   f"the rest of their arm, so they measure the encoder rather "

@@ -37,9 +37,11 @@ from pack_arms import PackError, clean_arms, cover_of, load_jpeg_cover_map
 
 COVER_ROWS = [
     {"file": "09710.png", "licence": "CC BY-SA 4.0", "artist": "A. Photographer",
-     "credit": "Wikimedia Commons", "descriptionurl": "https://example.invalid/1"},
+     "credit": "Wikimedia Commons", "descriptionurl": "https://example.invalid/1",
+     "split": "train"},
     {"file": "05047.png", "licence": "CC0", "artist": "B. Photographer",
-     "credit": "Wikimedia Commons", "descriptionurl": "https://example.invalid/2"},
+     "credit": "Wikimedia Commons", "descriptionurl": "https://example.invalid/2",
+     "split": "test"},
 ]
 
 
@@ -562,6 +564,34 @@ class TestRecordCompleteness(TestPackArm):
         sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
         self.assertEqual(sample["pairing"], "clean-half-missing")
 
+    def test_a_sample_carries_the_side_of_the_split_it_belongs_to(self):
+        """It lived only in the cover manifest, which a downloader doesn't have.
+
+        So the rule that a cover and its stego twin stay on the same side of
+        the train and test boundary was written down and then made impossible
+        to follow from the shards alone. A user who can't see the boundary
+        trains across it, and the inflation that produces can't be recovered
+        from the published number afterwards.
+        """
+        self.pack([self._jpeg_pair()], {"00000.jpg": "09710.png"})
+        sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
+        self.assertEqual(sample["split"], "train")
+
+    def test_a_cover_with_no_side_recorded_is_left_out_and_counted(self):
+        """Shipping it without a side means a user puts it on both."""
+        covers = self.tmp / "no-split.jsonl"
+        write_jsonl(covers, [{"file": "09710.png", "licence": "CC0",
+                              "artist": "A. Photographer"}])
+        licences = pack_arms.load_cover_licences(covers)
+        row = self._stego("uerd/0050/00000.jpg", jpeg())
+        row["source_jpeg"] = "00000.jpg"
+        index = pack_arms.pack_arm(
+            "uerd-0050", [row], self.arms, licences,
+            {"00000.jpg": "09710.png"}, self.out, 500, "stego",
+            "stego_sha256")
+        self.assertEqual(index["samples"], 0)
+        self.assertEqual(index["unsplit"], ["uerd/0050/00000.jpg"])
+
     def test_the_credit_line_says_the_image_was_modified(self):
         """CC BY asks for it, and everything here is a derivative twice over.
 
@@ -589,7 +619,8 @@ class TestRecordCompleteness(TestPackArm):
     def test_a_cover_with_no_credit_line_does_not_gain_a_dangling_clause(self):
         # CC0 covers carry no attribution string. Appending ", cropped, then
         # modified..." to nothing produces a line that starts with a comma.
-        self.licences["09710.png"] = {"licence": "CC0", "attribution": None}
+        self.licences["09710.png"] = {"licence": "CC0", "attribution": None,
+                                      "split": "train"}
         self.pack([self._jpeg_pair()], {"00000.jpg": "09710.png"})
         sample = self._sample("pentimento-core-uerd-0050-00000.tar", "000000.json")
         self.assertIsNone(sample["cover_licence"]["attribution"])

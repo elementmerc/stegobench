@@ -98,6 +98,22 @@ A tool that rewrites the whole file gets a clean half written by that same
 tool, so the pair differs in the payload and nothing else. Each sample records
 which pairing it got.
 
+## The split travels with the pixels too
+
+Every sample also carries `split`, the side of the train and test boundary its
+cover belongs to. The boundary is a property of the cover, so a cover and every
+stego image made from it land on the same side, and a detector is never
+evaluated on an image it was trained on.
+
+That field is what makes the rule followable from a shard alone. The split is
+decided once, in the cover manifest, and a downloader doesn't have the cover
+manifest: without the field in the record, the rule would be something you
+could read about and not check.
+
+The packer refuses to ship a sample whose cover has no side recorded, and says
+how many it left out and what to run to fix it. A sample with no side is one a
+reader will put on both.
+
 ## Determinism
 
 | | |
