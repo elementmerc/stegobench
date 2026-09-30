@@ -28,8 +28,16 @@ number a stranger can reproduce.
 
 ## What it is not
 
-It does not hide anything for you. The arms exist so detectors have something
-to be measured against.
+It is not a tool for hiding things, although it can hide one. `stegobench
+embed` drives a registered embedder over a cover you give it, and it exists so
+you can build something for a detector to be measured against, and so the
+round trip that proves an embedder works can be checked. If what you want is
+to hide a file in a photo, the embedders it drives are ordinary tools you can
+install and run yourself, and you would be going the long way round.
+
+It does not tell you whether YOUR photo has something hidden in it. That is a
+different question and `stegobench help scope` covers why, and where to go
+instead.
 
 It is not a leaderboard. There is no submission process and no ranking; the
 output is a table you can rebuild.

@@ -51,15 +51,31 @@ IF YOU ARRIVED WITH QUESTION 2
   stegobench describe <name>     says where that one lives, what it costs, and
                                  the command that runs it
 
-Run one of those directly on your own images. Then read its own documentation
-for what its output means, because stegobench is not in that loop and cannot
-vouch for a number it did not produce.
+Run one of those directly on your own images. `describe` prints the exact
+command, including the container invocation where the detector is an image
+rather than a program you installed, so it can be pasted rather than
+reconstructed. Then read that tool's own documentation for what its output
+means, because stegobench is not in that loop and cannot vouch for a number
+it did not produce.
 
-And be careful with the answer you get. A detector that is right nine times in
+EXPECT THE OUTPUT TO LOOK ALARMING, BECAUSE IT WILL
+
+A detector run raw over one photograph typically prints pages of candidate
+hits with confident-sounding names: key blocks, archives, text fragments.
+Nearly all of them are noise. These tools are built to be run over a corpus
+and thresholded, not to answer yes or no about one file, and the raw output
+is the evidence before anybody has decided what counts.
+
+So be careful with the answer you get. A detector that is right nine times in
 ten still calls one clean image in ten a hit, and on a folder of a thousand
 holiday photos that's a hundred wrong alarms. Which is exactly why question 1
 exists, and why a number with its conditions attached is worth more than a
 verdict without them.
+
+The honest short answer to \"is there something hidden in this photo\" is that
+no tool here can tell you, and any tool that says it can is overclaiming. What
+you can find out is how often a given detector is right on images whose
+answers are known, and that is what the rest of this program does.
 
 WHY THERE IS NO COMMAND FOR QUESTION 2
 
@@ -100,6 +116,36 @@ the table, not in a heading: in the cells, so a line somebody copies out of \
 the middle of the table takes the caveats with it whether they meant to or \
 not.
 
+THE COLUMNS, IN PLAIN WORDS
+
+  AUC           Area under the curve. 0.5 is guessing, 1 is perfect. The
+                bracketed pair beside it is the 95% confidence interval:
+                the range the true value is probably in, given how many
+                images were scored. A wide interval means too few images
+                to be sure, NOT that the detector is unstable. Two AUCs
+                whose intervals overlap heavily have not been shown to
+                differ.
+  TPR@1%FA      Of the stego images, the share this detector caught while
+                raising a false alarm on 1% of the clean ones. TPR is the
+                true-positive rate, FA is false alarms. This is usually
+                the number a practitioner acts on, because it says what
+                you catch at a false-alarm rate you can live with.
+  arm           One way of hiding something, at one strength. `lsb-0400`
+                is the LSB method carrying a 0.4 payload.
+  domain        Where the payload sits: `spatial` is in the pixels, `jpeg`
+                is in the compressed coefficients. A detector built for
+                one is often useless on the other.
+  pairing       Whether each stego image differs from its cover in nothing
+                but the payload. See `stegobench help pairing`.
+  split         Whether a cover and its stego twin stayed on the same side
+                of the train and test boundary. See
+                `stegobench help splits`.
+  isolation     What the detector could reach while it ran.
+                `sandbox-no-network` is a container with no network; `host`
+                is a program on the operator's machine, with their network.
+  pinned_by     Whether the digest beside the tool names bytes you could
+                pull and re-run, or only a file on somebody else's machine.
+
 WHAT IT REFUSES TO DO
 
   No table across corpora.  An AUC on one corpus and an AUC on another are
@@ -135,16 +181,11 @@ THE THREE FORMATS
 either the previous file or the whole new one, never half a table. Without \
 it the report goes to stdout.
 
-WHAT THE EXIT CODE MEANS HERE
-
 PER ARM
 
-A corpus of several arms gets a second table, one row per arm, under the
-main one. The headline AUC pools the arms, and a pooled figure describes
-none of them: chance on one arm beside detection on another averages to
-something in between that nothing measured. On the starter corpus the
-pooled 0.5972 is `lsb-0100` at 0.5000, exactly chance, beside `lsb-0400`
-at 0.6944.
+An arm is one way of hiding something, at one strength. `lsb-0400` means the LSB method carrying a 0.4 payload; `wow-0200` means the WOW method at 0.2. A corpus holds several because a detector that finds a loud payload easily may find a quiet one not at all, and those are two results.
+
+A corpus of several arms gets a second table, one row per arm, under the main one. The headline AUC pools the arms, and a pooled figure describes none of them: chance on one arm beside detection on another averages to something in between that nothing measured. Scoring `stegexpose` against the starter corpus gives a pooled 0.5972 that is really `lsb-0100` at 0.5000, exactly chance, beside `lsb-0400` at 0.6944. Another detector on the same corpus gives different figures, so read your own rather than these.
 
 Every arm is scored against the WHOLE clean set rather than a share of it,
 because a clean image belongs to no arm. Rows are sorted by arm name and
@@ -215,13 +256,31 @@ looks right, so that one refuses.
 const RESULTS: &str = "\
 results: how to judge a number somebody else produced
 
-Somebody sends you a result-v1 document with an AUC of 0.94 in it. AUC is \
-area under the curve: one number from 0.5 to 1 for how well the detector's \
-scores separate stego images from clean ones, where 0.5 is guessing and 1 \
-is perfect. Every field \
-below was written by this harness from what actually happened rather than by \
-the person who ran it, so none of it has to be taken on trust. Check them in \
-this order, which is the order of what it costs to be wrong.
+Somebody sends you a result-v1 document with an AUC of 0.94 in it. Every \
+field below was written by this harness from what actually happened rather \
+than by the person who ran it, so none of it has to be taken on trust. Check \
+them in this order, which is the order of what it costs to be wrong.
+
+WHAT THE NUMBERS ARE
+
+AUC is area under the curve: one number from 0.5 to 1 for how well a \
+detector's scores separate stego images from clean ones. 0.5 is guessing \
+and 1 is perfect. Below 0.5 is not better than nothing, it usually means \
+the scores run the wrong way round.
+
+The bracketed pair, as in `AUC 0.5972 [0.2870, 0.9074]`, is the 95% \
+confidence interval. It is the range the true value is probably in, given \
+how many images were scored, and it is the difference between a number you \
+can quote and one you cannot. Eighteen images gives an interval so wide it \
+covers nearly everything, which is the honest report of eighteen images. \
+A wide interval does NOT mean the detector is unstable; it means too few \
+images were scored to say much. Two detectors whose intervals overlap \
+heavily have not been shown to differ, however far apart their AUCs look.
+
+`0.5000 [0.5000, 0.5000]` is a special case worth recognising. An interval \
+of zero width means every answer was identical, so the AUC is 0.5 by \
+construction rather than by measurement: the detector did not separate \
+anything. `score` says so out loud when it happens.
 
 1. WAS IT MEASURED ON THE CORPUS IT NAMES?
 

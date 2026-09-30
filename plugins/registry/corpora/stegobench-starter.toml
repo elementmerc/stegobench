@@ -66,13 +66,14 @@ It is already here, inside the binary, and there is nothing to download, which \
 is the entire point of it existing.
 
 `stegobench fetch stegobench-starter --tier nano` writes it to a directory and \
-prints the command to score it with; `--dest` chooses where. In a checkout of \
-this repository it is also just `corpora/starter`, and the two are the same \
-bytes.
+prints the command to score it with; `--dest` chooses where. That is the whole \
+of it if you installed the binary and have no checkout, which is the ordinary \
+case.
 
-`python3 corpora/starter/build.py --check` rebuilds it into a temporary \
-directory and compares the result byte for byte, so the shipped files can be \
-proved to be the ones the script produces.\
+If you DO have a checkout of the repository, the same bytes are also sitting \
+at `corpora/starter`, and `python3 corpora/starter/build.py --check` rebuilds \
+them into a temporary directory and compares byte for byte, so the shipped \
+files can be proved to be the ones the script produces.\
 """
 requires_acceptance = false
 
