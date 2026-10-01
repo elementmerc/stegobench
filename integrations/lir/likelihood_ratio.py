@@ -42,11 +42,24 @@ confidently it was wrong:
                + mean over clean cases of log2(1 + LR) ]
 
 A system that always answers LR = 1, meaning "this tells you nothing", scores
-exactly 1.0. **Anything above 1.0 is worse than useless**: it would have been
-better to say nothing. That property is why forensic scientists use it and
-AUC cannot replace it. AUC has no such point of reference; an AUC of 0.5 is
-uninformative but an AUC of 0.4 is not "worse than silence", it is a detector
-pointing the wrong way, which is information.
+exactly 1.0. That fixed point is why forensic scientists use it and AUC cannot
+replace it. AUC has no such reference; an AUC of 0.5 is uninformative but an
+AUC of 0.4 is not "worse than silence", it is a detector pointing the wrong
+way, which is information.
+
+**Do not read 1.0 as the reference for a result this module produced.** An
+earlier version of this docstring said anything above 1.0 was worse than
+useless, and taking that at face value is what reversed the conclusion of a
+write-up using this code. The 1.0 belongs to a system that answers LR = 1 by
+construction. Anything that fits a calibrator on one part of the data and
+scores another scatters its ratios around 1 rather than sitting on it, and
+scatter costs, so its no-signal reference lands *above* 1.0: about 1.004 on a
+few hundred cases. The drift is small, systematic, and in the direction that
+makes a result look more interesting than it is.
+
+Measure the reference, do not assume it. Shuffle the labels within pairs and
+run the whole pipeline again on data that provably has nothing in it. A result
+has to beat that, not beat 1.0.
 
 Cllr splits in two, via the pool adjacent violators algorithm:
 
