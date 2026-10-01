@@ -135,42 +135,8 @@ else
     mv "$SRC.partial" "$SRC"
 fi
 
-# A BUILD NETWORK AT THE RIGHT MTU, because the default one can be wrong and
-# fail in a way that looks like the internet being down.
-#
-# Diagnosed on 2026-10-01 on the machine that builds these images. All of its
-# traffic leaves through a tunnel with a 1280 byte MTU, nothing clamps TCP MSS
-# onto that tunnel, and a container gets MTU 1500, so any first flight larger
-# than 1280 bytes is black-holed. Modern curl offers a post-quantum key share,
-# which pushes its TLS hello to 1565 bytes, so TLS to some hosts never completes
-# and times out after exactly five minutes. Measured: at MTU 1500 a `git clone`
-# fails after 150 seconds, at 1280 it succeeds in 4.
-#
-# Clamping MSS on the tunnel is the real fix and it needs root on the host, so
-# it is not something a build script should be doing. What a build script CAN do
-# is create a network at a safe MTU and build on that. 1280 is the IPv6 minimum
-# and is safe over anything.
-#
-# This is best-effort on purpose. A machine with ordinary networking needs none
-# of it, and a build that cannot create a network should still try the default
-# rather than refuse: failing here would break the common case to protect the
-# uncommon one.
-BUILD_NET="${STEGOBENCH_BUILD_NET:-stegobench-build-mtu1280}"
-NET_ARG=""
-if docker network inspect "$BUILD_NET" >/dev/null 2>&1 \
-   || docker network create --opt com.docker.network.driver.mtu=1280 \
-        "$BUILD_NET" >/dev/null 2>&1; then
-    NET_ARG="--network=$BUILD_NET"
-else
-    echo "build: could not use a reduced-MTU build network, continuing on the" >&2
-    echo "       default. If the build hangs fetching from the network, that is" >&2
-    echo "       the first thing to suspect." >&2
-fi
-
 echo "building $TAG  ·  $BUILD_DATE  ·  $VCS_REF"
-# shellcheck disable=SC2086  # NET_ARG is one optional flag or empty, by design
 docker build \
-    $NET_ARG \
     --build-arg "STEGOBENCH_BUILD_DATE=${BUILD_DATE}" \
     --build-arg "STEGOBENCH_VCS_REF=${VCS_REF}" \
     --build-arg "STEGOBENCH_IMAGE=${TAG}" \
