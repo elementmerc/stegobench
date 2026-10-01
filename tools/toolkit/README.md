@@ -61,12 +61,16 @@ Your file comes back out byte for byte. That is the whole idea.
 
 ## Before you trust a detector
 
-**A "Clean" verdict means nothing.** Measured: hide a file with `steghide`,
-ask `stegcore analyse` a minute later, and it says `✓ Clean`. Read the
-`Signature:` line instead, which names the tool that did the embedding.
+**Neither verdict means anything on its own.** Measured twice. A file hidden
+with `steghide` comes back `✓ Clean` a minute later; an untouched original
+photograph comes back `⚠ Suspicious`. On ordinary photos the verdict tracked
+the file format rather than the contents.
 
 **`zsteg` reports hidden PGP keys and executables inside ordinary
 photographs.** That is noise, not a finding.
+
+**`stegosuite extract` overwrites files in your working directory** and cannot
+be told not to. Extract into an empty directory.
 
 `docs/guide/toolkit.md` explains both, and what to use when you need a number
 you can defend.

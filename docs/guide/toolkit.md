@@ -23,35 +23,35 @@ Each part is there because leaving it out broke something a real person hit.
 
 This is the part that misleads people. Read it before you trust an answer.
 
-### A "Clean" verdict means nothing
+### Neither verdict means anything on its own
 
-Not a caution: a measurement. Hide a file with `steghide`, then ask
+Measured, twice, by different people.
+
+**"Clean" does not mean clean.** Hide a file with `steghide`, then ask
 `stegcore analyse` about it sixty seconds later, and it reports `✓ Clean`.
 
-A green tick means "I found nothing I know how to look for", never "there is
-nothing here".
+**"Suspicious" does not mean suspicious.** An *unmodified original*
+photograph came back `⚠ Suspicious` at 16%, identically to two stego files
+made from it. Across six files, every PNG and BMP was flagged suspicious
+whether or not anything was hidden, and every JPEG was cleared whether or not
+anything was hidden.
 
-### What `stegcore analyse` is actually good at
+So on an ordinary photograph the verdict tracked the file format and not the
+contents. Do not put it in front of anybody as evidence.
 
-Naming the tool. When it finds something it prints a line like:
+### The `Signature:` line, which is inconsistent
 
-```
-Signature: OpenStego (exact signature)
-```
+When `stegcore analyse` does recognise an embedding tool it prints a line
+like `Signature: OpenStego (exact signature)`, and that is genuinely useful
+because it names the tool to use to get the payload out.
 
-That is the most useful thing any detector here prints, because it tells you
-which tool to use to get the payload out.
+**It does not always appear, and we cannot tell you when it will.** One tester
+saw it on an openstego file. A second tester could not reproduce it at all:
+six files from three embedders, including stegcore's own output, every one
+returning `"tool_fingerprint": null` in the machine-readable output.
 
-Side by side on a clean PNG and a stego file built from that same cover, the
-five statistical scores were near identical:
-
-| | Chi-Sq | SPA | RS | LSB Entropy | Weighted Stego |
-|---|---|---|---|---|---|
-| clean | 48% | 21% | 4% | 100% | 24% |
-| stego | 48% | 21% | 6% | 100% | 27% |
-
-The verdict came entirely from the signature line. Read the signature; treat
-the bars as decoration.
+Treat the line as a bonus when it shows up, never as something to rely on, and
+never read its absence as evidence that a file is clean.
 
 ### `zsteg` output is mostly noise
 
@@ -120,6 +120,22 @@ which distortion function it implements; `toolkit versions` reports the
 package version to cite instead. We also cannot tell you whether the JPEG path
 is side-informed, and that distinction matters for comparability.
 
+## One thing that will bite you
+
+**`stegosuite extract` overwrites files in your working directory and cannot
+be told not to.**
+
+It has no output option. It writes out the *embedded original filename*, into
+wherever you are standing. If that name matches a file you already have, yours
+is gone: no prompt, no warning, exit 0.
+
+This is worse than it sounds, because the file it leaves behind looks correct.
+If you extract into the directory holding the payload you embedded, you
+destroy your original and the result still matches, so nothing tells you
+anything happened.
+
+Extract into an empty directory, always.
+
 ## Things that look like faults and are not
 
 - **`openstego` prints nothing at all on a successful embed.** Check with
@@ -135,6 +151,30 @@ is side-informed, and that distinction matters for comparability.
   `DeprecationWarning` on PNG work and `coeffs shape:` / `precover shape:` /
   `coeffs_estim shape:` on JPEG work. Anything parsing stdout should expect
   them.
+- **`hstego --help` prints its own internal container path**, so the example
+  it shows cannot be copied and run as written. Use `toolkit hstego ...`.
+- **`steghide info` exits 1 with "could not extract any data with that
+  passphrase!"** when there is nothing hidden, after correctly printing the
+  capacity. That is the answer, not an error.
+- **`outguess` recompresses the JPEG it writes**, forcing quality 75. A
+  256,900-byte cover came out at 138,942 bytes with visible quality loss. If
+  your point is that the picture is unchanged, use a different tool.
+- **`outguess` prints an integer underflow**: `Correctable message size:
+  18446744073709539295 bits`. Cosmetic, upstream.
+
+## Exit codes are not reliable across these tools
+
+Two of the six report a failed extraction with exit status 0:
+
+| Tool | Wrong passphrase gives |
+|---|---|
+| `stegcore` | message, exit 2 |
+| `steghide` | message, exit 1 |
+| `hstego` | `WARNING: message not found`, zero-byte output, **exit 0** |
+| `openstego` | `Embedded data is corrupt OR invalid password...`, **exit 0** |
+
+If you are scripting any of this, check the size of the output file rather
+than `$?`.
 - **The banner's commit field can read `not-a-git-checkout`.** That means the
   image was built outside a clone, which is honest rather than broken.
 
@@ -158,8 +198,17 @@ it works is a measurement rather than an assumption.
 | `hstego` round trip, greyscale PNG, RGB PNG and JPEG | payload recovered byte-identical on all three |
 | `hstego` adaptivity | zero changes in a flat region against 2,224 in a noisy one |
 
-**Not checked.** `outguess` and `stegosuite` have not had a file put through
-them here. They install and are on the PATH.
+| `outguess` round trip, JPEG | payload recovered byte-identical |
+| `stegosuite` round trip, PNG | payload recovered byte-identical |
+| A JPEG hidden inside a PNG, and inside a JPEG | both recovered byte-identical |
+
+**All six hiding tools have now had a file put through them and recovered it
+byte for byte.** Every carrier they produced still decodes as a valid image.
+
+**Not checked: the detector's accuracy**, and that is the gap that matters
+most. On an ordinary photograph `stegcore analyse` flagged the clean original
+and both stego files identically. See "Neither verdict means anything on its
+own" above.
 
 **Outstanding.** Three `ARG *_REF` build arguments still track `master`, so two
 builds a week apart can differ; pin them before any published benchmark. No
