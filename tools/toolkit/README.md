@@ -10,7 +10,7 @@ It is a box of other people's tools. It does not do anything itself.
 Not published yet, so build it. About twenty minutes and 1.61 GB.
 
 ```sh
-tools/toolkit/build.sh stegobench/toolkit
+tools/toolkit/build.sh stegobench/toolkit:latest
 ```
 
 ## Running it
@@ -18,8 +18,13 @@ tools/toolkit/build.sh stegobench/toolkit
 Set this up once:
 
 ```sh
-alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit'
+alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
 ```
+
+The tag here must be the tag you built. If you built it as something else,
+change it in both places, or docker goes looking for a `:latest` that does not
+exist and reports `pull access denied`, which reads like a login problem and
+is not one.
 
 Then:
 

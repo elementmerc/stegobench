@@ -6,7 +6,7 @@ to run it. This is everything a reader needs once they are actually using it.
 ## Why the alias looks like that
 
 ```sh
-alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit'
+alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
 ```
 
 Each part is there because leaving it out broke something a real person hit.
@@ -17,6 +17,7 @@ Each part is there because leaving it out broke something a real person hit.
 | `--user` | Without it everything the tools write is owned by root, mode 600, and you cannot delete your own output on a shared machine |
 | `-it` | The guided wizard needs a keyboard. Without it, it exits reporting that you cancelled when you did not. `steghide` also prompts before overwriting and fails with "could not get terminal attributes" when nothing is listening |
 | `-v "$PWD:/data"` | The tools see your current directory as `/data`. Paths you pass them are paths inside the container |
+| the tag | Must match the tag you built. Omit it and docker looks for a `:latest` that may not exist, and reports `pull access denied`, which reads like a login problem and is not one |
 
 ## Reading what the detectors tell you
 
