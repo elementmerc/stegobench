@@ -976,11 +976,26 @@ impl Entry {
             }
         }
 
-        if self.selftest.is_none() {
+        // Asked of a DETECTOR only. The two questions are different and so are
+        // the blocks that answer them: a detector is shown two images and must
+        // tell them apart, which is what [selftest] describes, and an embedder
+        // cannot be asked that at all.
+        //
+        // It used to be asked of every entry, and for an embedder that produced
+        // precisely the thing the message warns against. `selftest::run`
+        // branches on the kind and goes to the round trip without ever reading
+        // `selftest`, so an embedder's must_detect and must_clear were never
+        // opened: five entries named three fixture files that do not exist
+        // (fixtures/clean.jpeg, fixtures/roundtrip.jpeg, fixtures/roundtrip.png)
+        // and nothing complained, for as long as the requirement stood. A check
+        // that cannot fail is worse than no check, and requiring a block nobody
+        // reads is how you get one.
+        if self.kind == Kind::Detector && self.selftest.is_none() {
             bad.push(
-                "declares no selftest. Both a must_detect and a must_clear \
-                 fixture are required, because a check that cannot fail is \
-                 worse than no check"
+                "is a detector and declares no selftest. Both a must_detect and \
+                 a must_clear fixture are required, because a detector that \
+                 answers \"stego\" to everything passes a one sided check, and a \
+                 check that cannot fail is worse than no check"
                     .into(),
             );
         }
@@ -1541,8 +1556,11 @@ must_clear = "b.png"
         assert!(e.validate().unwrap_err()[0].contains("one or the other"));
     }
 
+    /// Renamed from `an_entry_without_a_selftest_is_refused`: the assertion is
+    /// unchanged and the fixture was already a detector, but the old name claimed
+    /// a rule about every entry and the rule only ever made sense for this kind.
     #[test]
-    fn an_entry_without_a_selftest_is_refused() {
+    fn a_detector_without_a_selftest_is_refused() {
         let e: Entry = toml::from_str(
             r#"name = "x"
 kind = "detector"
@@ -1553,6 +1571,37 @@ version_args = ["-v"]"#,
         )
         .unwrap();
         assert!(e.validate().unwrap_err()[0].contains("cannot fail"));
+    }
+
+    /// The other half of the same rule, and the half that was missing.
+    ///
+    /// `selftest::run` branches on the kind and goes straight to the round trip
+    /// for an embedder, never reading `selftest`, so requiring the block of an
+    /// embedder bought a declaration nobody opened. Five entries named three
+    /// fixture files that have never existed and the requirement did not notice,
+    /// because presence was all it checked. Asserted on the message rather than
+    /// on emptiness so that an embedder refused for some OTHER reason still
+    /// counts as a pass here.
+    #[test]
+    fn an_embedder_is_not_asked_for_a_selftest_it_would_never_read() {
+        let e: Entry = toml::from_str(
+            r#"name = "x"
+kind = "embedder"
+licence = "MIT"
+[binary]
+command = ["y"]
+version_args = ["-v"]
+[roundtrip]
+cover = "fixtures/clean.png"
+embed_argv = ["embed"]
+extract_argv = ["extract"]"#,
+        )
+        .unwrap();
+        let problems = e.validate().err().unwrap_or_default();
+        assert!(
+            !problems.iter().any(|p| p.contains("selftest")),
+            "an embedder was asked for a selftest: {problems:?}"
+        );
     }
 
     #[test]

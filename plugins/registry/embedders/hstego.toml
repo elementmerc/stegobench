@@ -20,6 +20,15 @@ seconds_per_image = 0.4
 peak_rss_mb = 300
 cores_per_worker = 1
 
-[selftest]
-must_detect = "fixtures/roundtrip.png"
-must_clear = "fixtures/clean.png"
+[roundtrip]
+# PNG, because hstego declares no other format here and its JPEG path wants a
+# JPEG written by its own private libjpeg 9e rather than any JPEG at all.
+cover = "fixtures/clean.png"
+# Positional, in this order, and the password is positional too: the image's
+# ENTRYPOINT is already hstego.py, whose usage is
+#   hstego.py embed <msg file> <cover image> <output stego image> [password]
+#   hstego.py extract <stego image> <output msg file> [password]
+# so there are no flags to get wrong and no flag to put the output somewhere
+# this harness is not looking.
+embed_argv = ["embed", "{payload}", "{cover}", "{stego}", "{passphrase}"]
+extract_argv = ["extract", "{stego}", "{recovered}", "{passphrase}"]

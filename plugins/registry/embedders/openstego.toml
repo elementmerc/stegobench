@@ -20,6 +20,32 @@ seconds_per_image = 0.4
 peak_rss_mb = 300
 cores_per_worker = 1
 
-[selftest]
-must_detect = "fixtures/roundtrip.png"
-must_clear = "fixtures/clean.png"
+[roundtrip]
+cover = "fixtures/clean.png"
+# ENTRYPOINT OVERRIDDEN TO `java`, AND THE JVM FLAG IS THE REASON.
+#
+# openstego's own wrapper is `java -jar .../openstego.jar "$@"`, which gives no
+# way to pass a JVM option. It needs one. OpenStego calls UserPreferences.init
+# before it parses argv, that resolves `user.home`, and this harness runs every
+# container as the calling user with all capabilities dropped. That uid is not in
+# the image's passwd file, so the JVM reports `user.home` as "?" and OpenStego
+# tries to create "?" under its working directory, which it does not own:
+#
+#   com.openstego.desktop.OpenStegoException:
+#     java.nio.file.AccessDeniedException: /data/?
+#
+# and then EXITS 0 having written nothing, which is why this went unnoticed. HOME
+# in the environment does not fix it, measured 2026-10-01: the JVM takes
+# `user.home` from the passwd database, not from HOME, so it has to be set as a
+# system property.
+#
+# /work is where Session::phase mounts the scratch directory, and the entry is
+# pinned by digest, so neither the mount point nor the jar path can move without
+# this file changing too.
+entrypoint = "java"
+embed_argv = ["-Duser.home=/work", "-jar", "/usr/share/openstego/lib/openstego.jar",
+              "embed", "-mf", "{payload}", "-cf", "{cover}", "-sf", "{stego}"]
+# -xf is a FILE, not a directory. Handed a directory OpenStego throws
+# `FileNotFoundException: /work (Is a directory)` and, again, exits 0.
+extract_argv = ["-Duser.home=/work", "-jar", "/usr/share/openstego/lib/openstego.jar",
+                "extract", "-sf", "{stego}", "-xf", "{recovered}"]

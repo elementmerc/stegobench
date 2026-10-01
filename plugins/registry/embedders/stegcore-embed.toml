@@ -57,7 +57,3 @@ embed_argv = ["embed", "{cover}", "{payload}", "-o", "{stego}",
               "--passphrase", "{passphrase}", "--force"]
 extract_argv = ["extract", "{stego}", "-o", "{recovered}",
                 "--passphrase", "{passphrase}"]
-
-[selftest]
-must_detect = "fixtures/lsb-0.4bpp.png"
-must_clear = "fixtures/clean.png"

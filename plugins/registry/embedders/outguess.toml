@@ -28,7 +28,3 @@ cores_per_worker = 1
 cover = "fixtures/clean.jpg"
 embed_argv = ["-k", "{passphrase}", "-d", "{payload}", "{cover}", "{stego}"]
 extract_argv = ["-k", "{passphrase}", "-r", "{stego}", "{recovered}"]
-
-[selftest]
-must_detect = "fixtures/roundtrip.jpeg"
-must_clear = "fixtures/clean.jpeg"

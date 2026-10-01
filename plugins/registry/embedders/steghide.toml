@@ -28,7 +28,3 @@ embed_argv = ["embed", "-cf", "{cover}", "-ef", "{payload}", "-sf", "{stego}",
               "-p", "{passphrase}", "-q", "-f"]
 extract_argv = ["extract", "-sf", "{stego}", "-xf", "{recovered}",
                 "-p", "{passphrase}", "-q", "-f"]
-
-[selftest]
-must_detect = "fixtures/roundtrip.jpeg"
-must_clear = "fixtures/clean.jpeg"

@@ -545,6 +545,71 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/registry")
     }
 
+    /// Every image a registry entry names has to be an image that exists.
+    ///
+    /// This check is here rather than in `Entry::validate` because the two sides
+    /// of it live in different crates: the names are in `stegobench-core` and the
+    /// files are compiled in by this crate's build script. Only this layer can
+    /// see both, so this is the only place the question can be asked.
+    ///
+    /// It is asked because for a long time nobody did. Five embedder entries
+    /// named `fixtures/clean.jpeg`, `fixtures/roundtrip.jpeg` and
+    /// `fixtures/roundtrip.png`, none of which has ever existed, and nothing
+    /// anywhere noticed: `validate` checked that a `[selftest]` block was
+    /// present without checking that its files were, `build.rs` embeds whatever
+    /// is in `fixtures/` rather than whatever is asked for, and the runtime path
+    /// that would have caught it is never reached for an embedder. A name with no
+    /// file behind it fails as `Skipped`, which reads as "not checked" and is
+    /// therefore the quietest way for a check to stop existing.
+    #[test]
+    fn every_fixture_a_registry_entry_names_is_a_fixture_that_ships() {
+        let reg = Registry::load(&shipped()).expect("the real registry loads");
+        let have: Vec<&str> = crate::fixtures::EMBEDDED_FIXTURES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(!have.is_empty(), "no fixtures were compiled in");
+
+        let mut missing: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for entry in reg.entries.values() {
+            // Named the way an entry names them, so the message a reader gets
+            // back is the string they will search the TOML for.
+            let mut named: Vec<(&str, &str)> = Vec::new();
+            if let Some(test) = &entry.selftest {
+                named.push(("selftest.must_detect", test.must_detect.as_str()));
+                named.push(("selftest.must_clear", test.must_clear.as_str()));
+            }
+            if let Some(rt) = &entry.roundtrip {
+                named.push(("roundtrip.cover", rt.cover.as_str()));
+            }
+            for (field, name) in named {
+                checked += 1;
+                let bare = name.strip_prefix("fixtures/").unwrap_or(name);
+                if !have.contains(&bare) {
+                    missing.push(format!(
+                        "{}: {field} names {name:?}, which is not a fixture that \
+                         ships. The fixtures are: {}",
+                        entry.name,
+                        have.join(", ")
+                    ));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "a registry entry names a fixture that does not exist:\n  {}",
+            missing.join("\n  ")
+        );
+        // An empty collection looks exactly like a pass, so the count is
+        // asserted too: thirteen entries, and most of them name at least one.
+        assert!(
+            checked >= 10,
+            "only {checked} fixture references were checked, which is too few \
+             for this registry: the walk found nothing to look at"
+        );
+    }
+
     /// The built-in registry is for the machine with no checkout, and until
     /// this landed its three host entries named an adapter by a path relative
     /// to wherever the user happened to be standing. Measured from a scratch

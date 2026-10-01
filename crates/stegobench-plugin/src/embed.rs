@@ -169,6 +169,31 @@ fn owner_of(work: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Where two payloads first disagree, in the words a reader needs.
+///
+/// Reporting only the lengths is how a one bit difference reads as "recovered 69
+/// bytes and the payload is 69", which states two equal numbers while claiming
+/// they differ and sends the reader looking for a truncation that is not there.
+/// OutGuess 0.4 is the tool that makes that happen: it can return the right
+/// number of bytes with a wrong bit in the last one, and a reader told only the
+/// lengths has nothing to go on.
+///
+/// Empty when the two agree up to the shorter length, because then the length is
+/// the whole story and naming a byte offset would invent a second one.
+fn first_difference(want: &[u8], got: &[u8]) -> String {
+    match want.iter().zip(got).position(|(a, b)| a != b) {
+        None => String::new(),
+        Some(i) => format!(
+            ", and byte {i} of {} differs: expected 0x{:02x}, got 0x{:02x} \
+             (xor 0x{:02x})",
+            want.len(),
+            want[i],
+            got[i],
+            want[i] ^ got[i]
+        ),
+    }
+}
+
 /// Run one phase and wait for it, but not for ever.
 ///
 /// The waiting is shared with every other plugin invocation (see
@@ -286,10 +311,11 @@ pub fn run(
             ) {
                 (Ok(got), Ok(want)) if got == want => Ok(()),
                 (Ok(got), Ok(want)) => Err(format!(
-                    "recovered {} bytes and the payload is {}: what went in \
-                     did not come back",
+                    "the payload did not survive the round trip: {} bytes went \
+                     in and {} came back{}",
+                    want.len(),
                     got.len(),
-                    want.len()
+                    first_difference(&want, &got)
                 )),
                 (Err(e), _) => Err(format!("extract wrote no payload: {e}")),
                 (_, Err(e)) => Err(format!("could not re-read the payload: {e}")),
@@ -315,6 +341,51 @@ pub fn run(
         bytes,
         recovered,
     })
+}
+
+/// Separate from `tests` below, and deliberately NOT gated on unix: the
+/// message is built from two byte slices and has no sandbox in it, so there is
+/// no reason for the one platform that cannot run a shell script stand-in to
+/// also stop checking what a failure says.
+#[cfg(test)]
+mod message_tests {
+    use super::first_difference;
+
+    #[test]
+    fn identical_payloads_name_no_difference() {
+        assert_eq!(first_difference(b"abc", b"abc"), "");
+    }
+
+    /// The outguess case, and the reason this helper exists: the same number of
+    /// bytes came back with one bit wrong in the last one. 0x64 is 'd' and 0x24
+    /// is '$', a single flip of bit 6, which is what OutGuess 0.4 does when its
+    /// embedding iterator runs off the end of the bitmap.
+    #[test]
+    fn a_one_bit_change_in_the_last_byte_is_named_exactly() {
+        let said = first_difference(b"payload", b"payloa$");
+        assert!(said.contains("byte 6 of 7"), "the offset is named: {said}");
+        assert!(said.contains("expected 0x64"), "the wanted byte: {said}");
+        assert!(said.contains("got 0x24"), "the byte that came back: {said}");
+        assert!(said.contains("xor 0x40"), "the bit that moved: {said}");
+    }
+
+    /// The ordinary failure still has to read correctly. A truncation agrees up
+    /// to the shorter length, so there is no differing byte to name and the two
+    /// lengths in the sentence around this are the whole story.
+    #[test]
+    fn a_truncation_adds_nothing_because_the_lengths_already_say_it() {
+        assert_eq!(first_difference(b"payload", b"pay"), "");
+        assert_eq!(first_difference(b"payload", b""), "");
+    }
+
+    /// A payload that was truncated AND changed names the change, because the
+    /// lengths alone would send the reader to the wrong cause.
+    #[test]
+    fn a_truncation_that_also_differs_still_names_the_byte() {
+        let said = first_difference(b"payload", b"pby");
+        assert!(said.contains("byte 1 of 7"), "got {said}");
+        assert!(said.contains("xor 0x03"), "got {said}");
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -400,7 +471,16 @@ mod tests {
         let (cover, payload, out) = staged(dir.path());
         let done = super::run(&entry(&tool), &cover, &payload, &out, None, true).expect("ran");
         match done.recovered {
-            Some(Err(e)) => assert!(e.contains("did not come back"), "got {e}"),
+            // Was `contains("did not come back")`, which only checked that the
+            // sentence existed. The message is now the thing a reader acts on,
+            // so all three of its parts are asserted: what it was, what came
+            // back, and where the two part company.
+            Some(Err(e)) => {
+                assert!(e.contains("did not survive the round trip"), "got {e}");
+                assert!(e.contains("11 bytes went in"), "the payload size: {e}");
+                assert!(e.contains("14 came back"), "what came back: {e}");
+                assert!(e.contains("byte 0 of 11 differs"), "where they part: {e}");
+            }
             other => panic!("the bad round trip was not reported: {other:?}"),
         }
     }

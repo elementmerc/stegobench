@@ -18,7 +18,3 @@ formats = ["png"]
 seconds_per_image = 0.4
 peak_rss_mb = 300
 cores_per_worker = 1
-
-[selftest]
-must_detect = "fixtures/roundtrip.png"
-must_clear = "fixtures/clean.png"

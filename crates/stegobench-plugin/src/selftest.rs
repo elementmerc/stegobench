@@ -575,6 +575,25 @@ mod tests {
             other => panic!("expected Skipped, got {other:?}"),
         }
     }
+
+    /// The round trip payload has to stay inside the band that was measured,
+    /// and a doc comment is not a mechanism.
+    ///
+    /// Below 96 bytes outguess silently drops the tail bits of the payload and
+    /// still exits 0 on both halves, so a shorter payload turns this check into
+    /// a coin flip that reports a working tool as broken. Above 212 bytes
+    /// fixtures/clean.jpg cannot carry it and outguess refuses outright. The
+    /// constant's own comment explains both ends; this is what stops the next
+    /// reader shortening it back.
+    #[test]
+    fn the_roundtrip_payload_stays_inside_the_measured_band() {
+        assert_eq!(
+            roundtrip::PAYLOAD.len(),
+            128,
+            "the round trip payload must be 128 bytes: read the comment on \
+             roundtrip::PAYLOAD before changing it"
+        );
+    }
 }
 
 /// The round trip against a LOCAL program rather than a container.
@@ -676,7 +695,18 @@ mod local_roundtrip_tests {
         let e = entry(&format!("{tool:?}"));
         let fix = tempfile::tempdir().expect("fixtures");
         match roundtrip::run(&e, fixtures(fix.path())) {
-            Verified::Failed(r) => assert!(r.contains("did not come back"), "got {r}"),
+            // Was `contains("did not come back")`. The size now comes from
+            // PAYLOAD rather than being written out, so shortening the payload
+            // cannot leave this assertion quietly passing against a stale
+            // number.
+            Verified::Failed(r) => {
+                assert!(r.contains("did not survive the round trip"), "got {r}");
+                assert!(
+                    r.contains(&format!("{} bytes went in", roundtrip::PAYLOAD.len())),
+                    "the payload size: {r}"
+                );
+                assert!(r.contains("15 came back"), "what came back: {r}");
+            }
             other => panic!("expected Failed, got {other:?}"),
         }
     }
@@ -740,10 +770,43 @@ pub mod roundtrip {
 
     use super::Verified;
 
-    /// The payload. Short, recognisable, and not compressible into nothing,
-    /// so a tool that silently wrote an empty file cannot pass by accident.
-    pub const PAYLOAD: &[u8] =
-        b"stegobench roundtrip fixture 2026: if you can read this, it survived.";
+    /// The payload. 128 bytes, and THE LENGTH IS LOAD BEARING: do not shorten
+    /// it, and do not tidy it back into a one line string.
+    ///
+    /// Recognisable and not compressible into nothing, so a tool that silently
+    /// wrote an empty file cannot pass by accident. That much was always true
+    /// and is not the part that is easy to get wrong.
+    ///
+    /// The length is. OutGuess 0.4 walks the cover with a stride scaled to how
+    /// much payload is left (`iterator_adapt` in its own source), and nothing
+    /// bounds that walk against the end of the bitmap. With a short payload the
+    /// stride is coarse enough to run off the end part way through the final
+    /// byte. The bits that fall off are never written, `steg_embedchunk` returns
+    /// success anyway, and extraction reads past the end, so the payload comes
+    /// back the RIGHT LENGTH with a wrong bit in its last byte and both halves
+    /// exit 0. outguess is deterministic, so a payload that lands on that case
+    /// fails every single time, for ever, and reports a working tool as broken.
+    /// A permanent red gets believed, which is worse than a flaky one.
+    ///
+    /// Measured 2026-10-01 against the digest the registry pins, 40 random
+    /// payloads per cell across three covers including fixtures/clean.jpg: bits
+    /// were dropped at 32, 48, 64 and 69 bytes (16 of 40 on one cover) and never
+    /// once at 96, 128, 192 or 256. A further 750 round trips at 128 bytes, 250
+    /// on each of the three covers, dropped nothing and recovered every byte.
+    ///
+    /// The other end of the band is capacity. fixtures/clean.jpg carries 4622
+    /// usable bits of which outguess will use 1697, so it refuses anything over
+    /// 212 bytes on it. 128 bytes is 1056 bits, 62% of that, which leaves the
+    /// fixture room to be replaced. The usable band is roughly 96 to 212 bytes
+    /// and this sits in the middle of it on purpose.
+    ///
+    /// To change it, re-measure. Embed the candidate and check that outguess
+    /// prints `Bits embedded: N` with N equal to (4 + payload length) * 8. A
+    /// short count means bits were dropped, whether or not the recovered bytes
+    /// happen to come back right that time.
+    pub const PAYLOAD: &[u8] = b"stegobench roundtrip fixture 2026: if you can \
+        read this, it survived. 128 bytes on purpose: do not shorten it, read \
+        the comment.";
 
     /// Hides the payload, recovers it, and compares the bytes.
     ///
