@@ -128,12 +128,57 @@ RUN curl -fsSL "https://www.ijg.org/files/jpegsrc.v${LIBJPEG_VERSION}.tar.gz" \
 ENV CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" \
     LD_LIBRARY_PATH="/usr/local/lib"
 
-ARG HSTEGO_REF=master
+# PINNED TO A COMMIT, NOT A BRANCH, and that distinction is load bearing here
+# in a way it is not for most dependencies: pip does not install a wheel from
+# this URL, it clones the repository and COMPILES TWO NATIVE C EXTENSIONS
+# (hstego_jpeg_toolbox_extension, hstego_stc_extension) into the image. A
+# branch name means the C code that executes on a user's machine is whatever
+# was on that branch the day somebody rebuilt, under the same image tag, with
+# no way for a reader to pin it from outside and no reproducible build.
+#
+# This commit is not a guess. It is the commit the 2026-10-01 image actually
+# resolved `master` to, read back out of that image's own
+# `hstego-0.6.1.dist-info/direct_url.json`, so pinning it reproduces the build
+# that was tested rather than selecting a new one. Moving it is a deliberate
+# act with a self-test behind it, which is the point.
+#
+# Raised by rung 5 of the 2026-10-01 journey round, by a platform engineer who
+# found it in `direct_url.json` and said the resolved commit being recorded
+# after the fact is not the same as pinning it before.
+ARG HSTEGO_REF=bf71f6e0d7faaa632ad8a988c0393e94bfd13b2a
+
+# THE SOURCE ARRIVES IN THE BUILD CONTEXT RATHER THAN BEING CLONED IN HERE, and
+# that is not a workaround for a flaky network even though a flaky network is
+# what forced it.
+#
+# `pip install git+https://...` made the build reach GitHub from inside a build
+# container. On the machine that builds these images that fetch times out after
+# five minutes while apt and PyPI succeed in the same layer, measured twice on
+# 2026-10-01, so `build.sh` could not build this image at all and the image that
+# existed had been made by hand with `--network=host`. Handing a build the
+# host's network to clone and compile somebody else's source is the opposite of
+# what baseline Section 5 asks for, so widening the hole was not the fix.
+#
+# `build.sh` now fetches exactly this commit on the host, where the network
+# works, checks that the tree really is at it, and leaves it in the build
+# context. The build-time fetch is gone rather than permitted, which also
+# removes the second of the two unpinned network fetches rung 5 objected to: the
+# only remaining one is openstego's .deb, and that is checked by hash.
+#
+# The commit is written into the image because pip records a `file://` URL for a
+# local install, so `direct_url.json` no longer carries the commit the way it
+# did when this cloned. The check that matters moved to the host, where it can
+# inspect the actual tree rather than pip's note about it.
+#
+# Running `docker build` directly will now fail on this COPY, by design. Use
+# ./build.sh, which the Dockerfile header already told you to use.
+COPY .hstego-src /tmp/hstego-src
 RUN python3 -m venv /opt/hstego-venv \
     && /opt/hstego-venv/bin/pip install --no-cache-dir \
         imageio scipy pycryptodome numba pillow \
-    && /opt/hstego-venv/bin/pip install --no-cache-dir \
-        "git+https://github.com/daniellerch/hstego@${HSTEGO_REF}"
+    && /opt/hstego-venv/bin/pip install --no-cache-dir /tmp/hstego-src \
+    && printf '%s\n' "${HSTEGO_REF}" > /opt/hstego-venv/HSTEGO_COMMIT \
+    && rm -rf /tmp/hstego-src
 
 # ---------------------------------------------------------------------------
 # Stage 2: the toolkit image itself.
@@ -148,7 +193,21 @@ LABEL org.opencontainers.image.title="stegobench toolkit" \
       # table and ./SOURCE-OFFER.md the obligations that follow from it.
       # A single identifier here would be a claim about the whole image that
       # is not true of any of its parts.
-      org.opencontainers.image.licenses="AGPL-3.0-or-later AND GPL-2.0-only AND GPL-3.0-only AND BSD-3-Clause AND MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND GPL-2.0-only AND GPL-3.0-only AND BSD-3-Clause AND MIT" \
+      # WHERE THIS CAME FROM, and it was missing until 2026-10-01.
+      #
+      # A platform engineer vetting this image for a network spent a third of a
+      # forty-five minute review unable to answer "where did this come from",
+      # and answered it in the end by running `grep` over the 9.74 MB stegcore
+      # binary and finding a URL in its strings. These three labels are where
+      # that question is supposed to be answered, and an image that leaves them
+      # off is not being modest, it is withholding the one field a reviewer
+      # needs. `revision` is set from ARG below rather than here, because it
+      # changes per build.
+      org.opencontainers.image.source="https://github.com/elementmerc/stegobench" \
+      org.opencontainers.image.url="https://github.com/elementmerc/stegobench" \
+      org.opencontainers.image.vendor="Daniel Iwugo" \
+      org.opencontainers.image.documentation="https://github.com/elementmerc/stegobench/blob/dev/docs/guide/toolkit.md"
 
 # curl is build-time only: it fetches OpenStego's .deb, which is a GitHub
 # release asset rather than a Debian package. It is purged after use, matching
@@ -203,6 +262,23 @@ RUN apt-get update \
     && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --max-time 300 \
         -o /tmp/openstego.deb \
         "https://github.com/syvaidya/openstego/releases/download/openstego-${OPENSTEGO_VERSION}/openstego_${OPENSTEGO_VERSION}-1_all.deb" \
+    # THE VERSION BEING PINNED DOES NOT PIN THE BYTES, which is the whole
+    # reason this line exists. Everything else in this build arrives from
+    # Debian's mirrors, signed, and apt verifies it. This one file is a GitHub
+    # release asset, and a release asset can be replaced by whoever owns the
+    # repository without the version string changing, so `0.8.6` names an
+    # intention rather than a payload.
+    #
+    # The digest is not taken from the release page, which would only restate
+    # whatever is being served now. It was computed from the asset and then
+    # checked against the image that was already built and tested: all six
+    # files the package installs match dpkg's own recorded md5sums inside that
+    # image, so this hash identifies the bytes this project has actually run.
+    #
+    # Raised by rung 5 of the 2026-10-01 journey round, which stopped on
+    # exactly this layer and said it is why they read image history at all.
+    && echo "821c4a1e190e994659b05a6c8142d14568204675b431c9e7278b379934a1d34a  /tmp/openstego.deb" \
+        | sha256sum -c - \
     && apt-get install -y --no-install-recommends /tmp/openstego.deb \
     && rm -f /tmp/openstego.deb \
     && apt-get purge -y git curl build-essential \
@@ -221,6 +297,59 @@ COPY --from=hstego-builder /usr/local/include/ /usr/local/include/
 COPY --from=hstego-builder /opt/hstego-venv /opt/hstego-venv
 RUN ldconfig
 
+# THE TWO LICENCES THAT WERE MISSING, and the one that was missing mattered
+# most: our own.
+#
+# SOURCE-OFFER.md tells a reader the licences are in
+# /usr/share/doc/<package>/copyright inside the image, "one per package". That
+# is true of the 274 packages apt installed and it was false for exactly the
+# two that did not come from apt: stegcore, which is ours and is the most
+# demanding licence in the image, and hstego. A platform engineer checked the
+# claim in one command on 2026-10-01 and falsified it, which is the worst
+# shape a documentation claim can have: specific, checkable, and wrong.
+#
+# Debian's convention is followed rather than invented: a copyright file that
+# names the holder and the licence, and defers the full text to
+# /usr/share/common-licenses where the distribution already ships it. hstego's
+# upstream LICENSE.txt travels in its own dist-info, so that one is copied
+# verbatim and no text is retyped anywhere.
+RUN set -eu; \
+    mkdir -p /usr/share/doc/stegcore /usr/share/doc/hstego; \
+    { \
+      echo "Upstream-Name: Stegcore"; \
+      echo "Source: https://github.com/The-Malware-Files/Stegcore"; \
+      echo ""; \
+      echo "Files: /usr/local/bin/stegcore"; \
+      echo "Copyright: Daniel Iwugo"; \
+      echo "License: AGPL-3.0-or-later"; \
+      echo ""; \
+      echo "This binary is not a Debian package and was copied in from its own"; \
+      echo "published image. Its acceptable use policy is published separately at"; \
+      echo "https://github.com/The-Malware-Files/Stegcore/blob/main/AUP.md and is"; \
+      echo "not part of the licence grant."; \
+      echo ""; \
+      echo "License: AGPL-3.0-or-later"; \
+      echo " The full text of the GNU Affero General Public License version 3 is in"; \
+      echo " /usr/share/common-licenses/AGPL-3.0 in this image."; \
+    } > /usr/share/doc/stegcore/copyright; \
+    { \
+      echo "Upstream-Name: hstego"; \
+      echo "Source: https://github.com/daniellerch/hstego"; \
+      echo ""; \
+      echo "Installed from source at commit $(cat /opt/hstego-venv/HSTEGO_COMMIT), into"; \
+      echo "/opt/hstego-venv, rather than as a Debian package. Two native extensions"; \
+      echo "were compiled from that commit. The upstream licence text follows"; \
+      echo "verbatim."; \
+      echo ""; \
+      cat /opt/hstego-venv/lib/python*/site-packages/hstego*.dist-info/licenses/LICENSE.txt; \
+    } > /usr/share/doc/hstego/copyright; \
+    # Fail the build rather than ship the claim unbacked again. Reversing the
+    # earlier failure means this has to be checked here, not trusted.
+    for p in stegcore hstego; do \
+        test -s "/usr/share/doc/$p/copyright" \
+            || { echo "no copyright file written for $p" >&2; exit 1; }; \
+    done
+
 # numba compiles hot loops with cache=True, which writes next to the module
 # in site-packages; these containers run as the calling user with all
 # capabilities dropped, so site-packages is not writable. Point the cache
@@ -238,10 +367,10 @@ ENV NUMBA_CACHE_DIR=/tmp/numba-cache \
     # to the caller to remember.
     HOME=/tmp
 
-# The freshness banner the constellation plan (06-docker-image.md section 5)
-# asks for: build date and commit, printed on first run, because "you cannot
-# tell whether it is alive without trying it" is the exact complaint about
-# the toolkit image this one replaces. Pass both at build time:
+# The freshness banner: build date and commit, printed on first run, because
+# "you cannot tell whether it is alive without trying it" is the exact
+# complaint about the toolkit image this one replaces. Pass both at build time,
+# or use ./build.sh, which works them out and refuses a build that cannot:
 #   docker build --build-arg STEGOBENCH_BUILD_DATE="$(date -u +%Y-%m-%d)" \
 #                --build-arg STEGOBENCH_VCS_REF="$(git rev-parse --short HEAD)" .
 ARG STEGOBENCH_BUILD_DATE=unknown

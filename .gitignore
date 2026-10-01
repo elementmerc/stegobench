@@ -29,3 +29,9 @@ __pycache__/
 
 # Rust build output. The lockfile IS committed (baseline Section 5).
 /target/
+
+# Build artefact: tools/toolkit/build.sh fetches hstego's source here, on the
+# host, because the build must not clone it from inside a build container. It is
+# a shallow checkout of a pinned upstream commit, so it is reproducible from the
+# Dockerfile and belongs to nobody's history but upstream's.
+/tools/toolkit/.hstego-src/
