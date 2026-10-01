@@ -5,10 +5,17 @@
 # and a corpus whose tools were built from "whatever stable-slim meant
 # that week" is not rebuildable in any sense a reader can check.
 FROM python@sha256:174bec68e0451bffabbb08c7d5d21c6b253f772d81d52b9558af97bb3159b761
-# Pin to a commit for reproducible numbers (fairness requirement). Override
-# with --build-arg ALETHEIA_REF=<sha>. Default tracks master; PIN before any
-# published benchmark so the comparison is stable across releases.
-ARG ALETHEIA_REF=master
+# Pinned to a commit for reproducible numbers (fairness requirement). Override
+# with --build-arg ALETHEIA_REF=<sha>.
+#
+# This default said "tracks master; PIN before any published benchmark", which
+# put the obligation on whoever ran the build and nowhere a reader could check
+# it. The commit below is not a fresh choice: it is what `stegobench/aletheia:pinned`
+# and `stegobench/aletheia-rich:pinned` were actually built from, read out of
+# /opt/aletheia/.git in those images on 2026-10-01, so pinning it reproduces
+# the images that were measured at 8.34 GB and 9.09 GB rather than selecting
+# new ones.
+ARG ALETHEIA_REF=1baf974ea8fcf0b51802935d9acbe59903d06845
 
 # libmagic1 backs the python-magic module that aletheialib.attacks imports.
 RUN apt-get update \

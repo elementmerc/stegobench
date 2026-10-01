@@ -50,7 +50,12 @@ RUN curl -fsSL "https://www.ijg.org/files/jpegsrc.v${LIBJPEG_VERSION}.tar.gz" \
 ENV CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" \
     LD_LIBRARY_PATH="/usr/local/lib"
 
-ARG HSTEGO_REF=master
+# Pinned to the commit this image was built from, read back out of the built
+# image's own dist-info, rather than to a branch. pip clones and COMPILES two
+# native C extensions from this URL, so a branch name means the C code in the
+# image is whatever was on master the day somebody rebuilt. Same pin as
+# ../toolkit/Dockerfile, deliberately, so the two images carry one hstego.
+ARG HSTEGO_REF=bf71f6e0d7faaa632ad8a988c0393e94bfd13b2a
 # hstego declares almost none of its runtime dependencies. A clean install
 # produces a tool that cannot start, and the failures arrive one import at a
 # time: imageio, then scipy, then pycryptodome, then numba, then Pillow, and

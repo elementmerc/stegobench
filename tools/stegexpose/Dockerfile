@@ -4,7 +4,12 @@
 # and a corpus whose tools were built from "whatever stable-slim meant
 # that week" is not rebuildable in any sense a reader can check.
 FROM eclipse-temurin@sha256:24cd8eed18b5976441d27b45823490eb5e8efff4b3ecdc632e442717ea66f160
-ARG STEGEXPOSE_REF=master
+# Pinned rather than tracking master. The built image does not retain its .git,
+# so this was not read back from it; upstream is archived and its last commit is
+# e8312cb from 2018-08-14, so there is no other candidate. Written down as
+# unverified against the built image for the same reason as the aletheia-rich
+# pin beside it.
+ARG STEGEXPOSE_REF=e8312cb0973d2a97deffc771d8e5910df8494698
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && git clone https://github.com/b3dk7/StegExpose /opt/stegexpose \

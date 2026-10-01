@@ -46,7 +46,14 @@
 # baseline incomparable in a way nothing would report.
 FROM stegobench/aletheia:pinned
 
-ARG RESOURCES_REF=main
+# Pinned rather than tracking main. Unlike the aletheia pin beside it, this one
+# could NOT be read back out of the built image: the clone is removed at the end
+# of the build, so /tmp/aer does not survive. This is upstream's current head
+# (0b6b267, committed 2024-11-05) and that repository has had no commit since,
+# so it is near certainly the tree the image was built from, and it is written
+# down as near certainly rather than as verified. Rebuilding this image is what
+# would confirm it.
+ARG RESOURCES_REF=0b6b2674f685ebe3bad4fbbc3a07012033b7210b
 
 # Just `octave`. The obvious spellings `octave-cli` and `liboctave-dev` are
 # Ubuntu and Fedora names and do not exist in Debian trixie, which is what this
