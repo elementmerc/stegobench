@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
 import pathlib
 import sys
 
@@ -36,44 +37,61 @@ from likelihood_ratio import cross_validated_lrs
 from positive_control import DEFAULT_SCORES
 
 
-def sentence(lr: float, detector: str) -> list[str]:
+def sentence(lr: float, detector: str, censored: bool = False) -> list[str]:
     """The two lines a report would carry: the ratio, then what it supports.
 
     Written out rather than left as a bare number, because a bare likelihood
     ratio is exactly the thing the ENFSI guideline warns against handing to a
     reader who has no way to interpret it.
     """
+    at_least = "at least " if censored else ""
     first = (
-        f"The {detector} result is {lr:.4g} times more probable if the file "
-        f"carries a hidden payload than if it does not."
+        f"The {detector} result is {at_least}{lr:.4g} times more probable if "
+        f"the file carries a hidden payload than if it does not."
     )
-    strength = verbal(lr)
+    strength = verbal(lr, censored)
     if strength == "does not support either proposition":
         second = "The evidence does not support either proposition."
     elif lr >= 1:
-        second = f"That is {strength} for the proposition that it carries one."
+        second = f"That is {at_least}{strength} for the proposition that it carries one."
     else:
-        second = f"That is {strength} for the proposition that it does not."
+        second = f"That is {at_least}{strength} for the proposition that it does not."
     return [first, second]
 
 
-def verbal(lr: float) -> str:
-    """The ENFSI verbal scale, which is what stops a bare number being quoted.
+#: The ENFSI verbal scale, as (exclusive upper limit, phrase) in ascending
+#: order. The limits are the ones in the guideline for evaluative reporting.
+BANDS = (
+    (2.0, "does not support either proposition"),
+    (10.0, "weak support"),
+    (100.0, "moderate support"),
+    (1000.0, "moderately strong support"),
+    (math.inf, "strong support"),
+)
 
-    The bands are the ones in the ENFSI guideline for evaluative reporting.
-    A report gives the number and the phrase together; the phrase exists so
-    that a reader who cannot interpret 47 is not left to guess.
+
+def verbal(lr: float, censored: bool = False) -> str:
+    """The band for a ratio. A report gives the number and the phrase together.
+
+    The phrase exists so that a reader who cannot interpret 47 is not left to
+    guess, which is the whole reason the guideline asks for it.
+
+    `censored` is load-bearing and the reason this takes an argument at all.
+    A ratio clipped to a reporting bound is a statement that the evidence is
+    *at least* that strong, and the bound is chosen to sit at the limit of what
+    the sample can support. Band on it naively and a clipped value lands in the
+    band ABOVE, because a bound like 100 is the first value of the next band:
+    every censored case in a laboratory then collapses onto a scale boundary
+    and falls on the stronger side of it by a floating point tie. Reporting
+    "moderately strong" for a ratio we declined to put above 100 is precisely
+    the overstatement this module exists to prevent, so a censored value takes
+    the band it is the TOP of and is reported one-sided.
     """
     x = lr if lr >= 1 else 1 / lr
-    if x < 2:
-        return "does not support either proposition"
-    if x < 10:
-        return "weak support"
-    if x < 100:
-        return "moderate support"
-    if x < 1000:
-        return "moderately strong support"
-    return "strong support"
+    for top, phrase in BANDS:
+        if x < top or (censored and x == top):
+            return phrase
+    raise AssertionError("BANDS must end at infinity")
 
 
 def main(argv=None):
@@ -134,7 +152,7 @@ def main(argv=None):
         print(f"  ground truth      {truth}")
         print(f"  {args.detector.upper()} score{'':<12}{row[args.detector]:.6f}")
         print(f"  likelihood ratio  {lr:.4g}{at_bound}")
-        lines = sentence(lr, args.detector.upper())
+        lines = sentence(lr, args.detector.upper(), censored=bool(at_bound))
         print(f"  report text       {lines[0]}")
         print(f"                    {lines[1]}")
         print()
