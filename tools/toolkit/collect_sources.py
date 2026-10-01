@@ -71,13 +71,14 @@ NON_DEBIAN = [
     },
     {
         "name": "hstego",
-        "version": "git",
+        "version": "0.6.1",
         "licence": "MIT",
         "obligation": "permissive",
         "source": "https://github.com/daniellerch/hstego",
-        "note": "installed by pip from git. The ref is a build argument that "
-                "still defaults to master, so this version field is only exact "
-                "when the build pinned it",
+        "note": "installed by pip from git at commit "
+                "bf71f6e0d7faaa632ad8a988c0393e94bfd13b2a, which the Dockerfile "
+                "pins and verifies against what pip resolved. Two native C "
+                "extensions are compiled from that commit during the build",
     },
     {
         "name": "zsteg",
@@ -203,6 +204,155 @@ def installed_packages(image: str) -> list[dict]:
         raise CollectError(f"{image} reports no installed packages, which "
                            f"cannot be true of a Debian image")
     return packages
+
+
+def venv_packages(image: str) -> list[dict]:
+    """The Python packages in hstego's virtual environment.
+
+    They are 481 MB of the image and dpkg has never heard of any of them, so
+    without this the only machine-readable inventory of the image omits its
+    largest single layer. `pip list` rather than `pip freeze`, because freeze
+    renders a git-installed package as a URL and the version is then absent
+    from the field a reader is looking in.
+
+    A failure here is reported rather than swallowed: an SBOM that is quietly
+    missing a third of the image is worse than no SBOM, because nothing about
+    it says so.
+    """
+    result = _run(
+        ["docker", "run", "--rm", "--network=none", "--entrypoint",
+         "/opt/hstego-venv/bin/pip", image, "list", "--format=json"],
+        timeout=DOCKER_TIMEOUT)
+    if result.returncode != 0:
+        last = (result.stderr.strip().splitlines() or ["no reason given"])[-1]
+        raise CollectError(
+            f"could not list the Python packages in {image}: {last}")
+    try:
+        listed = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise CollectError(f"pip did not return JSON for {image}: {exc}") from exc
+    return [{"name": entry["name"], "version": entry["version"]}
+            for entry in listed]
+
+
+def image_digest(image: str) -> str | None:
+    """The image's own content digest, or None when it has none.
+
+    A locally built image that has never been pushed has no RepoDigest, and
+    saying so is the honest answer: that absence is exactly what a reviewer
+    needs to know, because it means there is nothing to verify the image
+    against.
+    """
+    result = _run(["docker", "image", "inspect", "--format",
+                   "{{index .RepoDigests 0}}", image], timeout=DOCKER_TIMEOUT)
+    if result.returncode != 0:
+        return None
+    digest = result.stdout.strip()
+    return digest or None
+
+
+def build_sbom(image: str, packages: list[dict], venv: list[dict],
+               digest: str | None) -> dict:
+    """A CycloneDX 1.5 bill of materials for the image.
+
+    Written here rather than taken from a scanner because this script already
+    enumerates every component for the source offer, and a second tool reading
+    the same image would be a second answer to one question. `syft` or
+    `docker buildx` would do it too; neither is installed on the machine that
+    builds these images, and a bill of materials nobody can produce is the same
+    as none.
+
+    Component identity is a purl where a purl exists, because that is what
+    downstream vulnerability tooling matches on. Debian binary packages get
+    `pkg:deb/debian/...`, Python packages `pkg:pypi/...`, and the handful that
+    belong to no ecosystem get a plain name and a documented source URL
+    instead of a made-up purl.
+    """
+    components: list[dict] = []
+    for package in packages:
+        components.append({
+            "type": "library",
+            "name": package["binary"],
+            "version": package["binary_version"],
+            "purl": f"pkg:deb/debian/{package['binary']}"
+                    f"@{package['binary_version']}?arch=amd64",
+        })
+    for package in venv:
+        components.append({
+            "type": "library",
+            "name": package["name"],
+            "version": package["version"],
+            "purl": f"pkg:pypi/{package['name'].lower()}@{package['version']}",
+        })
+    # MERGED BY NAME RATHER THAN APPENDED, because three of these are also
+    # visible to dpkg or to pip and appending produced a bill of materials that
+    # listed hstego and openstego twice. A duplicate in an inventory is not
+    # untidiness: anything counting components counts them twice, and anything
+    # matching a vulnerability against a purl now has two records to disagree
+    # with each other. The ecosystem entry knows the version; only this table
+    # knows the licence and the real origin, so the two are one component
+    # described from two directions.
+    by_name = {component["name"]: component for component in components}
+    for component in NON_DEBIAN:
+        existing = by_name.get(component["name"])
+        if existing is None:
+            components.append({
+                "type": "application",
+                "name": component["name"],
+                "version": component["version"],
+                "licenses": [{"expression": component["licence"]}],
+                "externalReferences": [
+                    {"type": "website", "url": component["source"]},
+                ],
+                "description": component["note"],
+            })
+            continue
+        existing["licenses"] = [{"expression": component["licence"]}]
+        existing["externalReferences"] = [
+            {"type": "website", "url": component["source"]},
+        ]
+        existing["description"] = component["note"]
+        # THE PURL GOES, and that is the point of this table existing.
+        #
+        # A purl names an ecosystem, and being in NON_DEBIAN is precisely the
+        # statement that this component did not come from the ecosystem it
+        # appears to belong to. `pkg:pypi/hstego` asserts a PyPI release of
+        # something pip compiled from a git commit. `pkg:deb/debian/openstego`
+        # asserts a Debian package of something Debian does not ship at all,
+        # which would have a scanner matching it against the wrong advisories
+        # or, worse, finding none and reporting it clean.
+        #
+        # An absent purl sends a reader to the source URL on the line below. A
+        # wrong one gets matched by a machine and believed.
+        existing.pop("purl", None)
+
+    # Sorted so two runs over one image produce byte-identical output. dpkg and
+    # pip both happen to be ordered today; relying on that is how iteration
+    # order leaks into an artefact somebody diffs.
+    components.sort(key=lambda c: (c["name"], c["version"]))
+
+    metadata_component: dict = {"type": "container", "name": image}
+    if digest:
+        algorithm, _, value = digest.rpartition(":")
+        metadata_component["hashes"] = [
+            {"alg": "SHA-256", "content": value},
+        ]
+    else:
+        metadata_component["description"] = (
+            "built locally and never pushed, so it carries no registry digest "
+            "and there is nothing to verify these bytes against")
+
+    return {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "tools": [{"name": "collect_sources.py",
+                       "vendor": "stegobench"}],
+            "component": metadata_component,
+        },
+        "components": components,
+    }
 
 
 def _sha256(path: pathlib.Path) -> str:
@@ -356,6 +506,20 @@ def build_manifest(image: str, packages: list[dict], fetched: dict,
     }
 
 
+def _write_json(target: pathlib.Path, payload: dict,
+                scratch: pathlib.Path) -> pathlib.Path:
+    """Write JSON atomically, so an interrupted run never leaves a file that
+    parses and undercounts. `sort_keys` because two runs over one image must
+    produce byte-identical output."""
+    with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=scratch, delete=False) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        temporary = pathlib.Path(handle.name)
+    temporary.replace(target)
+    return target
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Collect corresponding source for an image's copyleft parts")
@@ -369,7 +533,28 @@ def main(argv: list[str] | None = None) -> int:
                              f"default {SNAPSHOT_STAMP}")
     parser.add_argument("--dry-run", action="store_true",
                         help="check the run could work, list what would be fetched, fetch nothing")
+    parser.add_argument("--sbom-only", action="store_true",
+                        help="write SBOM.cdx.json and nothing else, fetching no "
+                             "source. Needs no disk space worth checking, so the "
+                             "free-space pre-flight is skipped")
     args = parser.parse_args(argv)
+
+    # The space check exists for a 2.9 GB source fetch. Applying it to a run
+    # that writes one JSON file would refuse the cheap half of this tool on a
+    # machine where it would have worked fine, and a reviewer asking for an
+    # inventory should not be told to free 8 GB first.
+    if args.sbom_only:
+        args.out.mkdir(parents=True, exist_ok=True)
+        try:
+            sbom = build_sbom(args.image, installed_packages(args.image),
+                              venv_packages(args.image),
+                              image_digest(args.image))
+            target = _write_json(args.out / "SBOM.cdx.json", sbom, args.out)
+        except CollectError as exc:
+            print(f"cannot collect: {exc}", file=sys.stderr)
+            return 1
+        print(f"{len(sbom['components'])} components -> {target}")
+        return 0
 
     problems = preflight(args.image, args.out)
     if problems:
@@ -391,16 +576,15 @@ def main(argv: list[str] | None = None) -> int:
         args.out.mkdir(parents=True, exist_ok=True)
         fetched = fetch_sources(args.image, sources, args.out, args.snapshot)
         manifest = build_manifest(args.image, packages, fetched, args.snapshot)
+        target = _write_json(args.out / "SOURCES.json", manifest, args.out)
 
-        # Written through a temporary file in the same directory so an
-        # interrupted run never leaves a manifest that parses but undercounts.
-        target = args.out / "SOURCES.json"
-        with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", dir=args.out, delete=False) as handle:
-            json.dump(manifest, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            temporary = pathlib.Path(handle.name)
-        temporary.replace(target)
+        # The bill of materials rides along with the source offer rather than
+        # being a separate errand, because the two answer one question between
+        # them: what is in this image, and where did it come from. Published
+        # together or a reader has half an answer.
+        sbom = build_sbom(args.image, packages, venv_packages(args.image),
+                          image_digest(args.image))
+        _write_json(args.out / "SBOM.cdx.json", sbom, args.out)
     except CollectError as exc:
         print(f"cannot collect: {exc}", file=sys.stderr)
         return 1
