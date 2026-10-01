@@ -14,7 +14,7 @@ import json
 import numpy as np
 import pytest
 
-from analyse_panel import arm_of, cover_id, load, main, roc_auc
+from analyse_panel import ALPHA, arm_of, cover_id, load, main, roc_auc, verdict_for
 
 
 def write(tmp_path, rows):
@@ -131,3 +131,54 @@ class TestEndToEnd:
             assert det in out
         # A three sigma separation is real evidence and must not read as nothing.
         assert "informative" in out
+
+
+# --------------------------------------------------------------- verdicts
+
+
+@pytest.mark.parametrize(
+    "p_value,cllr,expected",
+    [
+        (0.001, 0.5, "informative"),
+        (0.049, 0.5, "informative"),
+        (0.001, 0.95, "detectable, not useful"),
+        (0.050, 0.5, "no evidential value"),
+        (0.500, 0.5, "no evidential value"),
+    ],
+)
+def test_the_three_verdicts(p_value, cllr, expected):
+    assert verdict_for(p_value, cllr, useful=0.9) == expected
+
+
+def test_a_cell_only_separates_strictly_below_alpha():
+    """ALPHA itself is not significant, so the boundary cannot drift."""
+    assert verdict_for(ALPHA, 0.1, useful=0.9) == "no evidential value"
+    assert verdict_for(ALPHA - 1e-12, 0.1, useful=0.9) == "informative"
+
+
+def test_usefulness_is_a_strict_threshold_too():
+    assert verdict_for(0.01, 0.9, useful=0.9) == "detectable, not useful"
+    assert verdict_for(0.01, 0.9 - 1e-12, useful=0.9) == "informative"
+
+
+@pytest.mark.parametrize("p_value", [0.951, 0.96, 0.9804, 0.99, 1.0])
+def test_the_upper_tail_never_earns_a_verdict_of_its_own(p_value):
+    """The defect this guards, in one assertion.
+
+    A per-cell p in the upper tail used to print "worse than its null". Over
+    a 45 cell panel 2.25 cells clear 0.95 by chance; the run that prompted
+    the removal carried one, fewer than chance predicts, on a cell whose AUC
+    was 0.530 and so pointing the right way. Nothing above ALPHA may say more
+    than "no evidential value".
+    """
+    assert verdict_for(p_value, 1.001, useful=0.9) == "no evidential value"
+
+
+def test_no_verdict_string_claims_the_system_is_worse_than_nothing():
+    seen = {
+        verdict_for(p, c, useful=0.9)
+        for p in (0.0, 0.01, 0.05, 0.5, 0.95, 0.99, 1.0)
+        for c in (0.0, 0.5, 0.9, 1.0, 1.5)
+    }
+    assert seen == {"informative", "detectable, not useful", "no evidential value"}
+    assert not any("worse" in v for v in seen)

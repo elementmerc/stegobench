@@ -93,6 +93,43 @@ def roc_auc(payload: np.ndarray, clean: np.ndarray) -> float:
     return float((ranks[:n_p].sum() - n_p * (n_p + 1) / 2) / (n_p * len(clean)))
 
 
+#: Significance for "this cell separates from its own measured null".
+ALPHA = 0.05
+
+
+def verdict_for(p_value: float, cllr: float, useful: float) -> str:
+    """One cell's verdict, from its permutation p and its cost.
+
+    There is deliberately no "worse than its null" verdict, and there was one
+    until it was measured. A per-cell p in the upper tail cannot support that
+    claim, for four reasons each sufficient on its own:
+
+    - **No multiplicity control.** Over a 45 cell panel, 2.25 cells clear
+      p > 0.95 by chance. The run that prompted this carried exactly one,
+      which is fewer than chance predicts.
+    - **The threshold sat at the resolution ceiling.** With 50 permutations
+      only 0.9608, 0.9804 and 1.0 exceed 0.95, so the verdict fired on three
+      of the 51 attainable values.
+    - **It contradicted the discrimination beside it.** The one cell that ever
+      triggered it had AUC 0.530, pointing the right way, while the column
+      next to it called the system worse than useless.
+    - **The upper tail is not where "worse" lives.** A detector genuinely
+      pointing the wrong way shows up as AUC below 0.5 across cells, which is
+      a statement about sign and is tested at the cover, not per cell.
+
+    The p value is printed either way, so a reader who wants the tail has it.
+    What they no longer get is a verdict the data cannot carry.
+    """
+    if p_value < ALPHA:
+        if cllr < useful:
+            return "informative"
+        # Distinguishable from the null and still worth nothing to an
+        # examiner. Saying "informative" here would be this module committing
+        # the overstatement it exists to prevent.
+        return "detectable, not useful"
+    return "no evidential value"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("panel", type=pathlib.Path)
@@ -184,17 +221,7 @@ def main(argv=None):
             # than the number of permutations can support.
             p_value = float((1 + (null <= mean_cllr).sum()) / (1 + len(null)))
 
-            if p_value < 0.05 and mean_cllr < args.useful:
-                verdict = "informative"
-            elif p_value < 0.05:
-                # Distinguishable from the null and still worth nothing to an
-                # examiner. Saying "informative" here would be this module
-                # committing the overstatement it exists to prevent.
-                verdict = "detectable, not useful"
-            elif p_value > 0.95:
-                verdict = "worse than its null"
-            else:
-                verdict = "no evidential value"
+            verdict = verdict_for(p_value, mean_cllr, args.useful)
 
             print(
                 f"{arm:<20}{det:<14}{len(ids):>7}"
