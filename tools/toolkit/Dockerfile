@@ -1,9 +1,31 @@
 # The default toolkit image: core + tools tier (operator decision D3,
 # 2026-09-21). Carries steghide, outguess, openstego, stegosuite, zsteg,
-# stegexpose and hstego, everything measured at 118 MB to 1.41 GB, so a user
-# who wants to run steghide is not made to download a deep learning stack
-# first. See ../IMAGES.md for how each of these numbers was measured and
-# ./README.md for how to add Aletheia on top once you need it.
+# hstego and stegcore, everything measured at 9 MB to 1.41 GB, so a user who
+# wants to run steghide is not made to download a deep learning stack first.
+# See ../IMAGES.md for how each of these numbers was measured and ./README.md
+# for how to add Aletheia on top once you need it.
+#
+# STEGEXPOSE IS NOT HERE, AND IT USED TO BE.
+#
+# Its upstream repository grants no licence: no LICENSE file, no COPYING file
+# and no licence section in its README, checked inside the pinned image on
+# 2026-09-30. Archiving a public repository does not grant one either, so the
+# default under copyright is that none is given and we may not redistribute
+# it. Running it locally is unaffected and its registry entry stays, now
+# recording `licence = "none-granted"` rather than the GPL-3.0 it used to
+# claim with nothing behind it. Operator decision, 2026-10-01: dropped from
+# the default image out of respect for an author who has stopped maintaining
+# it, and available on demand like every other tool outside this image.
+#
+# STEGCORE IS HERE, AND IT WAS ALWAYS MEANT TO BE.
+#
+# Its registry entry has said so since it was written: "Bundled without
+# question: a binary this size is free against an image measured in
+# hundreds." The decision was recorded there and never reached this file, so
+# the image that was supposed to carry it never mentioned it. Dropping
+# StegExpose is what made the omission matter: it left this image with one
+# detector, and that one has never successfully run under a sandbox that
+# denies it a writable /tmp.
 #
 # UNBUILT AND UNTESTED. Authored from the seven per-tool Dockerfiles in this
 # repository, which build and run individually; this file has not itself been
@@ -40,6 +62,30 @@
 # base layers; this shares all of them).
 
 ARG DEBIAN_DIGEST=debian@sha256:520c7157b4b1c3c46fa56bac0e748ea21d60956c0512b300e3b16d8757f68e2d
+
+# ---------------------------------------------------------------------------
+# Stage 0: Stegcore's published image, used only as a source to copy from.
+# ---------------------------------------------------------------------------
+# STEGCORE, COPIED OUT OF ITS OWN PUBLISHED IMAGE RATHER THAN BUILT HERE.
+#
+# Three routes were examined on 2026-10-01 and only this one yields bytes a
+# reader can obtain:
+#
+#   - Building from source here would produce a binary whose hash pins bytes
+#     nobody else has, inside an image we hand to other people. That is the
+#     defect the `pinned_by` wording was corrected for in `3ca0465`, one level
+#     down, and it would be ours this time rather than inherited.
+#   - The published .deb carries `usr/bin/stegcore-gui` and nothing else: the
+#     Tauri desktop app, 15.7 MB, no command line tool. Verified by unpacking
+#     the v4.1.0 asset whose sha256 matches its published checksum.
+#   - This image is built by Stegcore's own release pipeline, from
+#     `cargo build --release -p stegcore-cli`, and is the ONLY published
+#     artefact that contains the command line binary at all.
+#
+# Pinned by digest, never by tag, the same rule every other base here follows.
+# `latest`, `4.1` and `4.1.0` all pointed at this digest when it was recorded.
+ARG STEGCORE_DIGEST=ghcr.io/the-malware-files/stegcore@sha256:14b7a78ad9c0d92d0ac1db0bab9df84d1f24ce3e48da735566898900e4601046
+FROM ${STEGCORE_DIGEST} AS stegcore-source
 
 # ---------------------------------------------------------------------------
 # Stage 1: build hstego's private libjpeg 9e and its Python virtual
@@ -88,14 +134,13 @@ RUN python3 -m venv /opt/hstego-venv \
 FROM ${DEBIAN_DIGEST}
 
 LABEL org.opencontainers.image.title="stegobench toolkit" \
-      org.opencontainers.image.description="steghide, outguess, openstego, stegosuite, zsteg, stegexpose, hstego in one image" \
+      org.opencontainers.image.description="steghide, outguess, openstego, stegosuite, zsteg, hstego, stegcore in one image" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
 # git and curl are build-time only: git clones StegExpose's source (it ships
 # as source, not a release jar) and curl fetches OpenStego's .deb. Both are
 # purged after use, matching the pattern the per-tool Dockerfiles already use
 # for the same reason (see tools/stegexpose/Dockerfile, tools/zsteg/Dockerfile).
-ARG STEGEXPOSE_REF=master
 ARG OPENSTEGO_VERSION=0.8.6
 ARG ZSTEG_VERSION=0.2.13
 
@@ -103,8 +148,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         # the three tools that are plain Debian packages
         steghide outguess stegosuite \
-        # a headless JRE for openstego and StegExpose, both Java
-        openjdk-17-jre-headless \
+        # A headless JRE for openstego, which is Java.
+        #
+        # 21 RATHER THAN THE 17 THE STANDALONE IMAGE RUNS, and that is a real
+        # difference rather than a tidy-up. `tools/openstego/Dockerfile` is
+        # built on Eclipse Temurin and reports `Temurin-17.0.20+8`; this image
+        # is on Debian trixie, which offers openjdk 21 and 25 and no 17 at
+        # all, so staying on 17 would mean a second base image for one tool
+        # and the whole point of this file is one base. 21 is the current LTS
+        # and the smaller step of the two.
+        #
+        # A JVM major version is not a cosmetic choice for a tool somebody
+        # measures with, so openstego's embed and extract round trip is run
+        # against this image rather than assumed to still work.
+        openjdk-21-jre-headless \
         # zsteg is pure Ruby; `file` is a runtime dependency (zsteg shells
         # out to libmagic to identify the carrier, per tools/zsteg/Dockerfile)
         ruby file \
@@ -114,9 +171,15 @@ RUN apt-get update \
         # manylinux wheel bundles itself
         libgomp1 \
         python3 \
+        # hstego's entry point opens with `from PIL import Image, ImageTk`
+        # before it parses an argument, so tkinter is a hard import on the
+        # command line path and not only in whatever GUI it has. Without it
+        # every invocation, `--help` included, ends in a ModuleNotFoundError.
+        # The standalone image gets this from `tk` in its builder; the venv
+        # copied in here brings Pillow but not the interpreter's own tkinter,
+        # which is a system package.
+        python3-tk \
     && gem install zsteg -v "${ZSTEG_VERSION}" --no-document \
-    && git clone https://github.com/b3dk7/StegExpose /opt/stegexpose \
-    && (cd /opt/stegexpose && git checkout "${STEGEXPOSE_REF}") \
     && curl -fsSL -o /tmp/openstego.deb \
         "https://github.com/syvaidya/openstego/releases/download/openstego-${OPENSTEGO_VERSION}/openstego_${OPENSTEGO_VERSION}-1_all.deb" \
     && apt-get install -y --no-install-recommends /tmp/openstego.deb \
@@ -124,6 +187,11 @@ RUN apt-get update \
     && apt-get purge -y git curl build-essential \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+
+# Stegcore's command line binary, out of its own published image. 8.6 MB
+# against an image measured in gigabytes, and the reasoning for taking it
+# from there rather than building it is at the stage declaration above.
+COPY --from=stegcore-source /usr/local/bin/stegcore /usr/local/bin/stegcore
 
 # hstego's private libjpeg and its venv, from the builder stage above. Built
 # against the identical Debian digest, so the shared libraries match.

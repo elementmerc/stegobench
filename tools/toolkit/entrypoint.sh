@@ -11,12 +11,12 @@
 # replaces is that you cannot tell whether it is alive without trying it.
 set -eu
 
-TOOLS="steghide outguess openstego stegosuite zsteg stegexpose hstego"
+TOOLS="steghide outguess openstego stegosuite zsteg hstego stegcore"
 
 banner() {
     echo "stegobench toolkit  ·  built ${STEGOBENCH_BUILD_DATE:-unknown}  ·  ${STEGOBENCH_VCS_REF:-unknown}  ·  7 tools" >&2
     echo >&2
-    echo "  steghide, outguess, openstego, stegosuite, zsteg, stegexpose, hstego" >&2
+    echo "  steghide, outguess, openstego, stegosuite, zsteg, hstego, stegcore" >&2
     echo "  each runs as: docker run stegobench/toolkit <tool> [args...]" >&2
     echo "  stegobench doctor    would check everything still works (not yet wired here)" >&2
 }
@@ -30,11 +30,8 @@ tool="$1"
 shift
 
 case "$tool" in
-    steghide|outguess|openstego|stegosuite|zsteg)
+    steghide|outguess|openstego|stegosuite|zsteg|stegcore)
         exec "$tool" "$@"
-        ;;
-    stegexpose)
-        exec java -jar /opt/stegexpose/StegExpose.jar "$@"
         ;;
     hstego)
         exec /opt/hstego-venv/bin/hstego.py "$@"
