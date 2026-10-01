@@ -330,8 +330,12 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
         // detectors, a thirteen tool total reads as the cost of the seven.
         let f = stegobench_core::registry::Registry::footprint_of(wanted.iter().copied());
         human.push_str(&format!(
-            "\n\n{} tools in {} images. Up to {} MB bundled, {:.1} GB more on \
-             demand.",
+            // "small enough to bundle", not "in the image": the flag behind
+            // this sum is derived from size, and a tool can be small and still
+            // be out of the image for a reason size knows nothing about.
+            // Reading it as the image's size over-counts.
+            "\n\n{} tools in {} images. {} MB small enough to bundle, {:.1} GB \
+             larger and fetched on demand.",
             f.tools,
             f.unique_images,
             f.bundled_mb,

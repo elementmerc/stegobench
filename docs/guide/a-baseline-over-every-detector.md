@@ -82,7 +82,7 @@ resumed from the first one's answers and reported them as its own.
 
 | You typed | Documents go to | Records go to |
 |---|---|---|
-| One detector, no `--out` | stdout | `<corpus>.<detector>.records.jsonl` |
+| One detector, no `--out` | `<corpus>.results/<detector>.json` | the same directory |
 | One detector, `--out r.json` | `r.json` | the same |
 | Several detectors, no `--out` | `<corpus>.results/` | the same directory |
 | Several detectors, `--out DIR` | `DIR/<detector>.json` | `DIR/<detector>.records.jsonl` |

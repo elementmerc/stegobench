@@ -59,9 +59,10 @@ trained on the corpus it was scored against, and `self_reported`).
 ### About the seed
 
 `provenance.seed` is the submitter's declaration of the seed their own plugin
-used. The harness has no `--seed` flag and will not grow one: nothing in
-scoring is random, so a seed the harness invented and nothing consumed would
-make a document look more controlled than the run was. The randomness, where
+used. `stegobench score --seed <N>` records that declaration and nothing more:
+the harness does not consume it, because nothing in scoring is random, and a
+seed the harness invented and nothing consumed would make a document look more
+controlled than the run was. The randomness, where
 there is any, belongs to the detector: a learned model's initialisation, a
 sampling step, a randomised feature. Whoever owns that is the only party who
 can say what it was set to.

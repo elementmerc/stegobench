@@ -36,13 +36,23 @@ reasons, and `describe` prints what was read and when.
 
 ## Fetching one
 
-**Nothing is fetchable yet.** No registered corpus declares a download route,
-so `stegobench fetch` refuses whichever id you give it: exit code 7 for ALASKA2
-and BOSSbase, whose terms say no, and exit code 3 for the rest, which have
-nothing on file to fetch. The message names the reason and points at
-`describe`. The rest of this section describes what the command does once a
-route is on file. Until then, use the starter corpus above, obtain a registered
-corpus by the route `describe` prints, or build your own.
+**One corpus is fetchable: the starter.** It needs no download route and no
+network, because it is compiled into the binary:
+
+```sh
+stegobench fetch stegobench-starter --tier nano --out ./starter
+```
+
+Six covers and twelve stego images. It's a demonstration, and a number from it
+must not be quoted.
+
+**Nothing else is fetchable yet.** No other registered corpus declares a
+download route, so `stegobench fetch` refuses whichever id you give it: exit
+code 7 for ALASKA2 and BOSSbase, whose terms say no, and exit code 3 for the
+rest, which have nothing on file to fetch. The message names the reason and
+points at `describe`. The rest of this section describes what the command does
+once a route is on file. Until then, obtain a registered corpus by the route
+`describe` prints, or build your own.
 
 ```sh
 stegobench fetch <corpus id> --tier <tier>

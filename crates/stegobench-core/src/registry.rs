@@ -179,7 +179,18 @@ pub struct Image {
     /// whether a tool is bundled, and what the pre-flight checks disk against.
     #[serde(default)]
     pub size_mb: Option<u64>,
-    /// Whether the tool ships inside the default toolkit image.
+    /// Whether the tool is small enough to bundle, which is NOT the same as
+    /// whether it ships in the default toolkit image.
+    ///
+    /// It is derived from [`size_mb`] against [`BUNDLE_THRESHOLD_MB`] and
+    /// refused when the two disagree, so it answers "could this travel with
+    /// the image" rather than "does it". StegExpose is the case that
+    /// separates them: 512 MB, so `bundled` is true and has to be, and it was
+    /// dropped from the image on 2026-10-01 for a licence reason size knows
+    /// nothing about.
+    ///
+    /// Whoever reads this to mean image membership gets an over-count, which
+    /// is why the sum built from it is reported as an upper bound.
     ///
     /// Measured 2026-09-18, the whole set is 22.8 GB, and most of that is two
     /// tools: Aletheia is 8.3 GB and its rich-model variant 9.1 GB, because

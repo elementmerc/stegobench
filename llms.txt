@@ -42,6 +42,14 @@ progress still reaches a terminal.
   results from different corpora in one table, sections `custom` runs off
   under a sentence saying what they can be compared with, and never orders
   by score.
+- `stegobench metrics [FILE] [--at RATE]...`: ROC AUC, detection rate at a
+  false-alarm budget, and confusion counts, from a JSON file of scores and
+  labels or from standard input. Budgets default to 0.01, 0.05 and 0.10.
+  This is the scoring maths on its own, for numbers produced elsewhere.
+- `stegobench embed --embedder NAME --cover FILE --payload FILE --out FILE`:
+  hide a payload with a registered embedder. By default it extracts the
+  payload again afterwards and compares, because that round trip is the only
+  evidence the embedder did what it said.
 - `stegobench list <detectors|embedders|corpora|all>`: everything a registry
   can run, plus the datasets it knows about, read live from the registry, so
   it cannot go stale. The output names which registry answered.
@@ -82,11 +90,15 @@ progress still reaches a terminal.
   starts its own container or process. `--keep-raw` keeps what the detector
   printed for every image in `<records>.raw.jsonl`, rather than only for the
   ones no answer could be read from, which is what an adapter is debugged on.
-  It reads an unpacked corpus directory, and marks every such run `custom`,
-  because a directory carries no digest anybody can check. A tiny corpus
-  ships in the clone at `corpora/starter` (six covers, twelve stego images)
-  so a fresh install has something to score; it is a demonstration and a
-  number from it must not be quoted.
+  It reads an unpacked corpus directory. Such a run is `custom` unless
+  `--corpus-id` names a registered corpus whose entry declares a records
+  digest AND the directory matches it, in which case it is `named`. Other
+  flags: `--split`, `--trained-on`, `--seed`, `--limit`, `--timeout`,
+  `--jobs`, `--records`, `--keep-raw`, `--fixtures`. A tiny corpus is
+  compiled into the binary; `stegobench fetch stegobench-starter --tier nano`
+  writes it out (six covers, twelve stego images) so a fresh install has
+  something to score. It is a demonstration and a number from it must not be
+  quoted.
 - `stegobench plan <command>`: what that command would cost, without running
   it. Takes the command as you would type it, so
   `stegobench plan score --corpus D --detector N`. Reports the item count, the

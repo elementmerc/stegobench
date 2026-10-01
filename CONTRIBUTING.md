@@ -5,13 +5,12 @@ this repository: how to add a tool, how to register a corpus, how to run the
 tests, and which branch your work belongs on. It doesn't invent process that
 nobody has followed yet.
 
-Read the README's "What's here today, honestly" section first, and treat it as
-the current statement of what works. The short version: every command in the tree is
-built and tested. `score` reads an unpacked corpus directory rather than a
-packed tier, and marks such runs `custom`, and both limits are stated in the
-README rather than left to be discovered. The commands were named before they
-were written so that the vocabulary would settle before anything started
-depending on it.
+Read the README first, and treat it as the current statement of what works.
+The short version: every command in the tree is built and tested. The one
+limit worth knowing before you start is that `score` reads an unpacked corpus
+directory rather than a packed tier. The commands were named before they were
+written so that the vocabulary would settle before anything started depending
+on it.
 
 ## Building it
 
@@ -102,11 +101,12 @@ different: hide a known payload, extract it, and compare the bytes. See
 `plugins/registry/embedders/steghide.toml` for both tables together.
 
 **The entry describes cost honestly if it declares cost at all.** `[cost]`
-records seconds per image, peak memory and cores per worker. Nothing scores a
-run against those numbers yet, which is exactly why a guess there is easy to
-get away with and expensive later: the estimate a long run gets planned
-against will read them. Leave the table out rather than filling it with
-figures you haven't measured.
+records seconds per image, peak memory and cores per worker. `stegobench plan`
+reads them to estimate a run before somebody commits days to it, so a guess
+here becomes an estimate that lies about the only thing it's for. Leave the
+table out rather than filling it with figures you haven't measured: `plan`
+says the time is unknown where a tool declares no rate, which is the honest
+answer and costs nothing.
 
 Run `stegobench help plugins` for the full reasoning behind the registry
 design, and `stegobench describe <name>` to see how your entry reads back.

@@ -17,12 +17,28 @@ number a stranger can reproduce.
 
 ## What is in the box
 
+**The tool you install is `stegobench`, and for scoring detectors it's the
+only one you need.**
+
+| Piece | What it does |
+|---|---|
+| `score` | Runs a registered detector over every image in a labelled corpus and writes a `result-v1` document naming the exact bytes it measured |
+| `doctor` | Says whether this machine can run each registered tool, and makes each one flag a known planted signal and clear a known clean fixture |
+| `plan` | What a run would cost, from the command you'd actually type |
+| `report` | Renders results as a table with the conditions in every row, never ordered by score |
+| `metrics` | AUC, detection at a fixed false-alarm rate, and confusion counts, on numbers from anywhere |
+| `embed` | Drives a registered embedder, so there's something for a detector to be measured against |
+| `fetch`, `list`, `describe` | Get a corpus, and see what's registered |
+
+There's a **second, separate program** in this repository, `pentimento`,
+written in Python. You need it only if you're building a corpus from scratch,
+which most people never do:
+
 | Piece | What it does |
 |---|---|
 | Cover fetcher | Builds a cover corpus from Wikimedia Commons, with provenance per file |
 | Deduplicator | Perceptual-hash deduplication, with a corroboration rule for low-texture images |
 | Arm builders | HUGO, WOW, S-UNIWARD, HILL, MiPOD, J-UNIWARD, UERD, steghide, outguess, plus an appended-data control |
-| Scorers | AUC, detection at a fixed false-alarm rate, and verdict rate, over identical bytes |
 | Rich-model classifier | A reference detector, for what the state of the art reaches |
 | Packers | WebDataset shards, reproducibly, with each cover's licence carried onto every derivative |
 
