@@ -6,7 +6,7 @@ to run it. This is everything a reader needs once they are actually using it.
 ## Why the alias looks like that
 
 ```sh
-alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
+alias toolkit='docker run --rm $([ -t 0 ] && printf -- "-it") --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
 ```
 
 Each part is there because leaving it out broke something a real person hit.
@@ -15,7 +15,7 @@ Each part is there because leaving it out broke something a real person hit.
 |---|---|
 | `--network=none` | None of these tools needs the network. One that suddenly wants it should fail rather than reach out |
 | `--user` | Without it everything the tools write is owned by root, mode 600, and you cannot delete your own output on a shared machine |
-| `-it` | The guided wizard needs a keyboard. Without it, it exits reporting that you cancelled when you did not. `steghide` also prompts before overwriting and fails with "could not get terminal attributes" when nothing is listening |
+| `$([ -t 0 ] && printf -- "-it")` | Adds `-it` only when you are actually at a keyboard. Interactive tools need it: the guided wizard exits reporting that you cancelled when you did not, and `steghide` prompts before overwriting and fails with "could not get terminal attributes". But passing `-it` unconditionally breaks every scripted or piped run with `the input device is not a TTY`, so the alias asks rather than guessing |
 | `-v "$PWD:/data"` | The tools see your current directory as `/data`. Paths you pass them are paths inside the container |
 | the tag | Must match the tag you built. Omit it and docker looks for a `:latest` that may not exist, and reports `pull access denied`, which reads like a login problem and is not one |
 
@@ -72,6 +72,54 @@ If you need a number you can defend rather than a verdict, that is what the
 `stegobench` tool in this repository is for: it measures detectors against
 images whose answers are already known, and reports how often each was right.
 
+## Using hstego, which the research literature cares about
+
+`hstego` puts the payload where the picture is busiest, which is what current
+research benchmarks against rather than plain LSB. Four facts about it are not
+obvious from its help, and a researcher had to recover every one of them by
+experiment before they could quote a number.
+
+**There is no payload rate flag.** The rate is set by how big your message
+file is. Nothing else controls it.
+
+**The formula:**
+
+```
+bits per pixel = (message_bytes + 71) * 8 / (width * height * channels)
+```
+
+The 71 bytes are flat tool overhead with no block padding, so a payload rate
+you quote must say whether it counts your message or the embedded blob.
+
+**Capacity is capped at about 0.05 bits per pixel per channel.** Measured at
+0.0503 bpp by fitting capacity against pixel count across five image sizes.
+Ask a specific cover with:
+
+```sh
+toolkit hstego capacity /data/photo.png
+```
+
+**This ceiling is the most important fact about the tool if you are comparing
+with published work.** Papers using HILL, S-UNIWARD or J-UNIWARD typically run
+0.05 to 0.4 bits per pixel. This implementation reaches only the very bottom
+of that range and there is no flag to raise it, so most direct comparisons are
+not possible.
+
+**Embedding is not deterministic.** The same cover, message and password run
+twice produce different files. Archive the stego images themselves; a seed and
+a command line will not reproduce the set.
+
+**The adaptivity is real**, and was measured rather than assumed. On a cover
+built as a flat half and a noisy half, embedding changed **zero pixels in the
+flat half and 2,224 in the noisy half**. Every change is plus or minus one,
+at 7.5 to 7.9 bits per change, which is what a syndrome-trellis coder against
+a distortion function looks like.
+
+**What we cannot tell you.** The software names no scheme, so we cannot say
+which distortion function it implements; `toolkit versions` reports the
+package version to cite instead. We also cannot tell you whether the JPEG path
+is side-informed, and that distinction matters for comparability.
+
 ## Things that look like faults and are not
 
 - **`openstego` prints nothing at all on a successful embed.** Check with
@@ -82,6 +130,11 @@ images whose answers are already known, and reports how often each was right.
   `-it` it cannot ask, and fails with "could not get terminal attributes".
 - **`stegcore wizard` needs a real terminal.** Over ssh without `-it` it can
   print nothing at all and appear to hang.
+- **`hstego` is silent on a successful embed**, like openstego.
+- **`hstego` prints warnings and debug lines on stdout**, including an ImageIO
+  `DeprecationWarning` on PNG work and `coeffs shape:` / `precover shape:` /
+  `coeffs_estim shape:` on JPEG work. Anything parsing stdout should expect
+  them.
 - **The banner's commit field can read `not-a-git-checkout`.** That means the
   image was built outside a clone, which is honest rather than broken.
 
@@ -102,8 +155,11 @@ The `openstego` round trip was the one that mattered: it predates Java 21 by
 years, and Debian trixie has no `openjdk-17`, so the image runs it on 21. That
 it works is a measurement rather than an assumption.
 
-**Not checked.** `outguess`, `stegosuite` and `hstego` have not had a file put
-through them here. They install and are on the PATH.
+| `hstego` round trip, greyscale PNG, RGB PNG and JPEG | payload recovered byte-identical on all three |
+| `hstego` adaptivity | zero changes in a flat region against 2,224 in a noisy one |
+
+**Not checked.** `outguess` and `stegosuite` have not had a file put through
+them here. They install and are on the PATH.
 
 **Outstanding.** Three `ARG *_REF` build arguments still track `master`, so two
 builds a week apart can differ; pin them before any published benchmark. No

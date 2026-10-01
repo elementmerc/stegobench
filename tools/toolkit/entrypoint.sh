@@ -27,6 +27,7 @@ banner() {
     echo "  each runs as: docker run --rm -v \"\$PWD:/data\" ${STEGOBENCH_IMAGE:-<this image>} <tool> [args...]" >&2
     echo "  first time:   stegcore analyse /data/<file>     does anything look hidden" >&2
     echo "  any tool:     <tool> --help" >&2
+    echo "  versions      what version of each tool this image carries" >&2
 }
 
 if [ "$#" -eq 0 ]; then
@@ -42,7 +43,36 @@ case "$tool" in
         exec "$tool" "$@"
         ;;
     hstego)
+        # Called with nothing, hstego opens a Tk window, fails because a
+        # container has no display, prints a traceback, AND EXITS 0. A crash
+        # reported as success is the one failure a script cannot defend
+        # against, so the no-argument case is answered here instead.
+        if [ "$#" -eq 0 ]; then
+            /opt/hstego-venv/bin/hstego.py --help 2>/dev/null >&2 || true
+            echo >&2
+            echo "  hstego has no payload-rate flag: the rate is set by how big" >&2
+            echo "  your message file is, and capacity is capped near 0.05 bits" >&2
+            echo "  per pixel per channel. 'hstego capacity <image>' prints the" >&2
+            echo "  ceiling in bytes for a given cover." >&2
+            exit 2
+        fi
         exec /opt/hstego-venv/bin/hstego.py "$@"
+        ;;
+    versions)
+        # Nothing in the image named a version for any tool, so somebody who
+        # needed one to cite had to override the entrypoint and run pip. That
+        # is not a thing a user should have to invent.
+        steghide --version 2>&1 | head -1
+        outguess -h 2>&1 | grep -ai "^outguess" | head -1
+        openstego --help 2>&1 | grep -ai "^openstego v" | head -1
+        stegosuite --version 2>&1 | head -1
+        # zsteg's own --version answers "version unknown", so ask the gem,
+        # which is the thing that was actually installed and pinned.
+        gem list zsteg 2>/dev/null | grep -a "^zsteg" | head -1
+        stegcore --version 2>&1 | head -1
+        /opt/hstego-venv/bin/pip show hstego 2>/dev/null \
+            | awk '/^Name:|^Version:/ {printf "%s ", $2} END {print ""}'
+        exit 0
         ;;
     --help|-h|help)
         banner

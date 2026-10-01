@@ -18,7 +18,7 @@ tools/toolkit/build.sh stegobench/toolkit:latest
 Set this up once:
 
 ```sh
-alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
+alias toolkit='docker run --rm $([ -t 0 ] && printf -- "-it") --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
 ```
 
 The tag here must be the tag you built. If you built it as something else,
