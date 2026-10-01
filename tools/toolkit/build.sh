@@ -43,6 +43,7 @@ echo "building $TAG  ·  $BUILD_DATE  ·  $VCS_REF"
 docker build \
     --build-arg "STEGOBENCH_BUILD_DATE=${BUILD_DATE}" \
     --build-arg "STEGOBENCH_VCS_REF=${VCS_REF}" \
+    --build-arg "STEGOBENCH_IMAGE=${TAG}" \
     -t "$TAG" \
     "$HERE"
 

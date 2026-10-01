@@ -246,8 +246,13 @@ ENV NUMBA_CACHE_DIR=/tmp/numba-cache \
 #                --build-arg STEGOBENCH_VCS_REF="$(git rev-parse --short HEAD)" .
 ARG STEGOBENCH_BUILD_DATE=unknown
 ARG STEGOBENCH_VCS_REF=unknown
+# The tag this image was built as, so the banner can tell a reader how to run
+# it rather than printing a name that may not resolve. A hardcoded name sent a
+# reader to a "pull access denied" error that reads as a login problem.
+ARG STEGOBENCH_IMAGE=
 ENV STEGOBENCH_BUILD_DATE=${STEGOBENCH_BUILD_DATE} \
-    STEGOBENCH_VCS_REF=${STEGOBENCH_VCS_REF}
+    STEGOBENCH_VCS_REF=${STEGOBENCH_VCS_REF} \
+    STEGOBENCH_IMAGE=${STEGOBENCH_IMAGE}
 LABEL org.opencontainers.image.created=${STEGOBENCH_BUILD_DATE} \
       org.opencontainers.image.revision=${STEGOBENCH_VCS_REF}
 

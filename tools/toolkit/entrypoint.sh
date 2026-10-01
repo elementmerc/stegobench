@@ -19,8 +19,13 @@ banner() {
     echo "  hide a file:  steghide  outguess  openstego  stegosuite  hstego  stegcore" >&2
     echo "  look for one: zsteg  stegcore" >&2
     echo >&2
-    echo "  each runs as: docker run stegobench/toolkit <tool> [args...]" >&2
-    echo "  try first:    stegcore wizard        (needs docker run -it)" >&2
+    # The image's own name, not a hardcoded one. A fixed "stegobench/toolkit"
+    # here sent a reader to `docker run stegobench/toolkit zsteg --help`, which
+    # answers "pull access denied ... may require 'docker login'" whenever the
+    # image is tagged anything else, and that reads as a credentials problem
+    # rather than a wrong name. Three names for one image is two too many.
+    echo "  each runs as: docker run --rm -v \"\$PWD:/data\" ${STEGOBENCH_IMAGE:-<this image>} <tool> [args...]" >&2
+    echo "  first time:   stegcore analyse /data/<file>     does anything look hidden" >&2
     echo "  any tool:     <tool> --help" >&2
 }
 

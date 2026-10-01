@@ -84,14 +84,35 @@ verdict. The scores are five different statistical tests, and they disagree
 with each other often. A word like "Suspicious" on a photo you have no reason
 to doubt usually means the photo is noisy, not that something is hidden.
 
+**Treat "Clean" as meaning nothing.** This was measured, not assumed. Hide a
+file with `steghide`, then ask `stegcore analyse` about it a minute later, and
+it reports `✓ Clean`. A green tick means "I found nothing I know how to look
+for", not "there is nothing here".
+
+**What it is actually good at is naming the tool.** When it does find
+something it prints a line like `Signature: OpenStego (exact signature)`, and
+that is the single most useful thing any detector here prints, because it tells
+you which tool to use to get the payload out. In a side-by-side on a clean file
+and a stego file, the five statistical scores were near identical
+(48/21/4/100/24 against 48/21/6/100/27) and the verdict came entirely from
+that signature line. Read the signature; treat the bars as decoration.
+
 **No detector here will reliably tell you whether a specific file has something
 in it.** A good hiding tool is designed to defeat exactly these tests, and
-mostly succeeds. If you hide a message with `stegcore` and then ask `stegcore
-analyse` about it, you should not expect it to notice. That is not a fault in
-either half; it is what the field is like.
+mostly succeeds. That is not a fault in either half; it is what the field is
+like. If you need numbers you can defend rather than a verdict, that is what
+the `stegobench` tool in this repository is for.
 
-If you need numbers you can defend rather than a verdict, that is what the
-`stegobench` tool in this repository is for.
+## Things that look like faults and are not
+
+- **`openstego` prints nothing at all on a successful embed.** Check with
+  `ls`; silence means it worked.
+- **`steghide` overwrites its own progress line**, so a successful embed can
+  read as a doubled, mangled sentence. It is cosmetic.
+- **`steghide` asks before overwriting an existing output file.** Without
+  `-it` it cannot ask, and fails with "could not get terminal attributes".
+- **`stegcore wizard` needs a real terminal.** Over ssh without `-it` it can
+  print nothing at all and appear to hang.
 
 ## Aletheia is separate
 
