@@ -39,7 +39,33 @@ tool="$1"
 shift
 
 case "$tool" in
-    steghide|outguess|openstego|stegosuite|zsteg|stegcore)
+    stegcore)
+        # THE WIZARD LEAKS A CONTAINER WHEN THERE IS NO KEYBOARD, so it is
+        # refused here before it can start.
+        #
+        # Without a terminal it blocks forever waiting on a read that can
+        # never return, printing nothing. It also ignores SIGTERM, so `timeout`
+        # and `docker stop` kill the client and leave the container running,
+        # and `--rm` never fires because --rm only reaps a container that
+        # exits. Two people hit this independently within forty minutes and
+        # left four containers running on a shared machine; neither saw any
+        # output at all, so neither had any reason to look.
+        #
+        # Refusing costs a user who meant it one flag. Not refusing costs
+        # everybody else a process that never ends.
+        if [ "${1:-}" = "wizard" ] && [ ! -t 0 ]; then
+            echo "wizard needs a keyboard, and this container does not have one." >&2
+            echo >&2
+            echo "  run it with:  docker run --rm -it ... ${STEGOBENCH_IMAGE:-<this image>} stegcore wizard" >&2
+            echo >&2
+            echo "  or skip it:   stegcore analyse  <file>          is anything hidden" >&2
+            echo "                stegcore embed    --help          hide something" >&2
+            echo "                stegcore extract  --help          get it back" >&2
+            exit 2
+        fi
+        exec stegcore "$@"
+        ;;
+    steghide|outguess|openstego|stegosuite|zsteg)
         exec "$tool" "$@"
         ;;
     hstego)
