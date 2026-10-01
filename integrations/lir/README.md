@@ -195,9 +195,9 @@ python analyse_panel.py panel.jsonl     # the LR table for a scored corpus
 python positive_control.py              # the control, needs the calibration corpus
 ```
 
-`numpy` and `scipy` only. NFI's `lir` is deliberately not a dependency: the
-next step is to check this implementation against it, and a check against a
-library you imported is not a check.
+`numpy` and `scipy` only. NFI's `lir` is deliberately not a dependency,
+because a check against a library you imported is not a check. The check
+itself has been done and is the next section.
 
 ## Cross-checked against `lir`
 
@@ -241,8 +241,10 @@ optional test dependency and nothing else.
   empirical lower and upper bound (ELUB) sets it from what the sample can
   actually support, which is the defensible version. `lir` has `add_misleading`
   and bound fields on `LLRData`; worth reading before writing our own.
-- **Bounded LRs done properly.** The current bound is a flat clip at 100. The
-  empirical lower and upper bound (ELUB) sets it from what the sample can
-  actually support, which is the defensible version.
+- **A reply to the upstream maintainer.** Issue 476 on `lir` was answered on
+  22 September 2026 with a question we have not yet answered: whether the
+  remedy belongs in a redefined `cllr_cal` rather than in `cllr_min`. That is
+  the direction this module took, so the answer exists and only the courtesy
+  of sending it is outstanding.
 - **A spatial arm in a corpus with a real pairing**, so the LR table and the
   positive control are the same corpus rather than two.
