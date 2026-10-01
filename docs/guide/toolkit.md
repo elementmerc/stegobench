@@ -6,18 +6,39 @@ to run it. This is everything a reader needs once they are actually using it.
 ## Why the alias looks like that
 
 ```sh
-alias toolkit='docker run --rm $([ -t 0 ] && printf -- "-it") --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
+alias toolkit='docker run --rm $([ -t 0 ] && printf -- "-it") --network=none --read-only --tmpfs /tmp:rw,noexec,nosuid --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit:latest'
 ```
 
-Each part is there because leaving it out broke something a real person hit.
+Each part is there because leaving it out broke something a real person hit, or
+because a platform engineer reviewing the image for a network asked for it.
 
 | Part | Why |
 |---|---|
-| `--network=none` | None of these tools needs the network. One that suddenly wants it should fail rather than reach out |
+| `--network=none` | None of these tools needs the network. One that suddenly wants it should fail rather than reach out. It is also what makes the build's own network fetches harmless: whatever they brought in cannot reach anything while you run it |
 | `--user` | Without it everything the tools write is owned by root, mode 600, and you cannot delete your own output on a shared machine |
+| `--read-only` | The tools have no reason to change the image they run from. Nothing here needs a writable root filesystem |
+| `--tmpfs /tmp:rw,noexec,nosuid` | The one writable place they do need. openstego and stegosuite run on a JVM that writes to `HOME`, which is `/tmp` here, and numba caches compiled code there. **With `--read-only` and no tmpfs, openstego fails and you can miss it**, which is the next section |
+| `--cap-drop ALL` | None of these tools needs a Linux capability. Dropping them also neutralises the stock setuid binaries Debian ships, which are the only ones in the image |
+| `--security-opt no-new-privileges` | Stops anything in the container gaining privileges it was not started with |
 | `$([ -t 0 ] && printf -- "-it")` | Adds `-it` only when you are actually at a keyboard. Interactive tools need it: the guided wizard exits reporting that you cancelled when you did not, and `steghide` prompts before overwriting and fails with "could not get terminal attributes". But passing `-it` unconditionally breaks every scripted or piped run with `the input device is not a TTY`, so the alias asks rather than guessing |
 | `-v "$PWD:/data"` | The tools see your current directory as `/data`. Paths you pass them are paths inside the container |
 | the tag | Must match the tag you built. Omit it and docker looks for a `:latest` that may not exist, and reports `pull access denied`, which reads like a login problem and is not one |
+
+**This is measured, not aspirational.** Every one of the six hiding tools was
+put through an embed and extract round trip under all of those flags together
+on 2026-10-01, and five of the six returned the payload byte for byte. The
+sixth is `outguess`, which has a problem of its own that has nothing to do with
+these flags; see "`outguess` can hand back the wrong bytes" below. So there is
+no feature you give up by running locked down, and no reason to start looser.
+
+### Running as root, if you leave `--user` off
+
+The image starts as root when you do not say otherwise, and it prints a note on
+stderr saying so. That is deliberate rather than an oversight: the image cannot
+know which user owns the directory you mount, so a fixed non-root default would
+leave the tools unable to write their own output in the ordinary case. The note
+goes away when you pass `--user`, and `STEGOBENCH_TOOLKIT_QUIET_ROOT=1`
+silences it if you are running as root on purpose.
 
 ## Reading what the detectors tell you
 
@@ -120,6 +141,44 @@ which distortion function it implements; `toolkit versions` reports the
 package version to cite instead. We also cannot tell you whether the JPEG path
 is side-informed, and that distinction matters for comparability.
 
+## `outguess` can hand back the wrong bytes and report success
+
+Hide a file with `outguess`, get it back, and the file you get can be the right
+size with a byte changed in it. Both commands exit 0. Nothing warns you.
+
+Measured on 2026-10-01: the 29 byte payload `hardened profile test payload`
+came back as `hardened profile test payloa$`, the final byte changed by a single
+bit, the same way on five runs out of five. Three other payloads of 11, 29 and
+30 bytes through the same cover and key were perfect, and so were five synthetic
+payloads from 8 to 200 bytes.
+
+**That mixture is the whole problem.** It depends on the content, so testing it
+once and seeing a clean round trip tells you nothing about the next file. It is
+not random: the payload that fails, fails every time.
+
+So if you use `outguess`, check what you extracted against a hash of what you
+hid:
+
+```sh
+sha256sum secret.txt                  # before
+toolkit outguess -k pw -d /data/secret.txt /data/cover.jpg /data/out.jpg
+toolkit outguess -k pw -r /data/out.jpg /data/back.txt
+sha256sum back.txt                    # must match
+```
+
+The exit code will not tell you. The file size will not tell you either.
+
+## `versions` tells you when it cannot answer
+
+`toolkit versions` prints one line per tool and exits 0. If it cannot get a
+version out of one of them it prints `COULD NOT DETERMINE` for that tool,
+explains the usual cause, and exits 1.
+
+It used to print six lines for seven tools and exit 0, which is worse than an
+error: a reader counts the lines they were given, not the ones they were not.
+The usual cause is a `--read-only` container with no writable `/tmp`, because
+openstego's JVM writes to `HOME`.
+
 ## One thing that will bite you
 
 **`stegosuite extract` overwrites files in your working directory and cannot
@@ -189,30 +248,68 @@ than `$?`.
 | `openstego` embed then extract, PNG | payload recovered byte-identical; stego differs from the cover |
 | `steghide` embed then extract, JPEG | payload recovered byte-identical |
 | `zsteg -a` on a PNG | runs and reports |
+| `hstego` round trip, greyscale PNG, RGB PNG and JPEG | payload recovered byte-identical on all three |
+| `hstego` adaptivity | zero changes in a flat region against 2,224 in a noisy one |
+| `outguess` round trip, JPEG | recovered byte-identical on a photograph, and **not** on every payload: see the outguess section above |
+| `stegosuite` round trip, PNG | payload recovered byte-identical |
+| A JPEG hidden inside a PNG, and inside a JPEG | both recovered byte-identical |
 | All of the above under `--user` | clean, output owned by the caller |
+| `stegcore`, `steghide`, `openstego`, `hstego`, `stegosuite` under the full locked-down profile | payload recovered byte-identical; `stegosuite` embeds and writes its carrier |
+| No vendor-added setuid binary | `find / -xdev -perm -4000 -o -perm -2000` returns the stock Debian set only |
+| Nothing phones home | every URL in the `stegcore` binary is an inert constant: XMP namespaces, a dbus spec link, two Rust crate strings and the AUP |
 
 The `openstego` round trip was the one that mattered: it predates Java 21 by
 years, and Debian trixie has no `openjdk-17`, so the image runs it on 21. That
 it works is a measurement rather than an assumption.
 
-| `hstego` round trip, greyscale PNG, RGB PNG and JPEG | payload recovered byte-identical on all three |
-| `hstego` adaptivity | zero changes in a flat region against 2,224 in a noisy one |
-
-| `outguess` round trip, JPEG | payload recovered byte-identical |
-| `stegosuite` round trip, PNG | payload recovered byte-identical |
-| A JPEG hidden inside a PNG, and inside a JPEG | both recovered byte-identical |
-
-**All six hiding tools have now had a file put through them and recovered it
-byte for byte.** Every carrier they produced still decodes as a valid image.
+**All six hiding tools have had a file put through them and recovered it byte
+for byte**, and five of the six do so under `--read-only --cap-drop ALL
+--security-opt no-new-privileges` with a tmpfs `/tmp`. Every carrier they
+produced still decodes as a valid image. The exception is not a sandbox problem:
+`outguess` returns a wrong byte for some payloads whatever flags you use.
 
 **Not checked: the detector's accuracy**, and that is the gap that matters
 most. On an ordinary photograph `stegcore analyse` flagged the clean original
 and both stego files identically. See "Neither verdict means anything on its
 own" above.
 
-**Outstanding.** Three `ARG *_REF` build arguments still track `master`, so two
-builds a week apart can differ; pin them before any published benchmark. No
-SBOM yet.
+**Pinned, as of 2026-10-01.** Every `ARG *_REF` build argument used to track a
+branch, so two builds a week apart could differ. There were five of them, not
+the three an earlier version of this paragraph claimed, and all five now name a
+commit: `tools/toolkit`, `tools/hstego`, `tools/aletheia`,
+`tools/aletheia-rich` and `tools/stegexpose`. The toolkit build also checks
+that pip resolved the commit it was asked for and stops if it did not, because
+an unchecked pin is a comment.
+
+Two of the five are honest about what was not confirmed: the `aletheia-rich`
+resources pin and the `stegexpose` pin could not be read back out of the
+already-built images, since neither retains its clone, so they name upstream's
+current head on repositories with no commits since 2024 and 2018. The other
+three were read out of the built images themselves.
+
+**The openstego `.deb` is pinned by hash.** It is the one file in the build that
+comes from a GitHub release rather than Debian's signed mirrors, and a release
+asset can be replaced without the version changing. The hash was checked against
+the already-built image, where all six files the package installs match dpkg's
+own records.
+
+**There is a bill of materials.** `collect_sources.py` writes CycloneDX 1.5
+covering all 292 components: 280 Debian packages with purls, the nine Python
+packages in hstego's virtual environment, and the five things that belong to no
+ecosystem. Those five deliberately carry no purl, because a purl claims an
+origin and the whole reason they are listed separately is that they did not come
+from the ecosystem they look like they came from. It is reproducible byte for
+byte and takes about a minute:
+
+```sh
+tools/toolkit/collect_sources.py stegobench/toolkit:latest --out sbom --sbom-only
+```
+
+**Outstanding.** An image built outside a git clone cannot name its commit;
+`build.sh` now refuses to build one rather than stamping
+`revision=not-a-git-checkout`, so pass `STEGOBENCH_VCS_REF` from a machine that
+has the clone. A published image also has no registry digest until it is
+pushed, and the bill of materials says so rather than leaving the field empty.
 
 ## Why StegExpose is not in the image
 

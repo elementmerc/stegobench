@@ -43,12 +43,22 @@ answer rather than two.
 ## Rebuilding the archive
 
 ```sh
-python3 tools/toolkit/collect_sources.py stegobench/toolkit:seven --out dist/sources
+python3 tools/toolkit/collect_sources.py <the tag you are publishing> --out dist/sources
 ```
+
+**Name the tag you are publishing, and nothing else.** This example used to name
+one tag literally, which sent a reviewer with a different tag on their machine to
+collect source for an image nobody had asked them about. Two builds of this image
+can sit on one host with two different ids, and then "the image" is ambiguous in
+exactly the place where it must not be.
 
 It reads the package list out of the image itself and fetches each source at
 the exact version installed, using the image's own apt so the versions can't
 drift. Add `--dry-run` to see what it would fetch without fetching it.
+
+It also writes `SBOM.cdx.json`, a CycloneDX bill of materials covering every
+component including the ones apt has never heard of. For just that, which needs
+no disk space and about a minute, add `--sbom-only`.
 
 It exits 0 only when every package was retrieved. If anything is missing it
 says which, and exits 1, because an offer with a hole in it is worse than no
@@ -84,4 +94,12 @@ locally doesn't trigger that. Wrapping it in one does.
 
 This describes what we do to comply. It isn't advice about what you have to do
 if you redistribute the image yourself. Read the licences; they're in
-`/usr/share/doc/<package>/copyright` inside the image, one per package.
+`/usr/share/doc/<package>/copyright` inside the image, one per package, and that
+now includes `stegcore` and `hstego`.
+
+Those two are worth a sentence, because this file told you they were there
+before they were. They're the only components that don't arrive through apt, so
+apt never wrote a copyright file for them, and the one with the most demanding
+licence in the image was ours. A reviewer checked the claim above in one command
+on 2026-10-01 and found both missing. The build now writes both and fails if it
+can't, so the claim is checked rather than repeated.
