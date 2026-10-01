@@ -226,7 +226,17 @@ RUN ldconfig
 # capabilities dropped, so site-packages is not writable. Point the cache
 # somewhere writable instead of running the container as root.
 ENV NUMBA_CACHE_DIR=/tmp/numba-cache \
-    LD_LIBRARY_PATH=/usr/local/lib
+    LD_LIBRARY_PATH=/usr/local/lib \
+    # A writable HOME for whatever uid runs this.
+    #
+    # The documented way to run this image passes --user so the files it writes
+    # belong to the person who ran it rather than to root. That gives the
+    # process a uid with no passwd entry and no home, and openstego then dies
+    # in Files.createDirectories trying to make its preferences directory
+    # before it does any work at all. /tmp is world writable, so it works for
+    # every uid including root, which is why this is set here rather than left
+    # to the caller to remember.
+    HOME=/tmp
 
 # The freshness banner the constellation plan (06-docker-image.md section 5)
 # asks for: build date and commit, printed on first run, because "you cannot

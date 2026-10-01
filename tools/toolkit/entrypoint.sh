@@ -16,9 +16,12 @@ TOOLS="steghide outguess openstego stegosuite zsteg hstego stegcore"
 banner() {
     echo "stegobench toolkit  ·  built ${STEGOBENCH_BUILD_DATE:-unknown}  ·  ${STEGOBENCH_VCS_REF:-unknown}  ·  7 tools" >&2
     echo >&2
-    echo "  steghide, outguess, openstego, stegosuite, zsteg, hstego, stegcore" >&2
+    echo "  hide a file:  steghide  outguess  openstego  stegosuite  hstego  stegcore" >&2
+    echo "  look for one: zsteg  stegcore" >&2
+    echo >&2
     echo "  each runs as: docker run stegobench/toolkit <tool> [args...]" >&2
-    echo "  stegobench doctor    would check everything still works (not yet wired here)" >&2
+    echo "  try first:    stegcore wizard        (needs docker run -it)" >&2
+    echo "  any tool:     <tool> --help" >&2
 }
 
 if [ "$#" -eq 0 ]; then

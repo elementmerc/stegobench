@@ -1,79 +1,105 @@
 # stegobench toolkit
 
-One Docker image carrying seven steganography tools you can run without
-installing anything else.
+Seven ready-made tools for hiding files inside pictures, and for trying to spot
+when somebody else has. One Docker image, nothing else to install.
 
-**Status: built and smoke-tested, not published.** 1.61 GB, built 2026-10-01.
-See "What has and hasn't been checked".
+**It is a box of other people's tools.** It does not do anything itself.
 
-| Tool | What it does | Kind |
-|---|---|---|
-| `steghide` | hides data in JPEG, BMP, WAV or AU files (graph-theoretic LSB) | embed / extract |
-| `outguess` | hides data in JPEG files with statistical correction | embed / extract |
-| `openstego` | hides data in PNG files (LSB, with or without a password) | embed / extract |
-| `stegosuite` | hides AES-encrypted data spread across an image | embed |
-| `zsteg` | looks for hidden data in PNG and BMP bit planes | detect |
-| `hstego` | HILL and J-UNIWARD embedding with a real syndrome-trellis coder | embed / extract |
-| `stegcore` | an analysis ensemble: SPA, RS and WS with calibrated thresholds | detect |
+## Getting it
 
-They're bundled together because a person doing everyday steganography work (a
-CTF, a quick check on a file) reaches for tools in this size range, not for a
-nine gigabyte deep learning stack.
+Not published yet, so build it:
 
-`stegcore` is a single 8.6 MB binary copied out of its own published image, so
-it costs almost nothing here. It's in this registry as a **subject**, not a
-yardstick (`plugins/registry/detectors/stegcore.toml` says why), and being in
-this image doesn't change that.
+```sh
+tools/toolkit/build.sh stegobench/toolkit
+```
+
+About twenty minutes and 1.61 GB. Once it's published this becomes a
+`docker pull` and this section will say so.
 
 ## Running it
 
-Install:
+Set this up once:
 
 ```sh
-docker pull ghcr.io/the-malware-files/stegobench/toolkit:latest
+alias toolkit='docker run --rm -it --network=none --user "$(id -u):$(id -g)" -v "$PWD:/data" stegobench/toolkit'
 ```
 
-Run:
+Then:
 
 ```sh
-toolkit zsteg -a stego.png
+toolkit                       # what is in the box
+toolkit stegcore wizard       # guided, if you have not done this before
+toolkit steghide --help       # any tool's own help
 ```
 
-...once you've made `toolkit` mean the long docker line, which you only do
-once:
+Everything after `toolkit` is a tool's name and that tool's own arguments, and
+your current directory is what it sees.
+
+**Each part of that alias earns its place.** `--network=none` because none of
+these tools needs the network and one that suddenly wants it should fail rather
+than reach. `--user` because without it everything the tools write is owned by
+root and you cannot delete your own output. `-it` because the guided wizard
+needs a keyboard, and without it that wizard exits reporting that you cancelled
+when you did not.
+
+## A worked example, in two commands
 
 ```sh
-alias toolkit='docker run --rm --network=none -v "$PWD:/data" ghcr.io/the-malware-files/stegobench/toolkit'
+toolkit stegcore embed photo.png message.txt -o secret.png --passphrase hunter2
+toolkit stegcore extract secret.png --passphrase hunter2
 ```
 
-Everything after `toolkit` is the tool's own name and its own arguments, and
-your current directory is what it sees. `toolkit steghide ...`,
-`toolkit stegcore ...`, and so on for all seven. Run `toolkit` by itself and
-it lists them, with the build date and commit so you can tell whether what you
-pulled is stale.
+The second writes your file back out. Compare it with the original and it is
+byte for byte the same. That is the whole idea.
 
-`--network=none` is in the alias on purpose: none of these tools needs the
-network, and one that unexpectedly wants it should fail rather than reach.
+## What's in it
+
+| Tool | What it does |
+|---|---|
+| `stegcore` | hides and finds; has a guided wizard, and the friendliest output of the seven |
+| `steghide` | hides a file in a JPEG, BMP or WAV, with a passphrase |
+| `outguess` | hides a file in a JPEG, and adjusts the image afterwards to look more ordinary |
+| `openstego` | hides a file in a PNG |
+| `stegosuite` | hides a file in an image, encrypted, spread across it |
+| `hstego` | hides a file by putting it where the picture is busiest, which is harder to spot. This is what current research uses |
+| `zsteg` | looks for hidden data in PNG and BMP files |
+
+They're bundled because somebody doing everyday work (a puzzle, a quick check
+on a file) reaches for tools this size, not for a nine gigabyte research stack.
+
+## Reading what the detectors tell you
+
+**This is the part that misleads people, so read it before you trust an
+answer.**
+
+`zsteg` prints a few hundred lines listing everything it tried. Most of those
+lines are noise. It will cheerfully report things like
+`file: OpenPGP Public Key Version 6` or `SVR2 executable` **about a completely
+ordinary photograph**, because it is pattern-matching against random-looking
+bits and in a big enough pile of random bits something always matches. A hit
+from `zsteg` is a reason to look closer, never an answer on its own.
+
+`stegcore analyse` draws a tidy box with five scores in it and a one-word
+verdict. The scores are five different statistical tests, and they disagree
+with each other often. A word like "Suspicious" on a photo you have no reason
+to doubt usually means the photo is noisy, not that something is hidden.
+
+**No detector here will reliably tell you whether a specific file has something
+in it.** A good hiding tool is designed to defeat exactly these tests, and
+mostly succeeds. If you hide a message with `stegcore` and then ask `stegcore
+analyse` about it, you should not expect it to notice. That is not a fault in
+either half; it is what the field is like.
+
+If you need numbers you can defend rather than a verdict, that is what the
+`stegobench` tool in this repository is for.
 
 ## Aletheia is separate
 
-Aletheia, the steganalysis parity reference, ships as two images of its own:
-`aletheia` (classical detectors: SPA, RS, WS) at 8.34 GB and `aletheia-rich`
-(SRM, DCTR, GFR, needs Octave) at 9.09 GB. Together they're about 80% of the
-total bytes across every tool this project has measured, so someone who wants
-to run `steghide` on a CTF challenge isn't made to download a deep learning
-stack first. Pull them alongside the toolkit when you want them.
-
-## Why StegExpose isn't here
-
-It was, until 2026-10-01.
-
-- **No licence grant.** The upstream repository carries no LICENSE file and no
-  licence header, so nothing gives anyone the right to redistribute it.
-- **The project is archived.** There's no one to ask and no fix coming.
-
-The registry entry stays, so a user with their own copy still gets a result
-naming what produced it. It just isn't bundled.
+Aletheia is a research-grade detection suite we compare against. It ships as
+two images of its own, 8.34 GB and 9.09 GB, because it carries a full
+scientific Python stack. Together they are about 80% of the bytes across every
+tool this project has measured, so somebody who wants to run one small tool on
+one file is not made to download all that first. Pull them when you need them.
 
 ## What has and hasn't been checked
 
@@ -82,23 +108,21 @@ naming what produced it. It just isn't bundled.
 | Check | Result |
 |---|---|
 | Seven-tool image builds | yes, 1.61 GB, 2026-10-01 |
-| `stegcore analyse --json` | runs, version 4.1.0, JSON on a stego and a clean PNG |
+| `stegcore` embed then extract | payload recovered byte-identical |
 | `openstego` embed then extract, PNG | payload recovered byte-identical; stego differs from the cover |
 | `steghide` embed then extract, JPEG | payload recovered byte-identical |
 | `zsteg -a` on a PNG | runs and reports |
 
-The openstego round trip was the one that mattered: OpenStego 0.8.6 predates
-Java 21 by years, and Debian trixie has no `openjdk-17`, so the image runs it
-on 21. That it works is a measurement rather than an assumption.
+The `openstego` round trip was the one that mattered: it predates Java 21 by
+years, and Debian trixie has no `openjdk-17`, so the image runs it on 21. That
+it works is a measurement rather than an assumption.
 
-**Not checked:**
+**Not checked:** `outguess`, `stegosuite` and `hstego` have not had a file put
+through them here. They install and are on the PATH.
 
-- **`outguess`, `stegosuite` and `hstego` have not been run here.** They
-  install and are on the PATH; nobody has put a file through them.
-- **SBOM not generated.** Do it once the image is ready to publish
-  (`syft ghcr.io/.../toolkit:latest -o spdx-json > toolkit.spdx.json`).
-- **Three `ARG *_REF` defaults still track `master`**, so two builds a week
-  apart can differ. Pin them before any published benchmark.
+**Also outstanding:** three `ARG *_REF` build arguments still track `master`, so
+two builds a week apart can differ; pin them before any published benchmark.
+No SBOM yet.
 
 ## Licences, and the source you're owed
 
@@ -113,10 +137,11 @@ on 21. That it works is a measurement rather than an assumption.
 | stegcore | AGPL-3.0-or-later |
 
 This image doesn't merge or relicense any of them; it packages them side by
-side.
+side. Publishing it carries a source-offer obligation, and the Debian base is
+the large part of that. `SOURCE-OFFER.md` covers what's owed and
+`collect_sources.py` builds the archive.
 
-Publishing it carries a source-offer obligation, and the Debian base is the
-large part of that: a few hundred packages, most of them copyleft.
-`SOURCE-OFFER.md` covers what's owed and `collect_sources.py` builds the
-archive (569 files, about a gigabyte, read out of the image itself so the
-versions can't drift from the binaries).
+**StegExpose used to be here and was removed on 2026-10-01**, because its
+upstream grants no licence at all: no LICENSE file, no header, and the project
+is archived, so there is nobody to ask. Its registry entry stays, so somebody
+with their own copy still gets a result that names what produced it.
