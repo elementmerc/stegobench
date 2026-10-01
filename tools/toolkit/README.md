@@ -78,8 +78,10 @@ photographs.** That is noise, not a finding.
 **`stegosuite extract` overwrites files in your working directory** and cannot
 be told not to. Extract into an empty directory.
 
-**`outguess` can hand back a file of the right size with a wrong byte in it,
-and report success.** Check what you extracted against a hash of what you hid.
+**`outguess` can hand back a file of the right size with a wrong last byte, and
+report success.** Upstream bug, about 14% of payloads under 48 bytes. Check what
+you extracted against a hash of what you hid, and don't use its `-e` flag, which
+crashes.
 
 `docs/guide/toolkit.md` explains all of these, and what to use when you need a
 number you can defend.

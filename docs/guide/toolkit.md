@@ -146,18 +146,50 @@ is side-informed, and that distinction matters for comparability.
 Hide a file with `outguess`, get it back, and the file you get can be the right
 size with a byte changed in it. Both commands exit 0. Nothing warns you.
 
-Measured on 2026-10-01: the 29 byte payload `hardened profile test payload`
-came back as `hardened profile test payloa$`, the final byte changed by a single
-bit, the same way on five runs out of five. Three other payloads of 11, 29 and
-30 bytes through the same cover and key were perfect, and so were five synthetic
-payloads from 8 to 200 bytes.
+This is upstream OutGuess 0.4, not something about how we package it. The same
+corruption happens identically in the standalone `outguess` image, and both
+install Debian's `outguess 1:0.4-2`.
 
-**That mixture is the whole problem.** It depends on the content, so testing it
-once and seeing a clean round trip tells you nothing about the next file. It is
-not random: the payload that fails, fails every time.
+### What it is
 
-So if you use `outguess`, check what you extracted against a hash of what you
-hid:
+OutGuess writes your message one bit at a time, walking the picture in a
+scattered order. The size of each step depends on how much message is left, so
+on the final byte the step is enormous, and the walk runs off the end of the
+picture. The loop stops, **reports success, and never writes the bits it had
+left**. Bits are written lowest first, so the ones lost are the top bits of your
+last byte.
+
+The tool tells you, if you read the line nobody reads. For the failing case
+above it prints `Bits embedded: 262` where a 29 byte payload plus a 4 byte header
+needs 264. Two bits short, and those two bits are the two that came back wrong.
+
+### How often
+
+Measured over 811 round trips on 2026-10-01:
+
+| | Rate |
+|---|---|
+| Random payloads of 48 bytes or fewer | 21 of 149, about 14% |
+| Random payloads of 64 bytes or more | 0 of 151 |
+| Mixed sample overall | 30 of 511, about 6% |
+| Payloads whose last byte is 0x40 or higher, one fixed cover and key | 147 of 256, 57% |
+
+**Short payloads are much worse**, because a short payload means a bigger final
+step and a bigger overshoot. Long is not a guarantee: one 100 byte payload of
+ordinary English still failed.
+
+Every single corruption, 200 of them, changed **only the last byte**, by only
+`0x40`, `0x80` or both. **No corruption ever changed the length**, because the
+length is in a header written early, far from the overrun. So the file you get
+back is always exactly the right size.
+
+The cover and the password matter too, because both change the walk. The same
+payload that fails on one cover is clean on the same picture saved at a different
+JPEG quality, and clean under a different password.
+
+### What to do about it
+
+Check what you extracted against a hash of what you hid:
 
 ```sh
 sha256sum secret.txt                  # before
@@ -167,6 +199,16 @@ sha256sum back.txt                    # must match
 ```
 
 The exit code will not tell you. The file size will not tell you either.
+
+If you are scripting it and cannot compare hashes, read `Bits embedded: N` off
+the embed output and check it equals `(4 + your payload size) * 8`. Any shortfall
+means bits were dropped. That test was right on 565 round trips out of 565.
+
+### `outguess -e` crashes outright
+
+The error-correcting mode, which is the one option that might have papered over
+all of the above, terminates with `*** stack smashing detected ***` and exit 139.
+Three attempts out of three. Do not use `-e`.
 
 ## `versions` tells you when it cannot answer
 
