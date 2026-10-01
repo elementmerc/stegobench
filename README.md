@@ -202,6 +202,9 @@ licence = "MIT"
 [image]
 reference = "ghcr.io/you/my-detector@sha256:..."   # a tag is refused
 size_mb = 200
+bundled = true            # derived from the size, not chosen: true at or
+                          # below 750 MB, and an entry whose flag disagrees
+                          # with its own size is refused
 
 [emits]
 output = "score"          # or "verdict" if it only says yes or no
@@ -283,10 +286,43 @@ a guess. They go in when they're true.
 ## Verifying a download
 
 Every file attached to a release is signed, `SHA256SUMS` included, because a
-checksum on its own only tells you the bytes match a list and whoever serves
-you a tarball can serve you a matching list. Nothing is released yet.
-`SECURITY.md` has the `gh attestation verify` and `cosign verify-blob`
-recipes, and says what they do and don't prove.
+checksum on its own only tells you the bytes match a list, and whoever serves
+you a tarball can serve you a matching list. A signature tells you the file
+came out of this repository's release workflow.
+
+Nothing is released yet, so these describe what a release will carry. Replace
+`v1.2.3` with the tag you downloaded.
+
+**With GitHub's `gh` tool**, which checks GitHub's own record of which
+workflow run built the file:
+
+```sh
+gh attestation verify stegobench-v1.2.3-x86_64-unknown-linux-musl.tar.gz \
+    --repo elementmerc/stegobench
+```
+
+**From anywhere**, including a mirror or an archived copy, with
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+
+```sh
+cosign verify-blob \
+    --certificate SHA256SUMS.pem \
+    --signature SHA256SUMS.sig \
+    --certificate-identity-regexp '^https://github\.com/elementmerc/stegobench/\.github/workflows/release\.yml@refs/tags/v' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    SHA256SUMS
+
+sha256sum -c SHA256SUMS
+```
+
+Verifying `SHA256SUMS` and then running `sha256sum -c` covers every file in
+one step. There's no key to fetch first: the signature carries a short-lived
+certificate naming the workflow that made it.
+
+The long `--certificate-identity-regexp` line is the part that matters. It
+says which repository, which workflow file and which kind of ref the signature
+has to come from. Drop it and cosign will accept a signature from anybody at
+all. `SECURITY.md` says what this does and doesn't prove.
 
 ## Running the test suites
 
