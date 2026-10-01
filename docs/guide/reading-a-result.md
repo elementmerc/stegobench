@@ -175,3 +175,9 @@ applicable, `trained_on` is absent or names something other than the corpus it
 was scored on, and you've read `per_arm` rather than the headline alone.
 Everything else is a reason to ask one more question, not a reason to throw
 the number away.
+
+Defensible there means defensible as a measurement. If the number is going
+into a forensic unit's casework, it is evidence of testing already performed
+and not the unit's validation of the method, which stays the unit's
+obligation. See [Limitations](/guide/limits) for what the regulator actually
+says about that.

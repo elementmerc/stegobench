@@ -386,6 +386,23 @@ single-variable, the split is by-cover or genuinely not applicable, and \
 trained_on is absent or names something other than what it was scored on. \
 Everything else is a reason to ask one more question rather than to throw the \
 number away.
+
+AND ONE THING A NUMBER HERE IS NOT
+
+Defensible above means defensible as a measurement. If you work in a forensic \
+unit, a result document is evidence of testing already performed and never \
+your laboratory's validation of the method.
+
+The UK Forensic Science Regulator's FSR-G-218 Issue 2 section 2 says \"the \
+onus is for the organisation using the method (i.e. the forensic unit) to \
+demonstrate validation, although the developer may greatly assist the end \
+user by providing information on the testing that has already been \
+performed.\"
+
+This harness produces the assist. The validation exercise, the scope the \
+method is to be used in and the acceptable error margin stay with the unit. \
+FSR-G-218 Issue 2 is general guidance on validating forensic methods; it says \
+nothing about steganalysis in particular, and nothing here claims it does.
 ";
 
 const SPLITS: &str = "\

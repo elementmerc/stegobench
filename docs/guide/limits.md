@@ -43,3 +43,38 @@ There is no submission process and no leaderboard. The output is a table you
 can rebuild, and the corpus it was measured on is
 [published separately](https://github.com/elementmerc/pentimento) so somebody
 else can rebuild it too.
+
+## A corpus-wide figure is weighted towards one kind of adversary
+
+Pentimento is weighted towards academic content-adaptive schemes, which are the
+hardest adversary to detect and the one a steganalysis researcher wants
+measured. If you're calibrating against what actually turns up in casework, the
+arms you want are the real-tool ones (steghide, outguess, openstego) and the LSB
+ones, and both are scored separately so you can read them on their own.
+
+The reasoning, the proportions and what the evidence for that says are in
+`docs/design/pentimento.md`. Read it before quoting a single pooled number for
+the whole corpus.
+
+## A result is an assist, not a validation
+
+If you work in a forensic unit, a number from this harness is evidence of
+testing already performed. It is not your laboratory's validation of the
+method, and it cannot be.
+
+The UK Forensic Science Regulator's FSR-G-218 Issue 2 section 2 puts the duty
+where it falls: "the onus is for the organisation using the method (i.e. the
+forensic unit) to demonstrate validation, although the developer may greatly
+assist the end user by providing information on the testing that has already
+been performed."
+
+A `result-v1` document is the assist half of that sentence. It records what was
+measured, on which bytes, and under which conditions, so a unit can rely on it
+as part of its own validation exercise. The exercise stays the unit's: the
+method, the scope it is to be used in, the acceptable error margin, and the
+demonstration that the method meets that margin in the unit's own hands.
+
+FSR-G-218 Issue 2 is general guidance on validating forensic methods. It says
+nothing about steganalysis in particular, and nothing here claims it does. It
+is quoted because it is the clearest published statement of who owns the
+obligation.

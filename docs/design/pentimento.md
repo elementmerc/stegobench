@@ -52,8 +52,23 @@ with a sha256 per file and the count of samples actually changed.
 
 ## Version 1 target
 
-**10,000 covers.** Exactly BOSSbase's count, deliberately, so every number is
-directly comparable to fifteen years of published results.
+**10,000 covers.** Exactly BOSSbase's count, deliberately, so a figure measured
+here sits beside fifteen years of published results without a sample-size
+difference to argue about first.
+
+**That is the only thing the matched count buys, and the sentence here used to
+claim more.** It said every number was "directly comparable" to those results,
+which is false and is the claim the README withdraws in as many words. Every
+cover in this corpus was a JPEG before it was cropped, the 8x8 block lattice
+survives decompression, and a detector's behaviour on decompressed covers is
+not its behaviour on never-compressed ones. **Thresholds calibrated here will
+not transfer unchanged to BOSSbase, and a detection figure here is not a
+BOSSbase figure.** A never-compressed arm has no lawful source, which was
+measured rather than assumed; see `distribution.md`.
+
+Matching the count removes one confound. It does not make the corpora
+interchangeable, and this file is the one the README sends readers to, so it is
+the worst possible place for the two to disagree.
 
 | Arm | Methods | Rates | Stego images |
 |---|---|---|---|
@@ -65,6 +80,46 @@ directly comparable to fifteen years of published results.
 
 Every pair is matched: cover and stego are the same picture through the same code
 path, differing only in the embedded bits.
+
+### Which reader those proportions serve
+
+Read that table as shares and the corpus is **58% adaptive spatial, 23% LSB,
+17% real tools and 2% structural**. The weighting is a choice, and it serves
+one of two readers rather than both. Nothing about a pooled figure says which,
+so this section says it.
+
+**It is the right weighting for a steganalysis researcher.** HUGO, WOW,
+S-UNIWARD, HILL and MiPOD are the state of the art, and if the question is how
+good detection can be made to get, they are the only adversary worth measuring
+against.
+
+**It is the wrong weighting for calibrating against what is deployed.** The one
+published census of real-world stegomalware this project has found (Strachanski,
+Petrov, Schmidbauer and Wendzel, "A Comprehensive Pattern-based Overview of
+Stegomalware", ARES 2024 CUING workshop, 106 cases over five years) reports that
+every observed media case fell into three forms of value modulation, and none was
+attributed to an adaptive scheme. The largest single observed pattern was LSB
+modulation. Be careful how far that is pushed: the paper's taxonomy has no
+adaptive category, so it makes no claim about adaptive schemes in either
+direction. What it records is that nothing in the HUGO, WOW, S-UNIWARD, HILL and
+MiPOD family appears in the cases it collected.
+
+So a forensic examiner or an incident responder who scores against the whole
+corpus is calibrating mostly against an adversary they are unlikely to meet.
+
+**What to do instead.** Read the arms rather than the pool. The real-tool arms
+(steghide, outguess, openstego) and the LSB arms are both present and both
+labelled, and those are the ones that match the observed cases. Every arm is
+scored separately for exactly this kind of reason: `metrics.per_arm` carries a
+figure per arm and `stegobench report` prints them as their own table, so the
+arms that matter to a given reader can be read off without a second run. A
+tier packed for that reader can also leave the rest out, with `pack_arms.py
+--only` or `--group`. A pooled figure over all four arm groups answers the
+researcher's question and not the examiner's.
+
+The registry is already weighted the other way: all six registered embedders are
+real tools and none is an academic algorithm. It is the corpus proportions that
+lean towards the research question, not the harness.
 
 ## Cover sources
 
