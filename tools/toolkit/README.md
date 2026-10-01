@@ -27,27 +27,33 @@ this image doesn't change that.
 
 ## Running it
 
-The entrypoint dispatches on the first argument:
+Install:
 
 ```sh
-docker run --rm --network=none -v "$PWD:/data" stegobench/toolkit \
-  steghide embed -cf cover.jpg -ef secret.txt -sf stego.jpg -p PASS
-
-docker run --rm --network=none -v "$PWD:/data" stegobench/toolkit \
-  openstego embed -mf secret.txt -cf cover.png -sf stego.png
-
-docker run --rm --network=none -v "$PWD:/data" stegobench/toolkit \
-  zsteg -a stego.png
-
-docker run --rm --network=none -v "$PWD:/data" stegobench/toolkit \
-  stegcore analyse --json stego.png
+docker pull ghcr.io/the-malware-files/stegobench/toolkit:latest
 ```
 
-`outguess`, `stegosuite` and `hstego` work the same way. Run the image with no
-arguments and it prints a banner naming the build date, the commit and the
-tools installed, so you can tell at a glance whether what you pulled is stale.
+Run:
 
-**Pass `--network=none`.** None of these tools needs the network.
+```sh
+toolkit zsteg -a stego.png
+```
+
+...once you've made `toolkit` mean the long docker line, which you only do
+once:
+
+```sh
+alias toolkit='docker run --rm --network=none -v "$PWD:/data" ghcr.io/the-malware-files/stegobench/toolkit'
+```
+
+Everything after `toolkit` is the tool's own name and its own arguments, and
+your current directory is what it sees. `toolkit steghide ...`,
+`toolkit stegcore ...`, and so on for all seven. Run `toolkit` by itself and
+it lists them, with the build date and commit so you can tell whether what you
+pulled is stale.
+
+`--network=none` is in the alias on purpose: none of these tools needs the
+network, and one that unexpectedly wants it should fail rather than reach.
 
 ## Aletheia is separate
 

@@ -193,7 +193,15 @@ RUN apt-get update \
         # which is a system package.
         python3-tk \
     && gem install zsteg -v "${ZSTEG_VERSION}" --no-document \
-    && curl -fsSL -o /tmp/openstego.deb \
+    # Retried because this is the one fetch in the build that leaves the
+    # distribution's own mirrors, and it is the one that fails: two builds in a
+    # row died here on "Recv failure: Connection reset by peer" after every
+    # earlier step had succeeded. An unretried single GET of a release asset
+    # makes a twenty minute build depend on one TCP connection to one host.
+    # --retry-all-errors because a reset is not an HTTP status and the plain
+    # --retry does not cover it.
+    && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --max-time 300 \
+        -o /tmp/openstego.deb \
         "https://github.com/syvaidya/openstego/releases/download/openstego-${OPENSTEGO_VERSION}/openstego_${OPENSTEGO_VERSION}-1_all.deb" \
     && apt-get install -y --no-install-recommends /tmp/openstego.deb \
     && rm -f /tmp/openstego.deb \
