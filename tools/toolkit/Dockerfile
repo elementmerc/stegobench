@@ -27,11 +27,18 @@
 # detector, and that one has never successfully run under a sandbox that
 # denies it a writable /tmp.
 #
-# UNBUILT AND UNTESTED. Authored from the seven per-tool Dockerfiles in this
-# repository, which build and run individually; this file has not itself been
-# built. Building is heavy work that belongs on a dedicated machine, not this
-# one, per the working constraints for this change. Build and smoke-test it
-# before it is ever published.
+# BUILT AND PARTLY TESTED. A six-tool build of this file, everything except
+# stegcore, was built on 2026-10-01 and measured 1.59 GB. openstego and
+# steghide each went through an embed and extract round trip that recovered
+# the payload byte for byte, and zsteg ran. outguess, stegosuite and hstego
+# install and are on the PATH; nobody has put a file through them here.
+# ./README.md carries the table.
+#
+# REDISTRIBUTING THIS IMAGE CARRIES A SOURCE OFFER. steghide, openstego and
+# stegosuite are GPL and stegcore is AGPL, so pushing this image to a public
+# registry obliges us to offer the corresponding source alongside it. See
+# ./SOURCE-OFFER.md, which has to be published with the image rather than
+# written afterwards.
 #
 # All base images pinned by digest, never by tag, per baseline Section 5 and
 # ../IMAGES.md. Every digest here is copied from an existing per-tool
@@ -135,12 +142,18 @@ FROM ${DEBIAN_DIGEST}
 
 LABEL org.opencontainers.image.title="stegobench toolkit" \
       org.opencontainers.image.description="steghide, outguess, openstego, stegosuite, zsteg, hstego, stegcore in one image" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      # Seven tools under five licences, packaged side by side rather than
+      # merged, so no single SPDX identifier describes the image. The
+      # expression names every one of them; ./README.md has the per-tool
+      # table and ./SOURCE-OFFER.md the obligations that follow from it.
+      # A single identifier here would be a claim about the whole image that
+      # is not true of any of its parts.
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND GPL-2.0-only AND GPL-3.0-only AND BSD-3-Clause AND MIT"
 
-# git and curl are build-time only: git clones StegExpose's source (it ships
-# as source, not a release jar) and curl fetches OpenStego's .deb. Both are
-# purged after use, matching the pattern the per-tool Dockerfiles already use
-# for the same reason (see tools/stegexpose/Dockerfile, tools/zsteg/Dockerfile).
+# curl is build-time only: it fetches OpenStego's .deb, which is a GitHub
+# release asset rather than a Debian package. It is purged after use, matching
+# the pattern the per-tool Dockerfiles already use for the same reason (see
+# tools/zsteg/Dockerfile).
 ARG OPENSTEGO_VERSION=0.8.6
 ARG ZSTEG_VERSION=0.2.13
 
