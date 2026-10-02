@@ -35,6 +35,7 @@ features:
 | Run it | [Quickstart](/guide/quickstart) |
 | Get images to score | [Getting a corpus](/guide/getting-a-corpus) |
 | Build a corpus | [Build a corpus](/guide/build-a-corpus) |
+| See what the detectors say about images of your own | [Examine your own images](/guide/examine-your-own-images) |
 | Score a detector that runs as an HTTP service | [A detector behind an HTTP endpoint](/guide/http-detector) |
 | Understand what makes a measurement valid | [Pairing](/guide/pairing) |
 | Turn results into a table for a report | [Writing a report](/guide/writing-a-report) |

@@ -28,6 +28,7 @@ only one you need.**
 | `report` | Renders results as a table with the conditions in every row, never ordered by score |
 | `metrics` | AUC, detection at a fixed false-alarm rate, and confusion counts, on numbers from anywhere |
 | `embed` | Drives a registered embedder, so there's something for a detector to be measured against |
+| `examine` | Runs the detectors you name over images of your own and tabulates what they said. Not a measurement, and no result document |
 | `fetch`, `list`, `describe` | Get a corpus, and see what's registered |
 
 There's a **second, separate program** in this repository, `pentimento`,
@@ -51,9 +52,12 @@ round trip that proves an embedder works can be checked. If what you want is
 to hide a file in a photo, the embedders it drives are ordinary tools you can
 install and run yourself, and you would be going the long way round.
 
-It does not tell you whether YOUR photo has something hidden in it. That is a
-different question and `stegobench help scope` covers why, and where to go
-instead.
+It does not tell you whether YOUR photo has something hidden in it, although
+it will tell you what the detectors say about it. `stegobench examine` runs
+them over your own files and tabulates their answers, and that's as far as it
+goes: no result document, and no number anybody should quote.
+`stegobench help scope` covers why those are two different things, and
+[Examine your own images](/guide/examine-your-own-images) is the guide.
 
 It is not a leaderboard. There is no submission process and no ranking; the
 output is a table you can rebuild.

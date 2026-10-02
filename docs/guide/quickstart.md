@@ -34,10 +34,12 @@ want.
 stegobench
 ```
 
-The important thing it says: Stegobench measures **detectors**. It doesn't
-examine your own images. Those are opposite directions, and
-`stegobench help scope` spells out the difference and where to go for the other
-one.
+The important thing it says: Stegobench measures **detectors**. It will also
+run those detectors over images of your own, with `stegobench examine`, and
+that is the opposite direction from a measurement rather than a cheaper
+version of one. `stegobench help scope` spells out the difference, and
+[Examine your own images](/guide/examine-your-own-images) is the guide to the
+command.
 
 ### See what this installation can run
 

@@ -86,6 +86,7 @@ export default {
             { text: 'Build a corpus', link: '/guide/build-a-corpus' },
             { text: 'A detector behind an HTTP endpoint', link: '/guide/http-detector' },
             { text: 'A baseline over every detector', link: '/guide/a-baseline-over-every-detector' },
+            { text: 'Examine your own images', link: '/guide/examine-your-own-images' },
           ],
         },
         {

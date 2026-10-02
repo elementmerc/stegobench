@@ -33,38 +33,61 @@ There are two different questions, and most people arrive with the second one.
   1. HOW GOOD IS THIS DETECTOR?
      You have images whose answers are already known: this one is clean, this
      one hides a payload, and somebody recorded which is which. You run a
-     detector over all of them and count how often it was right. That is what
-     stegobench does.
+     detector over all of them and count how often it was right. That is a
+     measurement, and it's what `score` does.
 
   2. IS SOMETHING HIDDEN IN THESE PICTURES?
-     You have images nobody has labelled, and you want a verdict on them. That
-     needs a detector you already trust, pointed at your own files. Stegobench
-     is not that tool. It's how you find out whether to trust one.
+     You have images nobody has labelled, and you want to know what the tools
+     say about them. `examine` runs the detectors you name over the files you
+     name and lays their answers out side by side. What comes back is not a
+     measurement, and the difference is the rest of this topic.
 
 They run in opposite directions. Question 1 starts from known answers and ends
-with a judgement about the tool. Question 2 starts from a tool you believe and
-ends with a judgement about the images.
+with a judgement about the tool. Question 2 starts from the tools and ends
+with a claim about the images that is only ever as good as the tools are.
 
 IF YOU ARRIVED WITH QUESTION 2
 
   stegobench list detectors      names every detector registered here
-  stegobench describe <name>     says where that one lives, what it costs, and
-                                 the command that runs it
+  stegobench examine <IMAGE>...  runs the detectors you name over the images
+                                 you name: one row per image, one column per
+                                 detector
+  stegobench describe <name>     says where one lives, what it costs, and the
+                                 command that runs it
 
-Run one of those directly on your own images. `describe` prints the exact
-command, including the container invocation where the detector is an image
-rather than a program you installed, so it can be pasted rather than
-reconstructed. Then read that tool's own documentation for what its output
-means, because stegobench is not in that loop and cannot vouch for a number
-it did not produce.
+So, concretely:
+
+  stegobench examine holiday --detector zsteg --detector stegexpose
+
+`--detector` is required and repeatable, and every detector you name sees
+every image you name. A cell holds that detector's score where it gives one,
+the word stego or clean where it gives a verdict instead, and unavailable or
+failed where it gave nothing at all. `--raw <FILE>` keeps what the tools
+actually printed, which is what you read when a cell surprises you.
+
+WHAT COMES BACK IS NOT A MEASUREMENT
+
+`examine` writes no result document, and that is a decision rather than
+unfinished work. A result document is the output of a run against images whose
+answers were fixed before the detector saw them, by somebody other than the
+detector, and recorded beside each file. Your own photographs have none of
+that, so there is nothing for a detector to be right or wrong about, and no
+number that belongs in a document.
+
+So nothing `examine` prints is quotable. Not as a benchmark figure, not as an
+accuracy, not as a rate, not in a paper and not in a report. It is what some
+tools said about some files. If you want a number you can defend, label images
+and run `score`.
 
 EXPECT THE OUTPUT TO LOOK ALARMING, BECAUSE IT WILL
 
 A detector run raw over one photograph typically prints pages of candidate
 hits with confident-sounding names: key blocks, archives, text fragments.
 Nearly all of them are noise. These tools are built to be run over a corpus
-and thresholded, not to answer yes or no about one file, and the raw output
-is the evidence before anybody has decided what counts.
+and thresholded, not to answer yes or no about one file, and that output is
+the evidence before anybody has decided what counts. The table keeps one cell
+per detector per image so you can see them disagree; `--raw` is where the
+pages of candidate hits go, if you want them.
 
 So be careful with the answer you get. A detector that is right nine times in
 ten still calls one clean image in ten a hit, and on a folder of a thousand
@@ -73,17 +96,21 @@ exists, and why a number with its conditions attached is worth more than a
 verdict without them.
 
 The honest short answer to \"is there something hidden in this photo\" is that
-no tool here can tell you, and any tool that says it can is overclaiming. What
-you can find out is how often a given detector is right on images whose
+no tool here can tell you with any confidence you could rely on, and a tool
+that says it can is overclaiming. What you can find out is what several tools
+say, which is useful for deciding where to look next and useless as proof.
+What you can measure is how often a given detector is right on images whose
 answers are known, and that is what the rest of this program does.
 
-WHY THERE IS NO COMMAND FOR QUESTION 2
+WHY A BENCHMARK OFFERS THIS AT ALL
 
-Because a benchmark that also hands out verdicts would be grading its own
-homework. The thing that makes a measurement here worth quoting is that the
-answers were fixed before the detector saw the images, by somebody other than
-the detector, and recorded beside each file. Unlabelled images have none of
-that, so there is nothing to be right or wrong about.
+Because the alternative was sending you away to install the tools yourself,
+and the tools are already here, pinned and sandboxed. What a benchmark must
+not do is grade its own homework, and it doesn't: an examination produces a
+table and stops. The thing that makes a measurement here worth quoting is
+that the answers were fixed before the detector saw the images, by somebody
+other than the detector, and recorded beside each file. An examination has
+none of that and claims none of it.
 
   stegobench help results        what a result document carries and why
   stegobench help pairing        why a clean image and its stego twin have to

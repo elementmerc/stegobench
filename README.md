@@ -6,11 +6,14 @@ payload), it runs a detector over every one of them, and it reports how often
 the detector was right, in a versioned JSON document that names the exact
 bytes the number was measured on.
 
-**It does not examine your own images.** If your question is "is something
-hidden in these pictures", that's the opposite direction: unknown images, and
-a detector you already trust. Stegobench is how you find out whether to trust
-one. Run `stegobench help scope` for the difference in full, and for where to
-go instead.
+**It will also run those detectors over images of your own.** If your question
+is "is something hidden in these pictures", `stegobench examine` runs the
+detectors you name over the files you name and puts their answers in one
+table. That's the opposite direction from a measurement, and it's held apart
+from one deliberately: an examination writes no result document and nothing it
+prints is quotable, because there's no labelled answer for a detector to be
+right or wrong about. `stegobench help scope` has the difference in full, and
+`docs/guide/examine-your-own-images.md` is the guide.
 
 Most published steganalysis results can't be checked by the people reading
 them. The corpora usually can't be redistributed, and the discipline that
@@ -59,9 +62,10 @@ printed.
 ```
 $ stegobench
 stegobench measures how good a steganography detector is, by running it over images whose answers are already known.
-It does NOT examine your own images (`stegobench help scope`).
+It can also run those detectors over images of your own, which is an answer rather than a measurement (`stegobench help scope`).
 
   stegobench list detectors    what this installation can run
+  stegobench examine <image>   what the detectors say about a file
   stegobench doctor            what is installed, and what it needs
   stegobench help              the reasoning, one topic at a time
   stegobench --help            every command and flag
@@ -131,12 +135,21 @@ rather than reporting a missing file:
 $ stegobench score --corpus ./holiday-photos --detector all
 ./holiday-photos holds 3 image(s) and no records saying which of them hides anything, so there is nothing to be right or wrong about.
 
-Stegobench measures DETECTORS against labelled images; it does not examine your own.
-`stegobench help scope`      the difference, and where to go instead
+`score` measures a detector, which needs the answers in advance. Asking the detectors what they make of these files is `examine`, and what comes back is an answer rather than a measurement.
+`stegobench examine ./holiday-photos --detector <name>`
+`stegobench help scope`      the difference between the two
 ```
 
 It exits 3, a pre-flight refusal, which a script can tell apart from an error
-and knows not to retry.
+and knows not to retry. `score` needs the labels; running the same detectors
+over those photographs without them is what `examine` is for:
+
+```sh
+stegobench examine ./holiday-photos --detector zsteg --detector stegexpose
+```
+
+One row per image, one column per detector, and no result document, because
+there's nothing there for a detector to be right or wrong about.
 
 **7. Turn results into a table.** `report` renders the conditions into every
 row, so a figure can't be lifted out without them. Rows are ordered by arm and
@@ -153,9 +166,11 @@ the report says what's wrong with them in the same cell as the number.
 
 ## The commands
 
-`schema`, `validate`, `verify`, `list`, `describe`, `embed`, `doctor`, `plan`,
-`score`, `metrics`, `fetch`, `report`, `completions`, `help`. Every one is
-built and tested. `stegobench --help` has the flags.
+`schema`, `validate`, `verify`, `list`, `describe`, `embed`, `examine`,
+`doctor`, `plan`, `score`, `metrics`, `fetch`, `report`, `completions`,
+`help`. Every one is built and tested. `stegobench --help` has the flags.
+`check` and `scan`, and the other words people guess, are aliases for
+`examine`.
 
 Every subcommand accepts `--json`, which puts machine-readable output on
 stdout and leaves progress and human text on stderr, so

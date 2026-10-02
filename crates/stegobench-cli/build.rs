@@ -368,11 +368,13 @@ fn write_man_pages(cmd: &clap::Command, dir: &std::path::Path) -> std::io::Resul
     // convention getopt-driven tools (git, cargo) already use, so `man
     // stegobench-doctor` is guessable rather than needing to be looked up.
     //
-    // Hidden subcommands are skipped. `check` and `scan` are signposts that
-    // exist only to explain that this tool does not examine your own images,
-    // and they are hidden from `--help` for that reason. A man page is
-    // documentation too, so shipping one for them would advertise the very
-    // thing the signpost exists to deny.
+    // Hidden subcommands are skipped. `check` and `scan` used to be signposts
+    // that explained this tool does not examine your own images, and were
+    // hidden so a man page could not advertise the thing they existed to
+    // deny. They are aliases on `examine` now, and the skip still holds for a
+    // different reason: an alias is a spelling of a command rather than a
+    // command, and six pages describing one would make the set look larger
+    // than it is while saying the same thing six times.
     for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
         let name = format!("{}-{}", cmd.get_name(), sub.get_name());
         let page = dir.join(format!("{name}.1"));

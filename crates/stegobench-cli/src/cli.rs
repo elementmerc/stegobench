@@ -113,17 +113,23 @@ pub enum ReportFormat {
                   are already labelled (this one is clean, this one hides a \
                   payload), and it reports how often a detector was right, in a \
                   document naming the exact bytes the number came from.\n\n\
-                  IT DOES NOT EXAMINE YOUR OWN IMAGES. That is the opposite \
-                  direction: `stegobench help scope` says where to go \
-                  instead.\n\n\
+                  IT WILL ALSO RUN THOSE DETECTORS OVER IMAGES OF YOUR OWN, \
+                  with `examine`. That answers the opposite question and it is \
+                  not a measurement: your images carry no labels, so there is \
+                  nothing a detector can be right or wrong about and nothing \
+                  in the output is quotable. `stegobench help scope` has the \
+                  difference in full.\n\n\
                   START HERE\n  \
                   stegobench list detectors   what this installation can run\n  \
+                  stegobench examine <image>  what the detectors say about a \
+                  file\n  \
                   stegobench doctor           what is installed, and what it \
                   needs\n  \
                   stegobench help             the reasoning, one topic at a time",
     after_help = concat!(
         "Start with `stegobench list detectors`, then `stegobench doctor`.\n\
-         This measures detectors; it does not examine your own images \
+         `score` measures a detector against labelled images; `examine` says \
+         what the detectors make of your own, which is not a measurement \
          (`stegobench help scope`).\n\
          Exit codes and the stdout/stderr contract are under `--help`.\n\
          Source and issues: ",
@@ -395,6 +401,77 @@ pub enum Command {
         /// not.
         #[arg(long)]
         strict: bool,
+    },
+
+    /// Ask one detector or several about images of your own
+    ///
+    /// Runs each registered detector over each image you name and prints one
+    /// row per image and one column per detector, so several tools can be
+    /// compared on the same files without installing or invoking any of them
+    /// yourself. A container detector runs in the same sandbox `score` uses:
+    /// no network, no capabilities, the image mounted read only.
+    ///
+    /// THIS IS NOT A MEASUREMENT, AND THE DIFFERENCE MATTERS
+    ///
+    /// Nothing you name here is labelled, so there is no accuracy to report
+    /// and no result document is written. A cell says what one tool said
+    /// about one file. It is not an accuracy, it is not comparable between
+    /// columns, and it is not a figure to quote. `stegobench help scope` has
+    /// the argument in full, including why a detector that is right nine
+    /// times in ten still raises a hundred false alarms over a thousand
+    /// holiday photos. `stegobench score` is what produces a defensible
+    /// number.
+    ///
+    /// EXIT CODES here: 0 every detector answered about every image; 2 a name
+    /// is not a registered detector, or is registered and is not one; 3 an
+    /// image is unreadable, or some but not all of the detectors are
+    /// installed here; 4 a detector ran and answered nothing; 8 none of the
+    /// detectors asked for is installed, so the table is empty. 3 and 8 are
+    /// told apart because a partial answer and no answer are different things
+    /// to act on, and `stegobench doctor` says what is missing.
+    ///
+    /// Example:
+    ///   stegobench examine photo.png --detector zsteg
+    ///
+    /// Example, three tools over a folder of photographs:
+    ///   stegobench examine ./holiday --detector zsteg --detector stegexpose --detector aletheia-spa
+    ///
+    /// `check`, `scan`, `inspect`, `detect` and `analyse` all run this. They
+    /// are the words people guess, and before this command existed they were
+    /// signposts that explained the tool could not do it.
+    #[command(
+        alias = "check",
+        alias = "scan",
+        alias = "inspect",
+        alias = "detect",
+        alias = "analyse",
+        alias = "analyze"
+    )]
+    Examine {
+        /// The images to ask about. Left untouched.
+        ///
+        /// A directory stands for the image files directly inside it, in
+        /// sorted order, and nothing from any subdirectory. Naming a file and
+        /// the directory holding it asks about it once.
+        #[arg(value_name = "IMAGE", num_args = 1.., required = true)]
+        images: Vec<std::path::PathBuf>,
+        /// Which registered detector to ask. See `stegobench list detectors`.
+        ///
+        /// Repeatable. Every detector sees every image, which is what makes
+        /// the columns comparable as answers even though their scales are not
+        /// comparable as numbers.
+        #[arg(short = 'd', long = "detector", value_name = "NAME", num_args = 1.., required = true)]
+        detectors: Vec<String>,
+        /// Seconds one image gets before the detector is killed.
+        #[arg(long, value_name = "SECONDS", default_value = "120")]
+        timeout: u64,
+        /// How many images to ask about at once.
+        #[arg(short = 'j', long, value_name = "N", default_value = "1")]
+        jobs: usize,
+        /// Keep what the tools printed, which is where a failure explains
+        /// itself and where a verdict's own evidence lives.
+        #[arg(long, value_name = "FILE")]
+        raw: Option<std::path::PathBuf>,
     },
 
     /// Score a corpus with one detector, several, or every registered one
@@ -785,24 +862,5 @@ pub enum Command {
         /// reports. Omit to list.
         #[arg(value_name = "TOPIC")]
         topic: Option<String>,
-    },
-
-    /// Not a command. `check` is one of the two words somebody looking for an
-    /// image examiner guesses, and it is routed here so the refusal can
-    /// explain the difference rather than leave clap to suggest `schema`.
-    ///
-    /// Hidden because it is a signpost rather than a feature; listing it would
-    /// imply the tool does the thing the signpost exists to say it does not.
-    #[command(hide = true)]
-    Check {
-        #[arg(value_name = "ARGS", trailing_var_arg = true, num_args = 0..)]
-        args: Vec<String>,
-    },
-
-    /// Not a command. The other guess. See `check`.
-    #[command(hide = true)]
-    Scan {
-        #[arg(value_name = "ARGS", trailing_var_arg = true, num_args = 0..)]
-        args: Vec<String>,
     },
 }

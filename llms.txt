@@ -4,9 +4,11 @@
 > are already known. Build a labelled corpus, run detectors over identical
 > bytes, and report numbers somebody else can check.
 >
-> It does NOT examine unlabelled images to find out what is in them. That is
-> the opposite direction, and there is no command for it. See "The question
-> this tool does not answer" below before routing a user here.
+> It will also run registered detectors over unlabelled images of a user's
+> own, with `stegobench examine`, and tabulate what each one said. That is
+> the opposite direction from a measurement: it emits no `result-v1` document
+> and nothing it prints is quotable. See "Examining a user's own images"
+> below before routing a user to either one.
 
 This file is for a model deciding whether and how to call this tool. It
 describes what exists today, not a roadmap. Every command listed below is
@@ -77,6 +79,20 @@ progress still reaches a terminal.
   the reasoning behind the harness's hard rules, written for a reader who
   never opens the repo. `scope` is the one to read first: it separates
   measuring a detector from examining your own images.
+- `stegobench examine <IMAGE>... --detector <NAME>`: run the named detectors
+  over the named images and print one row per image and one column per
+  detector. `--detector` is required and repeatable, and every detector sees
+  every image. A cell carries a score where the detector gives one, `stego`
+  or `clean` where it gives a verdict instead, and `unavailable` or `failed`
+  where it gave nothing. Other flags: `--registry`, `--timeout` (default
+  120), `--jobs` (default 1), `--raw <FILE>` to keep what the tools printed.
+  Exit 0 means every detector answered for every image, 2 that a name is not
+  a registered detector or is not a detector at all, 3 that an image could
+  not be read or a detector is not installed, 4 that a detector ran and
+  answered nothing. `check` and `scan` are aliases for it, with the other
+  words a user guesses alongside them; `stegobench --help` lists them. It
+  writes NO
+  `result-v1` document, by design: see "Examining a user's own images" below.
 - `stegobench score --corpus <DIR> --detector <NAME>`: asks the detector
   about every sample under the directory and writes a `result-v1` document.
   `--detector` is repeatable and `all` means every registered detector; with
@@ -106,21 +122,26 @@ progress still reaches a terminal.
   item hits the deadline. Where no rate is declared it says so rather than
   inventing a figure.
 
-## The question this tool does not answer
+## Examining a user's own images
 
-A user who asks "are these images hiding something" wants a detector pointed
-at their own files, not a benchmark. Stegobench has no command for that and
-should not be made to look as though it does.
+A user who asks "are these images hiding something" wants detectors pointed at
+their own files, not a benchmark. The command for that is `stegobench examine`,
+and `check` and `scan` are aliases for it.
 
-`stegobench check` and `stegobench scan` exist only as signposts: they refuse,
-with exit code 2, and explain the difference. Pointing `score` at a directory
-of images with no records beside them refuses too, with exit code 3, for the
-same reason. Neither is a feature to work around.
+**Do not present what it prints as a measurement.** It emits no `result-v1`
+document, and that is deliberate: a result document is the output of a run
+against images whose answers were fixed before the detector saw them, by
+somebody other than the detector, and recorded beside each file. Unlabelled
+images have none of that, so there is no accuracy, no AUC, and nothing
+quotable. Pointing `score` at a directory of images with no records beside
+them still refuses, with exit code 3, and that refusal is not a feature to
+work around: it is `examine` that the user wants there.
 
-What to do instead: `stegobench list detectors` names every registered
-detector and `stegobench describe <name>` says where each one lives and how it
-is run. Run one of those directly on the user's files, and read its own
-documentation for what its output means.
+Two further things to carry into any answer built on `examine` output. Scores
+from two different detectors are on two unrelated scales and are not
+comparable with each other. And a detector right nine times in ten still calls
+one clean image in ten a hit, so a `stego` cell is a reason to look harder at a
+file rather than a finding about it.
 
 ## Where the registry comes from
 

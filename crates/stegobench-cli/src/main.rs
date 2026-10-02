@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use stegobench_cli::cli::{Cli, Command, ReportFormat};
+use stegobench_cli::examine;
 use stegobench_cli::fetch;
 use stegobench_cli::fixtures;
 use stegobench_cli::help_topics;
@@ -1986,7 +1987,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     // the same code rather than printing a table of zeroes.
     let blocked: Vec<Option<String>> = entries
         .iter()
-        .map(|e| unavailable_reason(e, resolved.adapter_roots()))
+        .map(|e| stegobench_cli::unavailable_reason(e, resolved.adapter_roots()))
         .collect();
     if blocked.iter().all(Option::is_some) {
         return Output::err_because(
@@ -2322,14 +2323,6 @@ fn resolve_detectors<'a>(
     }
     Ok(out)
 }
-
-#[allow(clippy::too_many_arguments)]
-/// Image file extensions, lowercased, that a person is likely to have a folder
-/// of. Not the set the scorer supports: this is a heuristic for recognising
-/// "somebody's pictures", so it is deliberately wider.
-const LOOKS_LIKE_AN_IMAGE: &[&str] = &[
-    "png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp", "gif", "pgm", "ppm", "heic",
-];
 
 /// How many directory entries the shape check is allowed to look at.
 ///
@@ -2699,7 +2692,7 @@ fn unlabelled_corpus(corpus: &Path) -> Option<String> {
                 // records are the RIGHT ones is the corpus loader's job, and
                 // it says so far better than a heuristic could.
                 Some("json" | "jsonl") => return None,
-                Some(ext) if LOOKS_LIKE_AN_IMAGE.contains(&ext) => images += 1,
+                Some(ext) if stegobench_cli::LOOKS_LIKE_AN_IMAGE.contains(&ext) => images += 1,
                 _ => {}
             }
         }
@@ -2710,11 +2703,14 @@ fn unlabelled_corpus(corpus: &Path) -> Option<String> {
     Some(format!(
         "{} holds {images} image(s) and no records saying which of them hides \
          anything, so there is nothing to be right or wrong about.\n\n\
-         Stegobench measures DETECTORS against labelled images; it does not \
-         examine your own.\n\
-         `stegobench help scope`      the difference, and where to go instead\n\
+         `score` measures a detector, which needs the answers in advance. \
+         Asking the detectors what they make of these files is `examine`, and \
+         what comes back is an answer rather than a measurement.\n\
+         `stegobench examine {} --detector <name>`\n\
+         `stegobench help scope`      the difference between the two\n\
          `stegobench list detectors`  what is registered here\n\
          `stegobench help pairing`    what a corpus has to carry first",
+        corpus.display(),
         corpus.display()
     ))
 }
@@ -2855,7 +2851,7 @@ fn cmd_score(resolved: &Resolved, req: ScoreRequest<'_>) -> Output {
     // job and costs a container pull.
     let blocked: Vec<Option<String>> = entries
         .iter()
-        .map(|e| unavailable_reason(e, resolved.adapter_roots()))
+        .map(|e| stegobench_cli::unavailable_reason(e, resolved.adapter_roots()))
         .collect();
     let mut runnable = Vec::new();
     let mut outcomes: Vec<(String, Outcome)> = Vec::new();
@@ -2966,51 +2962,6 @@ fn offer_for_run(reg: &Registry, corpus: &Path, corpus_id: Option<&str>) -> Opti
         return None;
     }
     fetch::offer(reg)
-}
-
-/// Why a detector would not be run here, in the words `score` reports it in.
-///
-/// `None` means it would run. One function rather than one per command,
-/// because `plan` answered this question by not asking it: a seven detector
-/// plan estimated a run that `score` then did with four, overstating the job
-/// and saying nothing at all about the three hard blockers. A pre-flight that
-/// disagrees with the run it previews is worse than no pre-flight.
-///
-/// PRESENT IS NOT THE SAME AS DRIVABLE, AND `score` USED TO TREAT IT AS THE
-/// SAME.
-///
-/// Availability answers whether the code is on this machine. An entry with no
-/// invoke block passes that and still says nothing about what command to
-/// launch, so there is nothing to run. `doctor` has reported this since it
-/// shipped and `score` did not: the run announced "1 of 1 that can run here",
-/// started the tool once per image, recorded "entry declares no invoke block"
-/// against every one of them, and then refused with "the corpus holds 0 clean
-/// and 0 stego image(s)" over a corpus holding six and twelve. A gap in this
-/// project's own registry was reported as a fault in the user's corpus. It is
-/// a skip.
-///
-/// Asked inside the Present arm rather than before the check, so a tool that
-/// is neither installed nor drivable is still answered with the half the
-/// reader can act on.
-fn unavailable_reason(
-    entry: &stegobench_core::registry::Entry,
-    adapter_roots: &[PathBuf],
-) -> Option<String> {
-    match availability::check(entry, adapter_roots).presence {
-        Presence::Present { .. } if entry.invoke.is_none() => Some(
-            "declares no invoke block, so nothing in its registry entry says \
-             what command to launch and the host has no way to drive it"
-                .to_string(),
-        ),
-        Presence::Present { .. } => None,
-        Presence::Unsupported { reason } => Some(format!("cannot run on this machine: {reason}")),
-        Presence::Absent { reason } => Some(format!(
-            "is registered but is not on this machine: {reason}"
-        )),
-        Presence::Unknown { reason } => Some(format!(
-            "whether it can run here could not be established: {reason}"
-        )),
-    }
 }
 
 /// The refusal `score` and `plan` share when not one detector can run.
@@ -3799,14 +3750,17 @@ fn cmd_fetch(
 fn cmd_orientation(offer: Option<fetch::Offer>) -> Output {
     let mut human = "stegobench measures how good a steganography detector is, by \
          running it over images whose answers are already known.\n\
-         It does NOT examine your own images (`stegobench help scope`).\n\n  \
+         It can also run those detectors over images of your own, which is an \
+         answer rather than a measurement (`stegobench help scope`).\n\n  \
          stegobench list detectors    what this installation can run\n  \
+         stegobench examine <image>   what the detectors say about a file\n  \
          stegobench doctor            what is installed, and what it needs\n  \
          stegobench help              the reasoning, one topic at a time\n  \
          stegobench --help            every command and flag"
         .to_string();
     let mut next = vec![
         "stegobench list detectors".to_string(),
+        "stegobench examine <image> --detector <name>".to_string(),
         "stegobench doctor".to_string(),
         "stegobench help scope".to_string(),
     ];
@@ -3836,21 +3790,37 @@ fn cmd_orientation(offer: Option<fetch::Offer>) -> Output {
 /// The words somebody arriving with "is there something hidden in my photo"
 /// types before they read anything.
 ///
-/// They are answered with the same tailored refusal rather than left to clap's
-/// did-you-mean, which suggested `schema` for `check` and nothing at all for
-/// `scan`. They are all the same misunderstanding, so they all get the same
-/// answer to it. `check` and `scan` are also hidden subcommands so that a
-/// trailing path parses; the rest never reach clap's command tree and are
-/// caught by `wrong_direction` instead.
-const WRONG_DIRECTION: &[&str] = &[
-    "analyse", "analyze", "check", "decode", "detect", "examine", "extract", "find", "inspect",
-    "reveal", "run", "scan", "search", "test", "unhide",
-];
+/// This list used to hold fifteen words and all fifteen got the same refusal,
+/// which was the honest answer while the tool could not be pointed at a file
+/// of yours at all. `examine` changed that, so the list split in two by what
+/// is still true. These are the words that still describe something absent:
+/// every one of them is asking for the payload itself, and Stegobench asks
+/// detectors questions rather than pulling data out of pictures.
+const NO_EXTRACTION: &[&str] = &["decode", "extract", "reveal", "unhide"];
 
 /// Is this one of the words above, whatever case it was typed in?
-fn wrong_direction(typed: &str) -> bool {
+fn no_extraction(typed: &str) -> bool {
     let typed = typed.to_lowercase();
-    WRONG_DIRECTION.contains(&typed.as_str())
+    NO_EXTRACTION.contains(&typed.as_str())
+}
+
+/// The words that now mean `examine`.
+///
+/// `check`, `scan`, `inspect`, `detect` and `analyse` are clap aliases on the
+/// command itself, so they never reach here; they are listed anyway because a
+/// word belongs in exactly one of these two sets and leaving them out would
+/// make this one read as the complete answer to "what did they guess". The
+/// rest are vaguer guesses that cannot be aliases: `run` and `test` would
+/// both be misleading as names for this, and `find` and `search` sound like
+/// they take a needle.
+const MEANT_EXAMINE: &[&str] = &[
+    "analyse", "analyze", "check", "detect", "examine", "find", "inspect", "run", "scan", "search",
+    "test",
+];
+
+fn meant_examine(typed: &str) -> bool {
+    let typed = typed.to_lowercase();
+    MEANT_EXAMINE.contains(&typed.as_str())
 }
 
 /// Words that mean the right thing and are not the verb.
@@ -3895,24 +3865,90 @@ fn cmd_right_idea(word: &str) -> Output {
     )
 }
 
-/// The refusal those words get.
+/// The refusal the extraction words get.
 ///
-/// The second clause names no verb of its own. "it does not run your own
-/// images" is what a verb-substituting sentence produced for `run`, and a
-/// refusal that reads as nonsense teaches the reader nothing.
-fn cmd_wrong_direction(word: &str) -> Output {
+/// It has to say two things rather than one, and in this order: the thing
+/// they asked for is absent, and the nearby thing they probably want is not.
+/// Leading with `examine` would read as though it extracts.
+fn cmd_no_extraction(word: &str) -> Output {
     Output::err(
         exit::USAGE,
         format!(
-            "there is no `stegobench {word}`. Stegobench measures DETECTORS \
-             against labelled images, and it cannot tell you whether anything \
-             is hidden in an image of yours.\n\n\
-             `stegobench help scope`      the difference, and where to go \
-             instead\n\
-             `stegobench list detectors`  what is registered here\n\
-             `stegobench score --corpus <labelled corpus> --detector <name>`"
+            "there is no `stegobench {word}`. Stegobench asks detectors \
+             questions about images; it does not pull a hidden payload back \
+             out of one.\n\n\
+             `stegobench examine <image> --detector <name>`  what the \
+             detectors say about it\n\
+             `stegobench list detectors`                     what is \
+             registered here\n\
+             `stegobench help scope`                         what an answer \
+             about one image is worth"
         ),
     )
+}
+
+/// The redirect the examiner words get.
+fn cmd_meant_examine(word: &str) -> Output {
+    Output::err(
+        exit::USAGE,
+        format!(
+            "there is no `stegobench {word}`. Asking detectors about images \
+             of your own is `examine`.\n\n\
+             `stegobench examine <image>... --detector <name>`  ask one, or \
+             several at once\n\
+             `stegobench list detectors`                        what is \
+             registered here\n\
+             `stegobench help scope`                            why that \
+             answer is not a measurement"
+        ),
+    )
+}
+
+/// `examine`: what the named detectors say about the images the user brought.
+///
+/// The table is the payload even when the exit code is not zero, for the same
+/// reason `report`'s is: a column that failed and three that answered is
+/// worth seeing, and diverting it to stderr hides it in exactly the case
+/// somebody most needs to read it.
+fn cmd_examine(
+    resolved: &Resolved,
+    images: &[PathBuf],
+    detectors: &[String],
+    timeout: u64,
+    jobs: usize,
+    raw: Option<&Path>,
+) -> Output {
+    // Progress goes to stderr, so `--json` on stdout stays machine readable
+    // while a person can still watch a container start up.
+    let say = |line: &str| eprintln!("  {line}");
+
+    let found = match examine::run(
+        &resolved.registry,
+        examine::Request {
+            detectors,
+            images,
+            timeout: std::time::Duration::from_secs(timeout),
+            jobs,
+            adapter_roots: resolved.adapter_roots(),
+            raw,
+        },
+        say,
+    ) {
+        Ok(found) => found,
+        Err(e) => return Output::err_because(e.exit_code(), e.reason(), e.to_string()),
+    };
+
+    let mut human = found.table();
+    for note in found.footnotes() {
+        human.push('\n');
+        human.push_str(&note);
+        human.push('\n');
+    }
+
+    let mut out = Output::ok(found.to_json(), human);
+    out.code = found.exit_code();
+    out.payload_on_stdout = true;
+    out
 }
 
 fn run(cli: &Cli) -> Output {
@@ -3987,6 +4023,15 @@ fn run(cli: &Cli) -> Output {
                 Err(e) => Output::err(exit::PREFLIGHT_REFUSED, e.to_string()),
             }
         }),
+        Command::Examine {
+            images,
+            detectors,
+            timeout,
+            jobs,
+            raw,
+        } => with_registry(cli, |r| {
+            cmd_examine(r, images, detectors, *timeout, *jobs, raw.as_deref())
+        }),
         Command::Score {
             corpus,
             detector,
@@ -4047,8 +4092,6 @@ fn run(cli: &Cli) -> Output {
         Command::Report { paths, format, out } => cmd_report(paths, *format, out.as_deref()),
         Command::Completions { shell } => cmd_completions(*shell),
         Command::Help { topic } => cmd_help(topic.as_deref()),
-        Command::Check { .. } => cmd_wrong_direction("check"),
-        Command::Scan { .. } => cmd_wrong_direction("scan"),
     }
 }
 
@@ -4069,8 +4112,12 @@ fn parse_or_explain() -> Cli {
             let Some(typed) = typed else {
                 e.exit();
             };
-            if wrong_direction(&typed) {
-                eprintln!("{}", cmd_wrong_direction(&typed).human);
+            if no_extraction(&typed) {
+                eprintln!("{}", cmd_no_extraction(&typed).human);
+                std::process::exit(exit::USAGE);
+            }
+            if meant_examine(&typed) {
+                eprintln!("{}", cmd_meant_examine(&typed).human);
                 std::process::exit(exit::USAGE);
             }
             if right_idea(&typed) {
@@ -4332,8 +4379,7 @@ fn human_is_content(command: &Command) -> bool {
         | Command::Score { .. }
         | Command::Fetch { .. }
         | Command::Report { .. }
-        | Command::Check { .. }
-        | Command::Scan { .. } => false,
+        | Command::Examine { .. } => false,
     }
 }
 
@@ -5400,67 +5446,89 @@ mod tests {
     }
 
     /// `check` and `scan` are the two words rungs 2 and 3 guess, and clap
-    /// suggested `schema` for one and nothing for the other. Both are the same
-    /// misunderstanding and both get the same answer.
+    /// suggested `schema` for one and nothing for the other.
+    ///
+    /// They used to be signposts that refused and explained the tool could
+    /// not examine your own images. `examine` made that explanation false, so
+    /// they are aliases on it now, and this test changed direction with them:
+    /// what it protects is that the guessed word still lands somewhere
+    /// deliberate rather than on clap's did-you-mean.
     #[test]
-    fn check_and_scan_explain_the_direction_rather_than_reporting_a_typo() {
-        for word in ["check", "scan"] {
-            let parsed = Cli::try_parse_from(["stegobench", word, "./images"])
-                .unwrap_or_else(|e| panic!("`{word}` is routed rather than rejected: {e}"));
-            let out = run(&parsed);
-            assert_eq!(out.code, exit::USAGE, "`{word}` should be a usage error");
+    fn the_guessed_words_run_examine_rather_than_reporting_a_typo() {
+        for word in ["check", "scan", "inspect", "detect", "analyse", "analyze"] {
+            let parsed = Cli::try_parse_from(["stegobench", word, "./photo.png", "-d", "zsteg"])
+                .unwrap_or_else(|e| panic!("`{word}` is rejected rather than routed: {e}"));
             assert!(
-                out.human.contains("help scope"),
-                "`{word}` does not point at the scope topic: {}",
-                out.human
-            );
-            assert!(
-                out.human.contains("measures DETECTORS"),
-                "`{word}` does not say what the tool measures: {}",
-                out.human
+                matches!(parsed.command, Some(Command::Examine { .. })),
+                "`{word}` parses as something other than examine"
             );
         }
     }
 
-    /// EVERY word on the list, not just the two that are hidden subcommands.
+    /// And the alias refuses before it starts anything, on the same path a
+    /// real name would.
     ///
-    /// `detect` is the likeliest first guess of all, and it fell through to
-    /// the generic "there is no `stegobench detect`" while the tailored
-    /// answer sat one match arm away. The whole list is walked here so that
+    /// Deliberately a file that does not exist: this calls `run`, and a test
+    /// that reaches a container would spend the per image timeout waiting for
+    /// a detector nobody asked it to measure anything with.
+    #[test]
+    fn an_alias_refuses_a_missing_file_without_starting_a_detector() {
+        let parsed = Cli::try_parse_from([
+            "stegobench",
+            "check",
+            "./no-such-image-exists-here.png",
+            "-d",
+            "zsteg",
+        ])
+        .expect("the alias parses");
+        let out = run(&parsed);
+        assert_eq!(out.code, exit::PREFLIGHT_REFUSED, "{}", out.human);
+        assert_eq!(out.json["reason"], "not-a-file", "{}", out.json);
+    }
+
+    /// EVERY word on both lists.
+    ///
+    /// `detect` is the likeliest first guess of all, and it once fell through
+    /// to the generic "there is no `stegobench detect`" while the tailored
+    /// answer sat one match arm away. Both lists are walked here so that
     /// adding a word and forgetting to wire it up fails rather than ships.
     #[test]
-    fn every_wrong_direction_word_reaches_the_tailored_answer() {
+    fn every_extraction_word_is_told_that_extraction_is_absent() {
         assert!(
-            WRONG_DIRECTION.windows(2).all(|w| w[0] < w[1]),
+            NO_EXTRACTION.windows(2).all(|w| w[0] < w[1]),
             "the list is meant to stay sorted so a reader can find a word in it"
         );
-        for word in WRONG_DIRECTION {
+        for word in NO_EXTRACTION {
+            assert!(no_extraction(word), "`{word}` is on the list and unmatched");
             assert!(
-                wrong_direction(word),
-                "`{word}` is on the list and unmatched"
-            );
-            assert!(
-                wrong_direction(&word.to_uppercase()),
+                no_extraction(&word.to_uppercase()),
                 "`{word}` typed in capitals is the same misunderstanding"
             );
-            let out = cmd_wrong_direction(word);
+            // And it is on exactly one list. A word that is on both would get
+            // whichever answer the dispatch happens to try first, and the two
+            // answers say opposite things about whether the thing exists.
+            assert!(
+                !meant_examine(word),
+                "`{word}` is on both lists, so its answer depends on arm order"
+            );
+            let out = cmd_no_extraction(word);
             assert_eq!(out.code, exit::USAGE, "`{word}` should be a usage error");
-            for expected in ["measures DETECTORS", "help scope", "list detectors"] {
+            for expected in [
+                "does not pull a hidden payload",
+                "examine",
+                "list detectors",
+            ] {
                 assert!(
                     out.human.contains(expected),
                     "`{word}` does not say {expected:?}: {}",
                     out.human
                 );
             }
-            // Either clap parses it (the two hidden signposts) and `run`
-            // routes it here, or clap rejects it as an unknown subcommand and
-            // `parse_or_explain` catches it on the word. Anything else means
-            // the word never reaches this answer at runtime.
+            // Clap must reject it as an unknown subcommand, which is what
+            // `parse_or_explain` catches it on. Anything else means the word
+            // never reaches this answer at runtime.
             match Cli::try_parse_from(["stegobench", word, "./photo.png"]) {
-                Ok(parsed) => assert!(
-                    run(&parsed).human.contains("measures DETECTORS"),
-                    "`{word}` parses but is not routed to the answer"
-                ),
+                Ok(_) => panic!("`{word}` parsed as a command, and it is not one"),
                 Err(e) => assert_eq!(
                     e.kind(),
                     clap::error::ErrorKind::InvalidSubcommand,
@@ -5470,9 +5538,48 @@ mod tests {
         }
     }
 
-    /// The list must not swallow a real command or a plain typo.
+    /// The words that now mean `examine`, each reaching it or reaching the
+    /// redirect that names it.
     #[test]
-    fn a_real_command_is_never_read_as_the_wrong_direction() {
+    fn every_examiner_word_reaches_examine() {
+        assert!(
+            MEANT_EXAMINE.windows(2).all(|w| w[0] < w[1]),
+            "the list is meant to stay sorted so a reader can find a word in it"
+        );
+        for word in MEANT_EXAMINE {
+            assert!(meant_examine(word), "`{word}` is on the list and unmatched");
+            assert!(
+                meant_examine(&word.to_uppercase()),
+                "`{word}` typed in capitals means the same thing"
+            );
+            // Either it is an alias clap parses straight into the command, or
+            // clap rejects it and the redirect names `examine`.
+            match Cli::try_parse_from(["stegobench", word, "./photo.png", "-d", "zsteg"]) {
+                Ok(parsed) => assert!(
+                    matches!(parsed.command, Some(Command::Examine { .. })),
+                    "`{word}` parses as something other than examine"
+                ),
+                Err(e) => {
+                    assert_eq!(
+                        e.kind(),
+                        clap::error::ErrorKind::InvalidSubcommand,
+                        "`{word}` fails in a way `parse_or_explain` does not catch"
+                    );
+                    let out = cmd_meant_examine(word);
+                    assert_eq!(out.code, exit::USAGE);
+                    assert!(
+                        out.human.contains("is `examine`"),
+                        "`{word}` does not name the command: {}",
+                        out.human
+                    );
+                }
+            }
+        }
+    }
+
+    /// Neither list may swallow a real command or a plain typo.
+    #[test]
+    fn a_real_command_is_never_read_as_a_guess() {
         for word in [
             "list",
             "score",
@@ -5484,7 +5591,8 @@ mod tests {
             "frobnicate",
             "",
         ] {
-            assert!(!wrong_direction(word), "`{word}` was diverted");
+            assert!(!no_extraction(word), "`{word}` was diverted");
+            assert!(!meant_examine(word), "`{word}` was diverted");
         }
     }
 
@@ -5911,11 +6019,20 @@ mod tests {
             help.contains("stdout") && help.contains("stderr"),
             "the stream contract was dropped rather than moved"
         );
+        // The long help has to keep BOTH halves of the distinction, and the
+        // assertion changed shape when `examine` landed: it used to check for
+        // a sentence saying the tool cannot examine your own images, which
+        // stopped being true. What it protects now is that the help still
+        // separates the two, because a reader who misses the distinction
+        // quotes an examination as a benchmark figure.
+        let lower = help.to_lowercase();
         assert!(
-            help.to_lowercase()
-                .contains("does not examine your own images"),
-            "the long help does not separate measuring a detector from \
-             examining your own images"
+            lower.contains("images of your own"),
+            "the long help no longer says the tool can be pointed at your own images"
+        );
+        assert!(
+            lower.contains("not a measurement"),
+            "the long help no longer says an examination is not a measurement"
         );
     }
 
@@ -8443,8 +8560,12 @@ mod tests {
         for word in ["benchmark", "eval", "evaluate", "Benchmark"] {
             assert!(right_idea(word), "{word} gets the generic message");
             assert!(
-                !wrong_direction(word),
-                "{word} is not the wrong direction, only the wrong verb"
+                !no_extraction(word),
+                "{word} is not asking for a payload, only using the wrong verb"
+            );
+            assert!(
+                !meant_examine(word),
+                "{word} means the measurement, not an examination"
             );
         }
         let out = cmd_right_idea("benchmark");
@@ -8455,7 +8576,7 @@ mod tests {
             out.human
         );
         assert!(
-            !out.human.contains("cannot tell you whether"),
+            !out.human.contains("does not pull a hidden payload"),
             "a reader who typed benchmark has understood the tool:\n{}",
             out.human
         );
