@@ -20,9 +20,20 @@ output = "score"
 formats = ["png", "jpeg"]
 
 [cost]
-seconds_per_image = 1.4
+# MEASURED 2026-10-02 on an idle 16 core box, replacing a declared 1.4 seconds
+# that was wrong by more than ten times and produced a `plan` estimate of 13
+# minutes for a job that takes about 2.7 hours. A developer planned an afternoon
+# on that figure and abandoned the run.
+#
+# 15.6 seconds of wall clock per 512 by 512 image, and 107 CPU seconds, because
+# `rs_image` forks internally and spreads itself over about 7 cores. That is why
+# `cores_per_worker` is 7 rather than 2: throughput measured FLAT at roughly 4
+# images a minute whether the run used 3 workers or 14, because one invocation
+# already saturates half the machine, and a worker count chosen from the old
+# figure just oversubscribes the box.
+seconds_per_image = 15.6
 peak_rss_mb = 520
-cores_per_worker = 2
+cores_per_worker = 7
 
 [invoke]
 # Driven through the library, not the command line, because the CLI compares

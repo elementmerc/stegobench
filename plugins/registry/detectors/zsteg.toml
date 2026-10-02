@@ -28,7 +28,13 @@ output = "verdict"
 formats = ["png", "bmp"]
 
 [cost]
-seconds_per_image = 0.1
+# MEASURED 2026-10-02: 0.72 seconds per image end to end, serially, against a
+# declared 0.1. The old figure was not wrong about zsteg, it was wrong about the
+# run: zsteg's own work really is about 0.1 seconds, and the other 0.62 is
+# starting a container and loading Ruby, which this entry pays once per image
+# because it is not batched. What `plan` has to predict is the run, so the
+# number here is the run.
+seconds_per_image = 0.72
 peak_rss_mb = 120
 cores_per_worker = 1
 
