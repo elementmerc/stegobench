@@ -24,7 +24,7 @@
 //! more often than it gets read as an absence.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -80,6 +80,15 @@ pub enum MetricsError {
         MAX_INPUT_BYTES / (1024 * 1024)
     )]
     TooLarge { path: String },
+    #[error(
+        "nothing was given to read. This reads a JSON object of scores and \
+         labels, either from a file you name or piped in on standard \
+         input.\n  stegobench metrics scores.json\n  cat scores.json | \
+         stegobench metrics -\nIt should look like {{\"scores\": [0.91, \
+         0.02], \"labels\": [true, false]}}, with null for an item the \
+         detector could not score"
+    )]
+    NothingToRead,
     #[error(
         "{count} scores is more than the {MAX_SCORES} this reads in one call. \
          Split the run into arms and score each one"
@@ -151,6 +160,7 @@ impl MetricsError {
             | MetricsError::BudgetNotARate { .. }
             | MetricsError::DuplicateBudget { .. }
             | MetricsError::LengthMismatch { .. } => exit::USAGE,
+            MetricsError::NothingToRead => exit::USAGE,
             MetricsError::TooLarge { .. }
             | MetricsError::TooManyScores { .. }
             | MetricsError::Empty
@@ -170,6 +180,7 @@ impl MetricsError {
     pub fn reason(&self) -> &'static str {
         match self {
             MetricsError::Read { .. } => "read-failed",
+            MetricsError::NothingToRead => "nothing-to-read",
             MetricsError::TooLarge { .. } => "input-too-large",
             MetricsError::TooManyScores { .. } => "too-many-scores",
             MetricsError::NotJson { .. } => "not-json",
@@ -383,7 +394,29 @@ fn parse_budgets(at: &[String]) -> Result<Vec<(String, f64)>, MetricsError> {
 /// The metadata check is the cheap one and it fires before a byte is copied.
 /// It is not sufficient on its own: standard input has no length to ask about,
 /// and a file can grow between the two calls, so the read is capped as well.
+/// Whether there is anything to read, given where it would come from.
+///
+/// A COMMAND THAT LOOKS HUNG IS WORSE THAN ONE THAT REFUSES.
+///
+/// With no `--file`, this read standard input with no deadline. Typed at a
+/// terminal, `stegobench metrics` therefore sat there silently forever, which
+/// reads as a hang rather than as a prompt, and the same thing cost this
+/// project a twelve minute test run: the walk over every subcommand ran this
+/// one with an inherited stdin that stayed open and never delivered a byte.
+///
+/// A terminal is the one case where waiting is certainly wrong, because
+/// nothing is going to arrive that the person did not type, and they have not
+/// been told to type anything. A pipe is left alone: a slow producer is a
+/// legitimate thing to wait for, and putting a deadline on that would break
+/// `score | metrics` on a large corpus.
+fn nothing_to_read(file: Option<&Path>, stdin_is_a_terminal: bool) -> Option<MetricsError> {
+    (file.is_none() && stdin_is_a_terminal).then_some(MetricsError::NothingToRead)
+}
+
 fn read_input(file: Option<&Path>) -> Result<(String, String), MetricsError> {
+    if let Some(e) = nothing_to_read(file, std::io::stdin().is_terminal()) {
+        return Err(e);
+    }
     let (label, mut reader): (String, Box<dyn Read>) = match file {
         None => (
             "standard input".to_string(),
@@ -911,5 +944,40 @@ mod tests {
         // Full precision is still one flag away, for anybody doing
         // arithmetic on it.
         assert_eq!(report.to_json()["auc"], serde_json::json!(1.0));
+    }
+}
+
+#[cfg(test)]
+mod nothing_to_read_at_all {
+    use super::*;
+
+    /// A terminal with no file is the one case where waiting is certainly
+    /// wrong, and it was the case that looked like a hang.
+    #[test]
+    fn a_terminal_with_no_file_is_refused_rather_than_waited_on() {
+        let e = nothing_to_read(None, true).expect("refused");
+        assert_eq!(e.exit_code(), exit::USAGE);
+        let said = e.to_string();
+        // It has to say both ways in, because the reader who met the silence
+        // had been given neither.
+        assert!(said.contains("metrics scores.json"), "{said}");
+        assert!(said.contains("standard input"), "{said}");
+        assert!(said.contains("| stegobench metrics"), "{said}");
+        assert_eq!(e.reason(), "nothing-to-read");
+    }
+
+    /// A pipe is left alone. A slow producer is a legitimate thing to wait
+    /// for, and refusing it would break `score` feeding this on a big corpus.
+    #[test]
+    fn a_pipe_is_still_waited_on() {
+        assert!(nothing_to_read(None, false).is_none());
+    }
+
+    /// A file is read whatever the terminal is doing.
+    #[test]
+    fn naming_a_file_never_consults_the_terminal() {
+        let path = std::path::PathBuf::from("scores.json");
+        assert!(nothing_to_read(Some(&path), true).is_none());
+        assert!(nothing_to_read(Some(&path), false).is_none());
     }
 }
