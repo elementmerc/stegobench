@@ -149,6 +149,14 @@ def why_skipped(url: str) -> str | None:
         return "is a reserved example domain"
     if "." not in host:
         return "is not a resolvable name, so it is an example"
+    if any(label == "" for label in host.split(".")):
+        # An elision, as in `https://.../file.tar`, which is how this
+        # repository writes the shape of an address whose host depends on the
+        # mirror. No real host has an empty label, so nothing legitimate is
+        # excused by this. Without it the checker hands `...` to DNS and
+        # reports an idna codec error as an address that gave no answer,
+        # which reads as a broken link in a release gate.
+        return "has an elided host, so it is an example"
     return None
 
 

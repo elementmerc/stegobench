@@ -26,15 +26,6 @@
 # Every entry needs a reason a stranger can evaluate. "Flaky" is not one.
 
 [[address]]
-url = "https://github.com/elementmerc/stegobench"
-reason = """
-This repository is private today. The address is correct and answers 404 to \
-everybody outside the account, and it starts working the moment the repo is \
-made public, which is the plan rather than a hypothetical. Delete this entry \
-at the flip; the checker will fail and ask you to, the first night after.\
-"""
-
-[[address]]
 url = "https://token.actions.githubusercontent.com"
 reason = """
 An OpenID Connect issuer identifier, not a page. It appears in \
