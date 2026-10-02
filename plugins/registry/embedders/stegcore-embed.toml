@@ -19,6 +19,11 @@ name = "stegcore-embed"
 kind = "embedder"
 upstream = "https://github.com/The-Malware-Files/Stegcore"
 licence = "AGPL-3.0-or-later"
+redistribution = "permitted"
+redistribution_reason = """
+AGPL-3.0-or-later and ours. A local binary, so there is nothing to mirror;
+recorded so silence is not mistaken for a problem.
+"""
 maintainer = "us"
 notes = "Adaptive LSB with an authenticated cipher, so the payload is indistinguishable from random before it is placed. Unlike the classic tools here it encrypts by default, which is what a modern tool does and what makes it a harder arm rather than a fairer one."
 

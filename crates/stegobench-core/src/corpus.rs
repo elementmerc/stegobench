@@ -217,12 +217,52 @@ pub enum Redistribution {
     /// Nobody has established it either way. Treated as forbidden by any gate:
     /// an unknown is not a yes.
     Unknown,
+    /// No grant exists and the operator decided to serve a copy anyway.
+    ///
+    /// WHY A FOURTH STATE RATHER THAN BENDING ONE OF THE OTHER THREE
+    ///
+    /// This is a real position and it was reached deliberately on 2026-10-02
+    /// over `stegexpose`: the upstream repository is archived and was published
+    /// to be used, its author has been emailed, the mirror is non commercial
+    /// and exists so a reader can reproduce a measurement, and it comes down on
+    /// request. None of that is a licence, so calling it `Permitted` would make
+    /// this project assert a grant it does not have, which is precisely the
+    /// failure it was built to correct. Calling it `Unknown` would be a lie in
+    /// the other direction: the position IS known, somebody decided it, and the
+    /// reason is on the record.
+    ///
+    /// So it is its own value, and the two questions it keeps apart are
+    /// different questions: [`Redistribution::allows_publishing`] asks whether a
+    /// grant exists and this is not one, while
+    /// [`Redistribution::may_be_served`] asks whether somebody decided to serve
+    /// it and this is exactly that. A tool generating a public licence claim
+    /// must use the first; a publish script must use the second.
+    ///
+    /// `redistribution_reason` is required beside it and says what was decided,
+    /// by whom, when, and on what condition it stops.
+    MirroredByDecision,
 }
 
 impl Redistribution {
-    /// What a publish gate acts on. Only an explicit `Permitted` is a yes.
+    /// Whether a GRANT exists. Only an explicit `Permitted` is a yes.
+    ///
+    /// A decision to mirror without a grant is deliberately NOT a yes here, so
+    /// nothing that generates a licence claim can read one out of it.
     pub fn allows_publishing(self) -> bool {
         matches!(self, Redistribution::Permitted)
+    }
+
+    /// Whether somebody decided a copy may be served, which is the question a
+    /// publish script is actually asking.
+    ///
+    /// True for a grant and for a recorded decision to mirror without one.
+    /// False for forbidden and for unstated, because an unknown is not a yes
+    /// however the question is phrased.
+    pub fn may_be_served(self) -> bool {
+        matches!(
+            self,
+            Redistribution::Permitted | Redistribution::MirroredByDecision
+        )
     }
 }
 
@@ -890,6 +930,9 @@ impl CorpusEntry {
             Redistribution::Permitted => "republish: yes",
             Redistribution::Forbidden => "republish: no",
             Redistribution::Unknown => "republish: unknown",
+            // Said as a decision rather than as a permission, because a reader
+            // scanning this column must not come away thinking a grant exists.
+            Redistribution::MirroredByDecision => "republish: mirrored, no grant",
         };
         let size = match (self.properties.base_images, self.properties.total_images) {
             (Some(b), _) => format!("{b} covers"),
@@ -903,11 +946,26 @@ impl CorpusEntry {
     }
 }
 
+/// The verdict as a reader-facing phrase, for the places that print it.
+///
+/// Public and here rather than in the CLI because `describe` prints it for a
+/// tool and for a corpus, and two renderings of one verdict is how the same
+/// state starts reading as two different states.
+pub fn redistribution_label(r: Redistribution) -> &'static str {
+    match r {
+        Redistribution::Permitted => "permitted",
+        Redistribution::Forbidden => "forbidden",
+        Redistribution::Unknown => "unknown, which any gate here treats as no",
+        Redistribution::MirroredByDecision => "mirrored by decision, with no grant behind it",
+    }
+}
+
 fn redistribution_word(r: Redistribution) -> &'static str {
     match r {
         Redistribution::Permitted => "permitted",
         Redistribution::Forbidden => "forbidden",
         Redistribution::Unknown => "unknown",
+        Redistribution::MirroredByDecision => "mirrored-by-decision",
     }
 }
 

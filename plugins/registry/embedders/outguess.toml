@@ -1,6 +1,11 @@
 name = "outguess"
 kind = "embedder"
 licence = "BSD-3-Clause"
+redistribution = "permitted"
+redistribution_reason = """
+BSD-3-Clause, which permits redistribution in binary form with the notice
+and the disclaimer retained. They ship inside the image with the source.
+"""
 maintainer = "third_party"
 notes = "Re-encodes at quality 75 whatever it is given, which voided a whole measurement round when the clean half had been written at 95. Both halves must come off the same writer."
 

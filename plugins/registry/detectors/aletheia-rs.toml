@@ -6,6 +6,11 @@ name = "aletheia-rs"
 kind = "detector"
 upstream = "https://github.com/daniellerch/aletheia"
 licence = "MIT"
+redistribution = "permitted"
+redistribution_reason = """
+MIT. Same image as aletheia-spa and the same reasoning: the notice ships
+inside the image with the cloned repository.
+"""
 maintainer = "third_party"
 
 [image]

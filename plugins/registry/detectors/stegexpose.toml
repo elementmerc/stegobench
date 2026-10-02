@@ -17,6 +17,31 @@ upstream = "https://github.com/b3dk7/StegExpose"
 # Running it locally is unaffected. Redistributing the image is not, so the
 # image stays unpublished until the author is asked.
 licence = "none-granted"
+redistribution = "mirrored-by-decision"
+redistribution_reason = """
+NO GRANT EXISTS AND WE MIRROR IT ANYWAY. Operator decision, 2026-10-02.
+
+The facts, unchanged from the note above: the upstream repository carries no
+LICENSE, no COPYING and no licence section, so nothing grants any permission
+and the default under copyright is that none is given.
+
+What was weighed. The repository is public and archived by its author, which
+is a published academic tool made available to be used rather than code that
+escaped. The author has been emailed. The mirror is non commercial, nobody
+benefits from it, and it exists for one reason: this detector is one of three
+in the first leaderboard, and without a pullable image a reader cannot
+reproduce that column. The image is a Debian base plus a clone of the
+author's own repository, and `tools/stegexpose/Dockerfile` is public, so a
+reader can already build it themselves; the mirror saves them a build and
+preserves the digest this registry pins.
+
+The condition. It comes down on request from the author, immediately and
+without argument, and this entry returns to `forbidden` if that happens.
+
+Why it is not recorded as `permitted`: it is not. Asserting a grant we do not
+have is the exact failure this project was built to correct, and the whole
+point of this value is that the record says what was actually decided.
+"""
 maintainer = "third_party"
 
 [image]

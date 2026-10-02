@@ -1,6 +1,17 @@
 name = "stegosuite"
 kind = "embedder"
 licence = "GPL-3.0"
+redistribution = "permitted"
+redistribution_reason = """
+GPL-3.0, and section 6(d) permits exactly what we would do: the Corresponding
+Source may sit on a different server operated by us or by a third party, so
+long as clear directions next to the object code say where to find it. It
+arrives as a Debian package, so those directions point at Debian's archive.
+
+The condition is the directions, not the hosting. Publishing this image
+without them beside it would not be compliant, so whoever pushes it writes
+them into the image description at the same time.
+"""
 maintainer = "third_party"
 
 [image]

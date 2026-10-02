@@ -1,6 +1,20 @@
 name = "openstego"
 kind = "embedder"
 licence = "GPL-2.0"
+redistribution = "forbidden"
+redistribution_reason = """
+GPL-2.0, and forbidden until the corresponding source travels with the
+binary. Section 3 of GPL-2 offers two routes, accompanying the binary with
+the complete corresponding source or our own written offer valid three years,
+and it has no equivalent of GPL-3 section 6(d), which is what permits the
+source to sit on a third party's server. So a link alone is neither route.
+
+Not a blocker on anything: this is an EMBEDDER. It built the corpus, the
+corpus is already published to three mirrors, and nobody needs this image to
+reproduce a detector number. Revisit if somebody wants to rebuild the corpus
+from scratch, and then the fix is to mirror the source alongside, which is
+cheap and bounded.
+"""
 maintainer = "third_party"
 notes = "PNG, LSB with an optional random seed."
 

@@ -14,6 +14,10 @@ name = "zsteg"
 kind = "detector"
 upstream = "https://github.com/zed-0xff/zsteg"
 licence = "MIT"
+redistribution = "permitted"
+redistribution_reason = """
+MIT. The gem and its licence ship inside the image.
+"""
 maintainer = "third_party"
 
 [image]

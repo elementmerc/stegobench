@@ -1,6 +1,16 @@
 name = "steghide"
 kind = "embedder"
 licence = "GPL-2.0"
+redistribution = "forbidden"
+redistribution_reason = """
+GPL-2.0, and forbidden for the same reason as openstego: GPL-2 section 3
+wants the corresponding source accompanying the binary or our own written
+offer, and has no equivalent of GPL-3 section 6(d). The tool arrives as a
+Debian package, so the corresponding source is in Debian's archive and
+mirroring it is a small bounded job rather than a hard problem.
+
+Also an embedder, so it blocks nothing today.
+"""
 maintainer = "third_party"
 notes = "JPEG and BMP. The everyday case, and nothing in the panel detects it."
 

@@ -13,6 +13,13 @@ name = "stegashield"
 kind = "detector"
 upstream = "https://hub.docker.com/r/5iprojects/stegashield"
 licence = "proprietary"
+redistribution = "forbidden"
+redistribution_reason = """
+Proprietary, and nothing to decide: this entry names the vendor's own image
+under the vendor's own namespace, so a user's container runtime pulls it from
+them and we never hold or serve a copy. Forbidden here means we must not mirror
+it, not that a user cannot run it.
+"""
 maintainer = "subject"
 secrets = ["STEGASHIELD_LICENCE"]
 notes = "Evaluated September 2026. Never used as a reference detector for anything."

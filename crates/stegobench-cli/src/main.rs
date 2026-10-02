@@ -757,6 +757,29 @@ fn tool_facts(
         },
     )];
     facts.push(("Licence", e.licence.clone()));
+    // SAID HERE BECAUSE THIS IS WHERE SOMEBODY LOOKS BEFORE PUBLISHING ONE.
+    //
+    // The licence answers whether you may run it; this answers whether we may
+    // serve a copy, and the two are different questions. Printed only where the
+    // entry says something, because a tool that is nothing but a local binary
+    // has nothing to mirror and a blank line about it would be noise. The
+    // reason is printed WITH the verdict rather than behind a flag: a verdict
+    // whose reason you have to go and find is one people quote without it, and
+    // the one entry here that says `mirrored by decision` is defensible only
+    // because of what the reason says.
+    if let Some(r) = e.redistribution {
+        facts.push((
+            "Republish",
+            format!(
+                "{}{}",
+                stegobench_core::corpus::redistribution_label(r),
+                match e.redistribution_reason.as_deref().map(str::trim) {
+                    Some(why) if !why.is_empty() => format!(". {why}"),
+                    _ => String::new(),
+                }
+            ),
+        ));
+    }
     let runs = match (&e.image, &e.binary) {
         (Some(i), _) => {
             let sandbox = if e.invoke.as_ref().is_some_and(|i| i.host) {
@@ -898,6 +921,11 @@ fn corpus_facts(c: &stegobench_core::corpus::CorpusEntry) -> Vec<(&'static str, 
                 Redistribution::Permitted => "permitted",
                 Redistribution::Forbidden => "forbidden",
                 Redistribution::Unknown => "unknown, which any gate here treats as no",
+                // Worded so a reader cannot take it for a grant. The reason
+                // beside it is what says who decided and on what condition it
+                // stops, which is the only thing that makes it defensible.
+                Redistribution::MirroredByDecision =>
+                    "mirrored by decision, with no grant behind it",
             },
             c.licence.redistribution_reason
         ),

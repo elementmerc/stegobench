@@ -26,6 +26,7 @@
 //! the SHA256 of the executable actually invoked, which is a stronger claim
 //! than a tag: a tag can move under you and a hash cannot.
 
+use crate::Redistribution;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -74,6 +75,32 @@ pub struct Entry {
     #[serde(default)]
     pub upstream: Option<String>,
     pub licence: String,
+    /// Whether a copy of this tool's IMAGE may be served by us.
+    ///
+    /// WHY THIS IS A SEPARATE QUESTION FROM `licence`
+    ///
+    /// Corpora entries have carried `redistribution` beside their licence since
+    /// the beginning, because a corpus you may use is not always one you may
+    /// publish. Tool entries carried only `licence`, so the two questions were
+    /// one answer, and the day the images were going to be published that gap
+    /// was found by an agent going looking for where to record the answer: there
+    /// was nowhere. Three of the thirteen are GPL and need a corresponding
+    /// source answer, one grants nothing at all, and one is somebody else's
+    /// image that we reference rather than hold.
+    ///
+    /// Unstated is not a yes. A publish path reads
+    /// [`Redistribution::may_be_served`] and an entry that says nothing is
+    /// refused rather than assumed.
+    #[serde(default)]
+    pub redistribution: Option<Redistribution>,
+    /// Why `redistribution` says what it says, in enough detail to disagree with.
+    ///
+    /// **Required whenever `redistribution` is present.** A publish decision
+    /// with no reason beside it is the same defect as a licence somebody wrote
+    /// down from an impression, which is the failure this project exists to
+    /// correct and which it has already found twice in its own registry.
+    #[serde(default)]
+    pub redistribution_reason: Option<String>,
     /// Who maintains the tool. `Us` marks our own work, which the leaderboard
     /// uses to keep our entries out of the ranking: a benchmark run by a
     /// participant is not trusted, and the answer to that is mechanism rather
@@ -1211,6 +1238,29 @@ impl Entry {
             }
         }
 
+        // A DECISION WITH NO REASON IS THE DEFECT THIS FIELD EXISTS TO PREVENT.
+        //
+        // The same rule corpora entries already carry. `mirrored-by-decision`
+        // in particular says no grant exists and somebody chose to serve a copy
+        // anyway, which is only defensible if the record says who, when, and on
+        // what condition it stops.
+        match (&self.redistribution, &self.redistribution_reason) {
+            (Some(r), reason) if reason.as_deref().map(str::trim).unwrap_or("").is_empty() => {
+                bad.push(format!(
+                    "redistribution is {:?} with no redistribution_reason. Say \
+                     what was decided and why, in enough detail that somebody \
+                     else can disagree with it",
+                    r
+                ));
+            }
+            (None, Some(_)) => bad.push(
+                "redistribution_reason is set with no redistribution beside it, \
+                 so the reason explains an answer the entry never gives"
+                    .into(),
+            ),
+            _ => {}
+        }
+
         self.check_no_shipped_address(&mut bad);
 
         // A secret that looks like it holds a value rather than naming one.
@@ -1571,6 +1621,81 @@ must_clear = "b.png"
         assert!(
             !remaining.iter().any(|p| p.contains("invoke.batch")),
             "an entry that declared no batch was told about one: {remaining:?}"
+        );
+    }
+
+    /// The field exists because there was nowhere to record a publish decision
+    /// for a tool, which was found on the day the images were going to be
+    /// published. A decision with no reason beside it is the defect it exists to
+    /// prevent.
+    #[test]
+    fn a_redistribution_verdict_without_a_reason_is_refused() {
+        let e = parse(
+            "redistribution = \"permitted\"\n\
+             [image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        let problems = e.validate().expect_err("a bare verdict is refused");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("no redistribution_reason")),
+            "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    /// And the inverse, because a reason explaining an answer the entry never
+    /// gives reads as though the question was settled.
+    #[test]
+    fn a_reason_with_no_verdict_beside_it_is_refused() {
+        let e = parse(
+            "redistribution_reason = \"because I said so\"\n\
+             [image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        let problems = e.validate().expect_err("a bare reason is refused");
+        assert!(
+            problems.iter().any(|p| p.contains("never gives")),
+            "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    /// The pair together is accepted, so the two tests above cannot be passing
+    /// because every entry is refused.
+    #[test]
+    fn a_verdict_with_its_reason_is_accepted() {
+        let e = parse(
+            "redistribution = \"mirrored-by-decision\"\n\
+             redistribution_reason = \"No grant exists. Decided anyway, and why.\"\n\
+             [image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        let remaining = e.validate().err().unwrap_or_default();
+        assert!(
+            !remaining.iter().any(|p| p.contains("redistribution")),
+            "{remaining:?}"
+        );
+        assert_eq!(e.redistribution, Some(Redistribution::MirroredByDecision));
+    }
+
+    /// An entry saying nothing stays legal, because most tools are not images
+    /// and a required field would be noise on every one of them. What must NOT
+    /// happen is silence reading as a yes, which is the next test.
+    #[test]
+    fn an_entry_that_says_nothing_about_republishing_is_still_valid() {
+        let e = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        assert_eq!(e.redistribution, None);
+        let remaining = e.validate().err().unwrap_or_default();
+        assert!(
+            !remaining.iter().any(|p| p.contains("redistribution")),
+            "{remaining:?}"
         );
     }
 

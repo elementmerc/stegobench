@@ -16,6 +16,13 @@ name = "stegcore"
 kind = "detector"
 upstream = "https://github.com/The-Malware-Files/Stegcore"
 licence = "AGPL-3.0-or-later"
+redistribution = "permitted"
+redistribution_reason = """
+AGPL-3.0-or-later and ours. A local binary rather than an image, so there is
+nothing to mirror, but the answer is recorded because an entry that says
+nothing is refused by the publish path and silence should not read as a
+problem with our own tool.
+"""
 maintainer = "us"
 notes = "Strong on spatial LSB and structural fingerprints; weak at low payload; blind in the JPEG DCT domain. Stated here so a null result is not read as a finding."
 

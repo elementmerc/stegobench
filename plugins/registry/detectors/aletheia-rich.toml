@@ -8,6 +8,13 @@ name = "aletheia-rich"
 kind = "detector"
 upstream = "https://github.com/daniellerch/aletheia"
 licence = "MIT"
+redistribution = "permitted"
+redistribution_reason = """
+MIT, which permits redistribution in source and binary form provided the
+copyright notice and the permission notice travel with it. The image carries
+the upstream repository including its LICENSE file, so the notice is in the
+artefact rather than only in this entry.
+"""
 maintainer = "third_party"
 notes = "Feature extractor. Pair with a classifier; it does not decide anything on its own."
 

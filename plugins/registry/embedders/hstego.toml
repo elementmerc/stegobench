@@ -1,6 +1,10 @@
 name = "hstego"
 kind = "embedder"
 licence = "MIT"
+redistribution = "permitted"
+redistribution_reason = """
+MIT. The notice ships inside the image with the source.
+"""
 maintainer = "third_party"
 notes = "Modern, HILL based. Closer to what a capable adversary would actually use."
 
