@@ -50,6 +50,66 @@ pub enum Answer {
     Failed(String),
 }
 
+/// What this file actually is, as a lowercase format name matching the
+/// vocabulary a registry entry's `accepts.formats` uses.
+///
+/// Read from the first bytes rather than the extension, because an exhibit
+/// arrives named however it arrived: a forensic examiner's `.jpg` from an
+/// email attachment is whatever the sender made, and renaming a file does not
+/// change what a detector will find when it opens it.
+///
+/// `None` where the bytes say nothing recognisable, and a `None` is treated
+/// as applicable everywhere. Withholding a detector on a guess would be the
+/// same fault in the other direction.
+fn format_of(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    let read = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .ok()?;
+    let head = &head[..read];
+    let starts = |magic: &[u8]| head.starts_with(magic);
+    if starts(b"\x89PNG\r\n\x1a\n") {
+        return Some("png".into());
+    }
+    if starts(&[0xFF, 0xD8, 0xFF]) {
+        return Some("jpeg".into());
+    }
+    if starts(b"BM") {
+        return Some("bmp".into());
+    }
+    if starts(b"GIF8") {
+        return Some("gif".into());
+    }
+    if starts(b"II*\x00") || starts(b"MM\x00*") {
+        return Some("tiff".into());
+    }
+    if head.len() >= 12 && starts(b"RIFF") && &head[8..12] == b"WEBP" {
+        return Some("webp".into());
+    }
+    if starts(b"P5") || starts(b"P6") {
+        return Some("pnm".into());
+    }
+    None
+}
+
+/// Does this entry's own declaration say it reads this format?
+///
+/// An entry declaring nothing is asked about everything, which is the honest
+/// reading of an empty list: nobody has written down what it reads.
+fn reads_format(entry: &stegobench_core::registry::Entry, format: Option<&String>) -> bool {
+    if entry.accepts.formats.is_empty() {
+        return true;
+    }
+    let Some(format) = format else {
+        return true;
+    };
+    entry.accepts.formats.iter().any(|declared| {
+        let declared = declared.to_ascii_lowercase();
+        declared == *format || (declared == "jpg" && format == "jpeg")
+    })
+}
+
 impl Answer {
     /// The cell as a reader sees it.
     fn cell(&self) -> String {
@@ -80,6 +140,13 @@ pub struct Column {
 pub struct Examination {
     pub images: Vec<PathBuf>,
     pub columns: Vec<Column>,
+    /// Detectors asked about an image whose format their own entry does not
+    /// declare: the name, what it declares, and how many such images.
+    ///
+    /// Kept rather than refused, because the one real detection a forensic
+    /// examiner got out of this command came from exactly that case. The
+    /// answer stands and the caveat goes under the table.
+    pub undeclared: Vec<(String, String, usize)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -333,6 +400,12 @@ where
 
     let scratch = tempfile::tempdir().map_err(|source| ExamineError::NoScratch { source })?;
     let mut columns = Vec::with_capacity(entries.len());
+    // Sniffed once for the whole run rather than once per detector: it opens
+    // every file, and a seven detector examination would otherwise do it
+    // seven times for no new information.
+    let formats: Vec<Option<String>> = images.iter().map(|p| format_of(p)).collect();
+    // Detector, what it declares, and how many images were outside that.
+    let mut undeclared: Vec<(String, String, usize)> = Vec::new();
 
     for entry in entries {
         // The same question `score` and `doctor` ask, through the same
@@ -351,12 +424,22 @@ where
             continue;
         }
 
-        progress(&format!("{} over {} image(s)", entry.name, images.len()));
-
         // A path inside a fresh scratch directory, so nothing resumes: an
         // examination is never continued from a previous one, and a stale
         // record would answer about a file the user is not asking about now.
         let records = scratch.path().join(format!("{}.records.jsonl", entry.name));
+        // ASKED ABOUT EVERY IMAGE, AND WARNED ABOUT THE ONES OUTSIDE ITS
+        // DECLARATION. Skipping them was tried first and it was wrong: zsteg
+        // declares png and bmp, and the thing it found in the examiner's
+        // JPEG exhibit was real, so refusing to ask threw away a true
+        // detection to avoid an undefendable one. The reader needs both
+        // facts, which means the answer and the caveat, not one of them.
+        let outside: Vec<&PathBuf> = images
+            .iter()
+            .zip(&formats)
+            .filter(|(_, f)| !reads_format(entry, f.as_ref()))
+            .map(|(path, _)| path)
+            .collect();
         let items: Vec<WorkItem> = images
             .iter()
             .map(|path| WorkItem {
@@ -364,8 +447,25 @@ where
                 path: path.clone(),
             })
             .collect();
+        if outside.is_empty() {
+            progress(&format!("{} over {} image(s)", entry.name, images.len()));
+        } else {
+            progress(&format!(
+                "{} over {} image(s); it declares {} and {} of them are not",
+                entry.name,
+                images.len(),
+                entry.accepts.formats.join(", "),
+                outside.len()
+            ));
+        }
+        undeclared.push((
+            entry.name.clone(),
+            entry.accepts.formats.join(", "),
+            outside.len(),
+        ));
 
-        let mut sink = Collect(Vec::with_capacity(images.len()));
+        let items_asked = items.len();
+        let mut sink = Collect(Vec::with_capacity(items_asked));
         let tally = runner::score(
             runner::Run {
                 entry,
@@ -384,7 +484,7 @@ where
             // handful of images never prints it and a directory of ten
             // thousand does not go silent for hours. Discarding it was the
             // whole observability rule missed in one empty closure.
-            |t| progress(&heartbeat(&entry.name, t.seen(), images.len(), t.errored)),
+            |t| progress(&heartbeat(&entry.name, t.seen(), items_asked, t.errored)),
         )?;
         if let Some(problem) = &tally.raw_problem {
             progress(problem);
@@ -397,7 +497,11 @@ where
         });
     }
 
-    Ok(Examination { images, columns })
+    Ok(Examination {
+        images,
+        columns,
+        undeclared: undeclared.into_iter().filter(|(_, _, n)| *n > 0).collect(),
+    })
 }
 
 /// The line a long examination prints while it works.
@@ -408,7 +512,23 @@ where
 /// against a detector sleeping a second each printed exactly one of these, at
 /// thirty, reading "slow: 30 of 40 answered, 0 errored".
 fn heartbeat(name: &str, answered: u64, total: usize, errored: u64) -> String {
-    format!("{name}: {answered} of {total} answered, {errored} errored")
+    // "still working" because it reads as a summary otherwise, and it only
+    // appears for a detector slow enough to need one. A forensic analyst saw
+    // this line for one of four detectors, took it for that detector's final
+    // tally, and had no idea why the other three had none.
+    format!("still working: {name}, {answered} of {total} answered, {errored} errored")
+}
+
+/// The SHA-256 of a file, or `None` where it could not be read.
+///
+/// Unreadable is recorded rather than skipped: an exhibit that vanished
+/// between the examination and the write is a thing the record should say.
+fn digest_of(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// A record as one cell.
@@ -681,6 +801,15 @@ impl Examination {
                 ));
             }
         }
+        for (detector, declares, count) in &self.undeclared {
+            notes.push(format!(
+                "{detector} reads {declares}, and {count} of these {} image(s) \
+                 are not that. Its answers about those are outside what its \
+                 own entry claims it supports, so treat them as a pointer to \
+                 look rather than as a result.",
+                self.images.len()
+            ));
+        }
         let flat = self.one_answer_for_everything();
         if !flat.is_empty() {
             notes.push(format!(
@@ -697,10 +826,28 @@ impl Examination {
 
     /// The JSON block, which is deliberately not a result document.
     pub fn to_json(&self) -> serde_json::Value {
-        let images: Vec<String> = self
+        // EACH IMAGE BY PATH AND BY DIGEST.
+        //
+        // RAISED BY A JOURNEY, 2026-10-02. A forensic analyst listed "nothing
+        // here hashes the exhibits" as one of two things that would stop this
+        // command being used on casework: a table of filenames says nothing
+        // about which bytes were examined, and a filename is the one piece of
+        // an exhibit that changes most easily. They computed SHA-256 by hand
+        // afterwards, which is work the tool was already doing nothing with.
+        //
+        // In `--json` rather than under the table, because a case file wants
+        // a record and a terminal reader wants six rows they can read. A
+        // digest that cannot be computed is recorded as null rather than
+        // omitted, so a consumer can tell "not hashed" from "not present".
+        let images: Vec<serde_json::Value> = self
             .images
             .iter()
-            .map(|p| p.display().to_string())
+            .map(|p| {
+                serde_json::json!({
+                    "path": p.display().to_string(),
+                    "sha256": digest_of(p),
+                })
+            })
             .collect();
         let columns: Vec<serde_json::Value> = self
             .columns
@@ -728,8 +875,23 @@ impl Examination {
             // accuracy. This carries answers and no accuracy.
             "kind": "examination",
             "measurement": false,
+            // What asked, so a record read months later says which build
+            // produced it. The same two facts a result document carries.
+            "tool": env!("CARGO_PKG_NAME"),
+            "tool_version": env!("CARGO_PKG_VERSION"),
             "images": images,
             "columns": columns,
+            "undeclared_formats": self
+                .undeclared
+                .iter()
+                .map(|(detector, declares, count)| {
+                    serde_json::json!({
+                        "detector": detector,
+                        "declares": declares,
+                        "images_outside": count,
+                    })
+                })
+                .collect::<Vec<_>>(),
         })
     }
 }
@@ -744,6 +906,7 @@ mod tests {
                 .map(|i| PathBuf::from(format!("img{i}.png")))
                 .collect(),
             columns,
+            undeclared: Vec::new(),
         }
     }
 
@@ -936,6 +1099,7 @@ mod tests {
                 "alfa",
                 vec![Answer::Score(0.1), Answer::Score(0.2), Answer::Score(0.3)],
             )],
+            undeclared: Vec::new(),
         };
         let table = e.table();
         assert!(
@@ -1004,6 +1168,109 @@ mod tests {
         );
     }
 
+    /// A tool asked about a format its own entry does not claim has not given
+    /// an answer anybody can defend, and the table used to say nothing.
+    ///
+    /// RAISED BY A JOURNEY, 2026-10-02. zsteg declares png and bmp and was
+    /// handed two JPEGs; a forensic analyst listed it as the second thing a
+    /// defence expert would open with. The answer is KEPT rather than
+    /// withheld, because the one real detection that examination produced was
+    /// zsteg finding appended bytes in one of those JPEGs. Refusing to ask
+    /// would have thrown away a true positive to avoid an awkward one.
+    #[test]
+    fn an_answer_outside_a_detector_s_declared_formats_is_caveated_not_hidden() {
+        let e = Examination {
+            images: vec![
+                PathBuf::from("EXH-003-scan.png"),
+                PathBuf::from("EXH-005-attachment.jpg"),
+            ],
+            columns: vec![answered(
+                "zsteg",
+                vec![Answer::Verdict(true), Answer::Verdict(true)],
+            )],
+            undeclared: vec![("zsteg".to_string(), "png, bmp".to_string(), 1)],
+        };
+        // The answer is still there. This is the half that matters most and
+        // the half an over-strict fix would have removed.
+        let table = e.table();
+        assert!(
+            table.lines().filter(|l| l.contains("stego")).count() >= 2,
+            "the detection was dropped instead of caveated:\n{table}"
+        );
+        let note = e
+            .footnotes()
+            .into_iter()
+            .find(|n| n.contains("png, bmp"))
+            .expect("the caveat names what the detector actually declares");
+        assert!(note.contains("zsteg"), "{note}");
+        assert!(
+            note.contains("1 of these 2"),
+            "it has to say how many were outside: {note}"
+        );
+
+        // Nothing outside the declaration means no note at all, or the caveat
+        // becomes furniture under every table.
+        let clean = Examination {
+            images: vec![PathBuf::from("a.png")],
+            columns: vec![answered("zsteg", vec![Answer::Verdict(false)])],
+            undeclared: Vec::new(),
+        };
+        assert!(
+            !clean.footnotes().iter().any(|n| n.contains("outside what")),
+            "a run entirely inside the declarations carried the caveat anyway"
+        );
+    }
+
+    /// An examination that names its exhibits only by filename is not a
+    /// record of anything.
+    ///
+    /// RAISED BY A JOURNEY, 2026-10-02: a forensic analyst named the absence
+    /// of exhibit hashes as one of two things that would stop this command
+    /// being used on casework, and hashed the six files by hand afterwards.
+    #[test]
+    fn the_json_record_names_every_image_by_digest_and_says_what_produced_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let image = dir.path().join("EXH-001.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nexhibit bytes").expect("written");
+        let e = Examination {
+            images: vec![image.clone()],
+            columns: vec![answered("zsteg", vec![Answer::Verdict(false)])],
+            undeclared: Vec::new(),
+        };
+        let json = e.to_json();
+        let first = &json["images"][0];
+        assert_eq!(
+            first["path"].as_str().expect("a path"),
+            image.display().to_string()
+        );
+        // The digest of those exact bytes, computed independently of the
+        // code under test rather than copied from its output.
+        let expected = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(std::fs::read(&image).expect("read"));
+            format!("{:x}", h.finalize())
+        };
+        assert_eq!(
+            first["sha256"].as_str().expect("a digest"),
+            expected,
+            "the record has to name the bytes, not the filename"
+        );
+        assert_eq!(json["tool_version"], env!("CARGO_PKG_VERSION"));
+
+        // A file that went away between the examination and the write is
+        // recorded as unhashed rather than dropped.
+        let gone = Examination {
+            images: vec![dir.path().join("never-existed.png")],
+            columns: vec![answered("zsteg", vec![Answer::Verdict(false)])],
+            undeclared: Vec::new(),
+        };
+        assert!(
+            gone.to_json()["images"][0]["sha256"].is_null(),
+            "an unreadable exhibit must be null, not missing"
+        );
+    }
+
     #[test]
     fn the_table_aligns_on_the_longest_name_and_cell() {
         let e = Examination {
@@ -1015,6 +1282,7 @@ mod tests {
                 "aletheia-spa",
                 vec![Answer::Score(0.1234), Answer::Verdict(true)],
             )],
+            undeclared: Vec::new(),
         };
         let table = e.table();
         let lines: Vec<&str> = table.lines().collect();
