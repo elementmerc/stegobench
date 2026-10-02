@@ -121,6 +121,12 @@ pub enum ExamineError {
     TooManyImages { path: PathBuf, most: usize },
     #[error("the same detector was asked for twice: {name}")]
     AskedTwice { name: String },
+    #[error(
+        "name at least one detector with --detector, because nothing here \
+         guesses which tool you meant. `stegobench list detectors` names \
+         every one registered"
+    )]
+    NoDetectorNamed,
     #[error("could not make a scratch directory for the run: {source}")]
     NoScratch {
         #[source]
@@ -136,7 +142,8 @@ impl ExamineError {
         match self {
             ExamineError::NotRegistered { .. }
             | ExamineError::NotADetector { .. }
-            | ExamineError::AskedTwice { .. } => exit::USAGE,
+            | ExamineError::AskedTwice { .. }
+            | ExamineError::NoDetectorNamed => exit::USAGE,
             ExamineError::NotAFile { .. }
             | ExamineError::NoImagesInDirectory { .. }
             | ExamineError::TooManyImages { .. } => exit::PREFLIGHT_REFUSED,
@@ -153,6 +160,7 @@ impl ExamineError {
             ExamineError::NotRegistered { .. } => "not-registered",
             ExamineError::NotADetector { .. } => "not-a-detector",
             ExamineError::AskedTwice { .. } => "asked-twice",
+            ExamineError::NoDetectorNamed => "no-detector-named",
             ExamineError::NotAFile { .. } => "not-a-file",
             ExamineError::UnreadableDirectory { .. } => "unreadable-directory",
             ExamineError::NoImagesInDirectory { .. } => "no-images-there",
@@ -265,6 +273,9 @@ fn preflight<'r>(
     registry: &'r stegobench_core::registry::Registry,
     request: &Request<'_>,
 ) -> Result<Vec<&'r Entry>, ExamineError> {
+    if request.detectors.is_empty() {
+        return Err(ExamineError::NoDetectorNamed);
+    }
     let mut entries = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for name in request.detectors {
@@ -329,6 +340,8 @@ where
         // command to drive it. Asking only whether the code is present would
         // start that one once per image and record nothing against every one.
         if let Some(why) = crate::unavailable_reason(entry, request.adapter_roots) {
+            // Shortened because this is a sentence, not a command to paste.
+            let why = crate::shorten_digests(&why);
             progress(&format!("{} {why}, so it answered nothing", entry.name));
             columns.push(Column {
                 detector: entry.name.clone(),
@@ -513,6 +526,19 @@ impl Examination {
         out
     }
 
+    /// Whether any detector answered about any image.
+    ///
+    /// The caveat under the table is about what a number is worth, so a run
+    /// where nothing ran must not carry it: a journey saw every cell read
+    /// `unavailable` and the full "nothing above is an accuracy" paragraph
+    /// printed underneath, and a caveat about a number nobody produced is how
+    /// a reader learns to skip the caveat.
+    pub fn answered_anything(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|c| c.answers.iter().any(|a| !matches!(a, Answer::Failed(_))))
+    }
+
     /// The lines that go under the table.
     ///
     /// Short on purpose. The argument for why an examination is weak evidence
@@ -520,12 +546,20 @@ impl Examination {
     /// they want it; repeating it under every table trains people to skip it.
     pub fn footnotes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        notes.push(
-            "NOT A MEASUREMENT. No image here was labelled, so nothing above is an \
-             accuracy, and a figure from it is not quotable. `stegobench help scope` \
-             says why, and `stegobench score` is what produces a number you can defend."
-                .to_string(),
-        );
+        if self.answered_anything() {
+            notes.push(
+                "NOT A MEASUREMENT. No image here was labelled, so nothing above is an \
+                 accuracy, and a figure from it is not quotable. `stegobench help scope` \
+                 says why, and `stegobench score` is what produces a number you can defend."
+                    .to_string(),
+            );
+        } else {
+            notes.push(
+                "NOTHING RAN, so the table above says nothing about these images. Not \
+                 that they are clean: that nobody looked."
+                    .to_string(),
+            );
+        }
         if self
             .columns
             .iter()
@@ -826,6 +860,118 @@ mod tests {
         assert!(notes[0].contains("not quotable"));
         // One detector needs no warning about comparing scales.
         assert!(!notes.iter().any(|n| n.contains("own scale")));
+    }
+
+    /// A table where nothing ran must not carry the caveat about what a
+    /// number is worth, and must say what it actually means.
+    #[test]
+    fn a_table_where_nothing_ran_says_so_instead_of_quoting_the_caveat() {
+        let e = examination(
+            vec![Column {
+                detector: "alfa".to_string(),
+                unavailable: Some("not pulled".to_string()),
+                answers: Vec::new(),
+            }],
+            2,
+        );
+        assert!(!e.answered_anything());
+        let notes = e.footnotes();
+        assert!(notes[0].contains("NOTHING RAN"), "{notes:?}");
+        // The dangerous misreading is "no hits, so they are clean", and this
+        // is the one sentence standing between a reader and it.
+        assert!(notes[0].contains("Not that they are clean"), "{notes:?}");
+        assert!(
+            !notes.iter().any(|n| n.contains("NOT A MEASUREMENT")),
+            "a caveat about a number nobody produced: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_with_one_real_answer_still_carries_the_caveat() {
+        let e = examination(
+            vec![
+                answered("alfa", vec![Answer::Score(0.1), Answer::Score(0.2)]),
+                Column {
+                    detector: "bravo".to_string(),
+                    unavailable: Some("not pulled".to_string()),
+                    answers: Vec::new(),
+                },
+            ],
+            2,
+        );
+        assert!(e.answered_anything());
+        assert!(e.footnotes()[0].contains("NOT A MEASUREMENT"));
+    }
+
+    /// A column of failures is not an answer either.
+    #[test]
+    fn errors_alone_do_not_count_as_having_answered() {
+        let e = examination(
+            vec![answered("alfa", vec![Answer::Failed("boom".into())])],
+            1,
+        );
+        assert!(!e.answered_anything());
+        assert!(e.footnotes()[0].contains("NOTHING RAN"));
+    }
+
+    /// Naming no detector reaches our refusal, through the code that makes
+    /// it, rather than being asserted about a value constructed in the test.
+    ///
+    /// The first version of this test built `ExamineError::NoDetectorNamed`
+    /// by hand and checked its wording, and a mutation check found that
+    /// deleting the guard in `preflight` broke nothing: the test passed while
+    /// the behaviour was gone. This one runs the command.
+    #[test]
+    fn naming_no_detector_is_our_refusal_rather_than_claps() {
+        let registry = stegobench_core::registry::Registry::default();
+        let error = run(
+            &registry,
+            Request {
+                detectors: &[],
+                images: &[PathBuf::from("some-image.png")],
+                timeout: Duration::from_secs(1),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: None,
+            },
+            |_| {},
+        )
+        .expect_err("naming no detector is refused");
+
+        assert!(
+            matches!(error, ExamineError::NoDetectorNamed),
+            "refused for the wrong reason: {error}"
+        );
+        assert_eq!(error.exit_code(), stegobench_core::exit::USAGE);
+        assert_eq!(error.reason(), "no-detector-named");
+        let said = error.to_string();
+        assert!(said.contains("--detector"), "{said}");
+        assert!(said.contains("list detectors"), "{said}");
+        assert!(
+            !said.contains("required arguments"),
+            "still clap's wording: {said}"
+        );
+    }
+
+    /// And it is refused BEFORE the images are looked at, so a reader who
+    /// typed neither is told about the detector rather than about a path.
+    #[test]
+    fn the_missing_detector_is_named_before_a_missing_file_is() {
+        let registry = stegobench_core::registry::Registry::default();
+        let error = run(
+            &registry,
+            Request {
+                detectors: &[],
+                images: &[PathBuf::from("/no/such/file.png")],
+                timeout: Duration::from_secs(1),
+                jobs: 1,
+                adapter_roots: &[],
+                raw: None,
+            },
+            |_| {},
+        )
+        .expect_err("refused");
+        assert_eq!(error.reason(), "no-detector-named", "{error}");
     }
 
     #[test]

@@ -327,6 +327,20 @@ fn cmd_list(resolved: &Resolved, kind: &str) -> Output {
             ));
         }
         human.push_str("\n\n`stegobench doctor` says what each one still needs.");
+        // WHICH ONE SHOULD I USE, WHICH THIS LISTING DID NOT ANSWER.
+        //
+        // A journey on 2026-10-02 nearly stopped here: seven names, a licence
+        // column that "means nothing to me", and nothing saying which is any
+        // good for the purpose or that one would do. This does not rank them,
+        // because this listing cannot say which detector is better and saying
+        // so would be the exact overclaim the project exists to correct. It
+        // names the cheapest place to start, which is the question actually
+        // being asked.
+        if wanted.iter().any(|e| e.kind == Kind::Detector) {
+            if let Some(way) = stegobench_cli::smallest_way_in(&resolved.registry) {
+                human.push_str(&format!("\n\n{way}"));
+            }
+        }
         // Over what was listed, not over the registry. Printed under seven
         // detectors, a thirteen tool total reads as the cost of the seven.
         let f = stegobench_core::registry::Registry::footprint_of(wanted.iter().copied());
@@ -548,8 +562,23 @@ fn cmd_describe(resolved: &Resolved, name: &str, toml_only: bool) -> Output {
 /// `Debug` rendering the summary path once fell back to: this output exists to
 /// be piped into a TOML parser, and handing that parser Rust's struct dump
 /// under exit zero is the silent wrong answer the flag is least able to afford.
+///
+/// VERBATIM MEANS WHAT SOMEBODY WROTE, NOT WHAT THE TYPE DERIVES.
+///
+/// `may_be_served` is computed at the serialisation boundary so that the rule
+/// deciding it lives in exactly one place, which is what a publishing script
+/// reads out of `--json`. It is an answer about the entry rather than a line
+/// in it, and this output is the line somebody wrote. Printing it here would
+/// hand back a document with a key the author never typed, which anybody
+/// round-tripping an entry would then commit.
 fn raw_toml<T: serde::Serialize>(entry: &T, json: serde_json::Value, name: &str) -> Output {
-    match toml::to_string_pretty(entry) {
+    let rendered = toml::Value::try_from(entry).map(|mut value| {
+        if let Some(table) = value.as_table_mut() {
+            table.remove(stegobench_core::registry::MAY_BE_SERVED_KEY);
+        }
+        value
+    });
+    match rendered.and_then(|v| toml::to_string_pretty(&v)) {
         Ok(text) => {
             let mut out = Output::ok(json, text);
             out.payload_on_stdout = true;
@@ -1352,8 +1381,28 @@ fn cmd_doctor(
         out.code = exit::ENVIRONMENT_UNFIT;
     }
     if out.code == exit::ENVIRONMENT_UNFIT {
+        // NOTHING INSTALLED YET IS NOT THE SAME STATE AS NOTHING WORKING, AND
+        // ONE WORD WAS BEING USED FOR BOTH.
+        //
+        // A journey on 2026-10-02 put a reader who had installed the tool
+        // five minutes earlier in front of "UNFIT: no tool here is usable",
+        // in capitals, with exit 8. They read it as a verdict on their
+        // computer. It is not: the machine is fine and has simply not fetched
+        // an image yet, which is the expected state of every fresh install
+        // and the one the front page sends people to this command from.
+        //
+        // The exit code stays 8, because nothing can be measured and a script
+        // needs to know that. What changes is that the sentence says which
+        // situation this is, and the one that is a normal first run carries
+        // the way out of it rather than a verdict.
+        let fresh = present == 0 && broken == 0 && !strictly_short;
         let why = if !no_selftest && broken > 0 {
             format!("{broken} installed tool(s) failed their own self-test")
+        } else if fresh {
+            "nothing is installed here yet, so there is nothing to measure \
+             with. That is the normal state of a fresh install rather than a \
+             fault on this machine"
+                .to_string()
         } else if no_selftest && present == 0 {
             "no tool here is installed, so nothing could be measured".to_string()
         } else if !no_selftest && usable == 0 {
@@ -1362,6 +1411,11 @@ fn cmd_doctor(
             "--strict was given and something is missing or undetermined".to_string()
         };
         out.human.push_str(&format!("\n\nUNFIT: {why}."));
+        if fresh {
+            if let Some(way) = stegobench_cli::smallest_way_in(&resolved.registry) {
+                out.human.push_str(&format!("\n\n{way}"));
+            }
+        }
     } else if no_selftest {
         out.human.push_str(&format!(
             "\n\nFIT: {present} tool(s) installed. The self-tests were \
@@ -3935,7 +3989,17 @@ fn cmd_examine(
         say,
     ) {
         Ok(found) => found,
-        Err(e) => return Output::err_because(e.exit_code(), e.reason(), e.to_string()),
+        Err(e) => {
+            let mut human = e.to_string();
+            // Naming the flag and not one value that would satisfy it is what
+            // clap did, and it is what a journey called unhelpful.
+            if matches!(e, examine::ExamineError::NoDetectorNamed) {
+                if let Some(way) = stegobench_cli::smallest_way_in(&resolved.registry) {
+                    human.push_str(&format!("\n\n{way}"));
+                }
+            }
+            return Output::err_because(e.exit_code(), e.reason(), human);
+        }
     };
 
     let mut human = found.table();
@@ -3943,6 +4007,15 @@ fn cmd_examine(
         human.push('\n');
         human.push_str(&note);
         human.push('\n');
+    }
+    // A table of nothing is where a first run most needs the way out of it,
+    // and it is the same sentence `doctor` gives for the same state.
+    if !found.answered_anything() {
+        if let Some(way) = stegobench_cli::smallest_way_in(&resolved.registry) {
+            human.push('\n');
+            human.push_str(&way);
+            human.push('\n');
+        }
     }
 
     let mut out = Output::ok(found.to_json(), human);
@@ -5016,6 +5089,18 @@ mod tests {
                     argv.push(format!("--{long}"));
                 }
                 argv.push(placeholder);
+            }
+            // `metrics` READS STANDARD INPUT WHEN GIVEN NO FILE, AND THIS
+            // TEST RUNS IN A PROCESS WHOSE STDIN IT DOES NOT CONTROL.
+            //
+            // Under `cargo test` stdin is inherited, and an inherited pipe
+            // that stays open and never delivers a byte made this test wait
+            // for ever: twelve minutes in a read on fd 0 before it was
+            // stopped by hand, with nothing in the output to say why. So it
+            // is handed a file it will fail to open, which exercises the same
+            // envelope this test is about and touches no stream.
+            if name == "metrics" {
+                argv.push("no-such-scores-file.json".to_string());
             }
             let parsed = Cli::try_parse_from(&argv);
             assert!(parsed.is_ok(), "{name:?} rejected --json: {argv:?}");
@@ -8348,6 +8433,113 @@ mod tests {
             assert!(
                 out.human.contains("The self-tests were skipped"),
                 "the report claims more than it checked:\n{}",
+                out.human
+            );
+        }
+    }
+
+    /// `--toml` prints the line somebody wrote, not the answer the type
+    /// derives from it.
+    ///
+    /// `may_be_served` is computed at the serialisation boundary so the rule
+    /// behind it has one home, and it reaches every surface that serialises
+    /// an entry. `--json` should carry it and this should not: a reader
+    /// round-tripping an entry through this flag would otherwise commit a key
+    /// nobody typed.
+    #[test]
+    fn the_toml_output_carries_no_key_the_author_never_wrote() {
+        let resolved = resolved_at(shipped_registry());
+        let out = cmd_describe(&resolved, "zsteg", true);
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(
+            !out.human
+                .contains(stegobench_core::registry::MAY_BE_SERVED_KEY),
+            "the derived answer reached the verbatim entry:\n{}",
+            out.human
+        );
+        // And it is still a document a parser accepts, which is what the flag
+        // is for.
+        let parsed: toml::Value =
+            toml::from_str(&out.human).expect("the entry parses back as TOML");
+        assert!(parsed.get("redistribution").is_some(), "{parsed:?}");
+
+        // The JSON surface is the one that must carry it, because that is
+        // what the publishing script reads.
+        let json = cmd_describe(&resolved, "zsteg", false).json;
+        assert_eq!(
+            json.get(stegobench_core::registry::MAY_BE_SERVED_KEY),
+            Some(&serde_json::json!(true)),
+            "{json}"
+        );
+    }
+
+    /// A machine that has downloaded nothing is a fresh install, not a
+    /// broken one, and it used to be told it was "not usable".
+    ///
+    /// Raised by the rung 1 journey on 2026-10-02: the reader had installed
+    /// the tool five minutes earlier, read "UNFIT: no tool here is usable" in
+    /// capitals with exit 8, and took it as a verdict on their computer. The
+    /// code stays 8, because nothing can be measured; the sentence has to say
+    /// which situation it is and carry the way out.
+    #[test]
+    fn a_machine_with_nothing_installed_is_told_it_is_fresh_rather_than_broken() {
+        let out = cmd_doctor(&resolved_at(shipped_registry()), None, false, false);
+        let present = out.json["present"].as_u64().expect("a count");
+        if present > 0 {
+            // This machine has a tool installed, so the state under test is
+            // not reachable here. Said out loud rather than passing quietly,
+            // because a test that silently checks nothing is worse than none.
+            eprintln!("skipped: {present} tool(s) installed, so not a fresh machine");
+            return;
+        }
+        assert_eq!(out.code, exit::ENVIRONMENT_UNFIT, "{}", out.human);
+        assert!(
+            out.human.contains("nothing is installed here yet"),
+            "does not say which situation this is:\n{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("rather than a fault on this machine"),
+            "still reads as a verdict on the machine:\n{}",
+            out.human
+        );
+        assert!(
+            !out.human.contains("no tool here is usable"),
+            "a fresh install is still called unusable:\n{}",
+            out.human
+        );
+        // And it names a way out, which is the finding the journey actually
+        // raised: they had to guess which of seven to install.
+        assert!(
+            out.human.contains("you need ONE detector"),
+            "no way out of the state it just reported:\n{}",
+            out.human
+        );
+        assert!(
+            out.human.contains("docker pull"),
+            "names no command to run:\n{}",
+            out.human
+        );
+    }
+
+    /// The listing is where the same reader nearly stopped, with seven names
+    /// and no way to choose between them.
+    #[test]
+    fn listing_the_detectors_names_the_cheapest_place_to_start() {
+        let resolved = resolved_at(shipped_registry());
+        let out = cmd_list(&resolved, "detectors");
+        assert!(
+            out.human.contains("you need ONE detector"),
+            "the listing still answers seven names and no guidance:\n{}",
+            out.human
+        );
+        // It must not rank them. Saying which detector is BETTER is the
+        // overclaim this project exists to correct, and this listing has no
+        // evidence for it.
+        for word in ["best", "recommended", "most accurate", "strongest"] {
+            assert!(
+                !out.human.to_lowercase().contains(word),
+                "the listing ranks detectors by {word:?}:\n{}",
                 out.human
             );
         }

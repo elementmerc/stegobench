@@ -460,7 +460,13 @@ pub enum Command {
         /// Repeatable. Every detector sees every image, which is what makes
         /// the columns comparable as answers even though their scales are not
         /// comparable as numbers.
-        #[arg(short = 'd', long = "detector", value_name = "NAME", num_args = 1.., required = true)]
+        ///
+        /// Not marked required, although one is: clap's own message for a
+        /// missing required flag names the flag and not one value that would
+        /// satisfy it, and a journey watched a reader meet that message with
+        /// no idea which of seven detectors to name. The refusal is ours so
+        /// that it can answer that.
+        #[arg(short = 'd', long = "detector", value_name = "NAME", num_args = 1..)]
         detectors: Vec<String>,
         /// Seconds one image gets before the detector is killed.
         #[arg(long, value_name = "SECONDS", default_value = "120")]
