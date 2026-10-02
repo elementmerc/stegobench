@@ -52,20 +52,34 @@ import re
 import sys
 from typing import Dict, NamedTuple
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from release_facts import FactsError  # noqa: E402
+from release_facts import load as _load_facts  # noqa: E402
+
+#: Read at import, because a formula cannot be emitted correctly without it and
+#: failing here names the field rather than publishing a blank. These three
+#: names used to be literals in this file; they moved so that a Homebrew
+#: formula, a Scoop manifest, a citation and a codemeta document cannot state
+#: three different descriptions of one project.
+try:
+    FACTS = _load_facts()
+except FactsError as _exc:  # pragma: no cover - exercised by the drift test
+    raise SystemExit(f"cannot generate packaging: {_exc}") from None
+
 #: The repository the release assets come from. Everything the two package
-#: managers download is under this, and it is the one place to change if the
-#: repository is ever moved.
-REPO_URL = "https://github.com/elementmerc/stegobench"
+#: managers download is under this.
+REPO_URL = FACTS.repository
 
 #: Kept deliberately short. Homebrew shows it in `brew info` and Scoop in
 #: `scoop search`, both of which truncate, and Homebrew's own style guide
 #: refuses a description that starts with the formula's own name or with an
-#: article.
-DESCRIPTION = "Reproducible benchmark for steganalysis"
+#: article. `release_facts` enforces both of those rules on the way in.
+DESCRIPTION = FACTS.description
 
 #: The SPDX identifier, the same one the crates and the LICENSE carry. Scoop
 #: takes the string as it stands; Homebrew parses it as an SPDX expression.
-LICENCE = "AGPL-3.0-or-later"
+LICENCE = FACTS.licence
 
 #: A version as the tag carries it, minus the `v`. Pre-release and build
 #: metadata are allowed because Cargo allows them, and a release named

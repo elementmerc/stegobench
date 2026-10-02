@@ -1,0 +1,106 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# The facts about this project that more than one published file has to state.
+#
+# WHY THIS FILE EXISTS
+#
+# Every channel wants the same handful of facts in a different shape. A
+# Homebrew formula wants a one-line description and an SPDX licence; a Scoop
+# manifest wants the same two in different keys; codemeta.json wants them as
+# schema.org terms; CITATION.cff wants an abstract and a keyword list. Written
+# by hand, those copies are correct on the day they are written and drift
+# quietly afterwards, because nothing fails when two of them disagree.
+#
+# The corpus half of this repository already proves the fix works:
+# `release_metadata.py` generates `croissant.json`, `CITATION.cff` and
+# `DATASHEET.md` from one source, and a test fails when the uploader's copy of
+# the file list drifts from the generator's. This is the same pattern with new
+# consumers.
+#
+# WHAT IS DELIBERATELY NOT HERE
+#
+# **The version.** The tag is the only place a version is decided, and
+# `generate_packaging.py` already takes it as an argument. A copy here would be
+# a second thing to bump, and the failure would be silent: a formula pinned to
+# the previous release still installs, it just installs the wrong thing.
+#
+# **The target list.** `PLATFORMS` in `generate_packaging.py` is already tied to
+# the build matrix in `.github/workflows/release.yml` by a test that fails in
+# both directions, so a target built and not packaged, or packaged and not
+# built, is caught today. Moving the list here would replace a tested coupling
+# with an untested one.
+#
+# **Anything about the corpus.** Pentimento lives in its own repository and
+# carries its own citation, because a citation should point at the data rather
+# than at the tool that made it.
+#
+# WHY IT IS NOT AT THE REPOSITORY ROOT
+#
+# `cargo-release` reads a workspace-root `release.toml` as its own
+# configuration. A file of this shape sitting there would be parsed by that
+# tool as settings it does not recognise, so the name is kept and the location
+# moved. Here it also sits beside `channels.toml`, which is where a reader
+# already looks for what a release does.
+
+[project]
+# The name in prose, capitalised. Used wherever a human reads it: the citation
+# title, the codemeta name, the container label.
+name = "Stegobench"
+
+# The command, the crate prefix and the archive prefix. Lower case because that
+# is what somebody types, and it is case sensitive.
+slug = "stegobench"
+
+# One line, and it is load-bearing in two package managers. Homebrew shows it
+# in `brew info` and Scoop in `scoop search`; both truncate, and Homebrew's
+# style guide refuses a description that opens with the formula's own name or
+# with an article.
+description = "Reproducible benchmark for steganalysis"
+
+# The long form, for a citation abstract and for codemeta. Written as one
+# paragraph because both consumers render it as one.
+abstract = """
+A reproducible benchmark for steganalysis. Stegobench runs detectors and \
+embedders as sandboxed plugins declared in a registry, checks that the machine \
+can actually run them before it believes a result, and reports measurements as \
+a versioned JSON document that names the exact bytes the number was taken on.\
+"""
+
+# The SPDX identifier, the same one the crates and the LICENSE file carry.
+# Scoop takes the string as it stands; Homebrew parses it as an SPDX
+# expression; codemeta wants it as a URL and the generator builds that.
+licence = "AGPL-3.0-or-later"
+
+repository = "https://github.com/elementmerc/stegobench"
+homepage = "https://github.com/elementmerc/stegobench"
+documentation = "https://elementmerc.github.io/stegobench/"
+
+# Where a report goes. Named separately from the repository because a reader
+# who has found a problem should not have to guess, and because a container
+# label and a Homebrew formula both want it.
+issues = "https://github.com/elementmerc/stegobench/issues"
+
+# ISO 8601, the year the copyright notices carry.
+copyright_year = "2026"
+
+# Shared by the crates, the Python half, the citation and codemeta. Ordered
+# most specific first, because crates.io shows the first few and a reader
+# scanning them should meet "steganalysis" before "digital forensics".
+#
+# This sits inside [project] on purpose. A bare array written after the
+# [[author]] block below would belong to that author rather than to the
+# project, which is how TOML scopes it, and the mistake parses cleanly.
+keywords = [
+    "steganalysis",
+    "steganography",
+    "benchmark",
+    "reproducibility",
+    "digital forensics",
+]
+
+[[author]]
+family_names = "Iwugo"
+given_names = "Daniel"
