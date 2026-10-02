@@ -159,6 +159,31 @@ pub enum ScoreError {
         clean: u64,
         stego: u64,
     },
+    /// The corpus had both sides and the detector answered about neither.
+    ///
+    /// Kept apart from `OneSided` because that message blames the corpus, and
+    /// an adversarial researcher whose batched plugin printed nothing at all was
+    /// told his ten-clean, ten-stego corpus held "0 clean and 0 stego". He was
+    /// right that the refusal was correct to fire and said he would have spent
+    /// twenty minutes auditing the corpus before suspecting his own adapter. The
+    /// refusal is as loud as before; it now points at the tool.
+    #[error(
+        "{name} produced no usable answer for any of the {asked} image(s) in the \
+         corpus at {path}, which holds {clean} clean and {stego} stego, so there \
+         is nothing to compute a metric over. The corpus is not the problem here: \
+         every item was offered to the tool and every answer came back unusable. \
+         {why}\n\nCheck what the tool actually printed: `--keep-raw` writes its \
+         own output beside the records, and `stegobench doctor` runs the entry's \
+         self-test against the fixtures."
+    )]
+    NothingAnswered {
+        name: String,
+        path: String,
+        asked: u64,
+        clean: u64,
+        stego: u64,
+        why: String,
+    },
     #[error(
         "{name} answered about {answered} image(s), and no ROC AUC can be \
          computed from those answers, so this run has no headline number. \
@@ -212,6 +237,9 @@ impl ScoreError {
             // The corpus is unfit for a measurement, and will be as unfit the
             // second time. Refusals, not breakages.
             ScoreError::SplitLeaks { .. } | ScoreError::OneSided { .. } => exit::PREFLIGHT_REFUSED,
+            // The corpus was fit to measure and the tool was not fit to
+            // answer, which is the same shape as NoAuc and gets its code.
+            ScoreError::NothingAnswered { .. } => exit::PLUGIN_FAILED,
             // Something broke: a tool, a disk, a file that is not what it
             // claimed to be. A run whose answers cannot be turned into a
             // metric belongs here rather than with the refusals: the corpus
@@ -242,6 +270,7 @@ impl ScoreError {
             ScoreError::ImageChanged { .. } => "image-changed",
             ScoreError::SplitLeaks { .. } => "split-leaks",
             ScoreError::OneSided { .. } => "one-sided",
+            ScoreError::NothingAnswered { .. } => "nothing-answered",
             ScoreError::NoAuc { .. } => "no-auc",
         }
     }
@@ -285,6 +314,9 @@ pub struct Prepared {
     trained_on: Option<String>,
     /// Whether the detector declared it was trained on this very corpus.
     contaminated: bool,
+    /// Whether the contamination declaration could be checked at all, so the
+    /// document can say "could not tell" instead of "clean".
+    contamination_check: stegobench_core::result::ContaminationCheck,
     /// How many items the corpus held, where `--limit` stopped the run short.
     ///
     /// `None` means the run covered all of it.
@@ -422,6 +454,7 @@ where
     // goes to whoever ran this and the document goes to whoever has to trust
     // the number.
     let mut contaminated = false;
+    let mut contamination_check = stegobench_core::result::ContaminationCheck::NotDeclared;
     let claim_holds = match registered {
         None => false,
         Some(entry) => match entry
@@ -489,6 +522,31 @@ where
             count: checks.split_leaks.count,
             examples: checks.split_leaks.examples(),
         });
+    }
+
+    // A WHOLE CLASS BEING ONE FORMAT AND THE OTHER CLASS ANOTHER.
+    //
+    // No pair comparison reaches this. A steganalysis researcher looked at a
+    // corpus directory for thirty seconds, before running anything, and said
+    // that the clean class was PNG and the stego class JPEG, so any detector
+    // that can tell the two apart scores 1.0 without doing steganalysis at all.
+    // He was right and the tool said nothing, because the per-pair check can
+    // only speak about pairs it can resolve and this corpus's clean halves were
+    // not present. Said here, and recorded as `arm.clean_format` beside the
+    // existing `arm.format`, which described the stego half only.
+    if let (Some(clean), Some(stego)) = (
+        checks.arm.clean_format.as_deref(),
+        Some(checks.arm.format.as_str()),
+    ) {
+        if clean != stego && !stego.is_empty() {
+            progress(&format!(
+                "WARNING: every clean image here is {clean} and every stego image \
+                 is {stego}. A detector that merely tells the two formats apart \
+                 scores perfectly on this corpus without detecting anything, so a \
+                 high number here is not evidence of steganalysis. The result \
+                 records both formats"
+            ));
+        }
     }
 
     // A confounded corpus is reported rather than refused, which is the
@@ -561,6 +619,13 @@ where
             .iter()
             .any(|a| a.trim().eq_ignore_ascii_case(t) && !a.trim().is_empty());
         contaminated = same;
+        // Declared, so the only question left is whether this corpus could be
+        // identified well enough for the comparison to mean anything.
+        contamination_check = if registered.is_some() {
+            stegobench_core::result::ContaminationCheck::Checked
+        } else {
+            stegobench_core::result::ContaminationCheck::DeclaredButUncheckable
+        };
         if same {
             progress(&format!(
                 "WARNING: this detector is declared as trained on {trained}, \
@@ -697,6 +762,7 @@ where
         registered: registered.map(|e| (e.id.clone(), e.name.clone(), e.tier.clone())),
         trained_on: trained_on.map(str::to_string),
         contaminated,
+        contamination_check,
         checks,
         claim_holds,
         labels,
@@ -889,6 +955,28 @@ where
     let n_stego = labels.iter().filter(|l| **l).count() as u64;
     let n_clean = labels.len() as u64 - n_stego;
     if n_clean == 0 || n_stego == 0 {
+        // WHICH OF THE TWO IS AT FAULT IS NOT A DETAIL.
+        //
+        // These counts are taken over the images the detector ANSWERED about,
+        // so a tool that answered about nothing produces 0 and 0 whatever the
+        // corpus holds, and the refusal then blamed the corpus. A researcher
+        // whose plugin printed nothing at all was told his ten-clean,
+        // ten-stego corpus held none of either.
+        let corpus_sides = prepared.labels.iter().filter(|l| **l).count() as u64;
+        let corpus_clean = prepared.labels.len() as u64 - corpus_sides;
+        if scores.is_empty() && corpus_clean > 0 && corpus_sides > 0 {
+            return Err(ScoreError::NothingAnswered {
+                name: entry.name.clone(),
+                path: prepared.corpus.display().to_string(),
+                asked: prepared.labels.len() as u64,
+                clean: corpus_clean,
+                stego: corpus_sides,
+                why: match errored {
+                    0 => "No record carried a score or a verdict at all.".to_string(),
+                    n => format!("All {n} of them came back as failures."),
+                },
+            });
+        }
         return Err(ScoreError::OneSided {
             path: prepared.corpus.display().to_string(),
             clean: n_clean,
@@ -898,50 +986,15 @@ where
 
     let checks = &prepared.checks;
 
-    // A confounded corpus is reported rather than refused, which is the
-    // opposite of what a split leak gets, and the difference is deliberate.
-    // A leak makes a number wrong while looking right. A second variable
-    // between the clean and stego halves is a real property of some arms, kept
-    // on purpose to demonstrate what it does, so the run happens and the
-    // document says what it measured.
-    match checks.pairing {
-        Pairing::Confounded => progress(&format!(
-            "WARNING: {} stego image(s) differ from their cover in more than \
-             the payload, for example: {}. This run measures that difference \
-             as well as the payload, and the result says so",
-            checks.pairing_breaks.count,
-            checks.pairing_breaks.examples()
-        )),
-        // Two different situations reached this verdict and they need different
-        // next steps. A corpus whose records name nothing cannot be checked at
-        // all; a corpus whose records name a clean half that was not extracted
-        // beside them is one directory away from being checkable, and saying
-        // only "could not be checked" leaves the user to work that out from a
-        // sidecar by hand, which is what one did.
-        Pairing::Unverified if checks.unreadable > 0 => progress(&format!(
-            "the pairing rule could not be checked: {} stego image(s) name a \
-             clean half that is not in this corpus. Extract the clean arm they \
-             refer to alongside them and the rule becomes checkable; a record's \
-             own `clean` field names the one it wants. The result says \
-             unverified rather than claiming the rule held",
-            checks.unreadable
-        )),
-        Pairing::Unverified => progress(
-            "the pairing rule could not be checked: no stego image here names \
-             a cover or a clean half this could read alongside it. The result \
-             says unverified rather than claiming the rule held",
-        ),
-        Pairing::SingleVariable => {
-            if checks.unreadable > 0 {
-                progress(&format!(
-                    "{} of {} stego image(s) could not be compared with their \
-                     cover, so the pairing check covered the rest",
-                    checks.unreadable,
-                    checks.unreadable + checks.compared
-                ));
-            }
-        }
-    }
+    // THE PAIRING AND SPLIT NOTES ARE NOT REPEATED HERE.
+    //
+    // They are facts about the corpus, so `prepare` says them once for the
+    // whole command. This block said them again, once per detector, and a
+    // single detector run therefore printed the same paragraph twice: a
+    // journey transcript caught it with the unverified-pairing message
+    // appearing back to back. A warning a reader sees twice in one run is one
+    // they start skimming, which costs exactly the warnings this project
+    // depends on being read.
 
     let named = if prepared.claim_holds && prepared.limit.is_none() {
         Configuration::Named
@@ -1248,6 +1301,10 @@ where
             configuration: named,
             trained_on: prepared.trained_on.clone(),
             contaminated: prepared.contaminated,
+            contamination_check: prepared.contamination_check,
+            // The side actually scored, so `--split test` and a whole-corpus
+            // run stop producing identical documents.
+            split_scored: prepared.side.map(|s| s.as_str().to_string()),
             // True because somebody ran this, and the harness cannot know
             // whether that somebody owns the detector. The submission path
             // is what clears it.
@@ -1777,6 +1834,9 @@ struct ArmFacts {
     rate: Uniform<(String, f64)>,
     domain: Uniform<String>,
     format: Uniform<String>,
+    /// The same question asked of the CLEAN side, so a corpus whose two classes
+    /// are different formats says so. See `Arm::clean_format`.
+    clean_format: Uniform<String>,
 }
 
 /// What a cover contributes to both checks, gathered in one pass.
@@ -1857,6 +1917,10 @@ fn check(corpus: &Path) -> Result<Checks, ScoreError> {
         if sample.role != Role::Clean {
             continue;
         }
+        // The clean side's own format, gathered in the walk that was happening
+        // anyway, so the document can state both halves rather than only the
+        // one that was embedded into.
+        facts.clean_format.note(image_format(&sample.image));
         any_split |= sample.split.is_some();
 
         // Filed under BOTH names a stego row might use to reach it, and the
@@ -2064,6 +2128,7 @@ fn arm_of(facts: &ArmFacts) -> Arm {
         rate,
         domain,
         format: facts.format.or_say_why(),
+        clean_format: facts.clean_format.one().cloned(),
     }
 }
 
@@ -2553,6 +2618,155 @@ mod tests {
         }
     }
 
+    /// Rung 5: `contaminated: false` is a positive claim, and `cp -r` produces
+    /// it on a byte-identical corpus with an identical digest because the names
+    /// stop matching. The run says so in the terminal; the document said only
+    /// `false`.
+    #[cfg(unix)]
+    #[test]
+    fn a_declaration_that_could_not_be_checked_says_so_rather_than_reading_as_clean() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+
+        let mut req = request(&root, None);
+        req.trained_on = Some("some-other-corpus");
+        let result = score(&entry, &req, |_| {}).expect("scores").0;
+
+        assert!(
+            !result.declarations.contaminated,
+            "the names do not match, so this is not a proven contamination"
+        );
+        assert_eq!(
+            result.declarations.contamination_check,
+            stegobench_core::result::ContaminationCheck::DeclaredButUncheckable,
+            "`false` was published as though the check had run"
+        );
+        assert_eq!(
+            result.declarations.trained_on.as_deref(),
+            Some("some-other-corpus"),
+            "the declaration itself was dropped"
+        );
+    }
+
+    /// Nobody declared anything, so there is nothing to be unsure about, and
+    /// the uncheckable value must not become the default.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_with_no_declaration_is_not_marked_uncheckable() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+        let result = score(&entry, &request(&root, None), |_| {})
+            .expect("scores")
+            .0;
+        assert_eq!(
+            result.declarations.contamination_check,
+            stegobench_core::result::ContaminationCheck::NotDeclared
+        );
+    }
+
+    /// Rung 5: `--split test` and a whole-corpus run produced identical
+    /// documents, and the only split related field in either read `by-cover`.
+    #[cfg(unix)]
+    #[test]
+    fn the_document_says_which_side_of_the_split_was_scored() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        split_corpus(&root, false);
+        let entry = sizing_detector(tmp.path());
+
+        let mut req = request(&root, None);
+        req.split = Some("test");
+        req.records = root.with_extension("test.records.jsonl");
+        let held_out = score(&entry, &req, |_| {}).expect("scores").0;
+        assert_eq!(held_out.declarations.split_scored.as_deref(), Some("test"));
+
+        let whole = score(&entry, &request(&root, None), |_| {})
+            .expect("scores")
+            .0;
+        assert_eq!(
+            whole.declarations.split_scored, None,
+            "a whole corpus run claimed a side"
+        );
+        assert_ne!(
+            held_out.declarations, whole.declarations,
+            "the two runs are still indistinguishable in the document"
+        );
+    }
+
+    /// Rung 5, spotted by the researcher in thirty seconds of looking at a
+    /// directory and never by the tool: the clean class is one format and the
+    /// stego class another, so telling the formats apart scores 1.0 without
+    /// detecting anything. No pair comparison reaches this.
+    #[cfg(unix)]
+    #[test]
+    fn a_corpus_whose_two_classes_are_different_formats_says_so() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        // Clean side PNG, stego side JPEG, and no clean half stated, which is
+        // exactly the shape he was handed.
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..3 {
+            std::fs::write(root.join(format!("c{i}.png")), png(64, 64, 8, 2, i)).unwrap();
+            std::fs::write(
+                root.join(format!("c{i}.json")),
+                format!(r#"{{"role":"clean","sha256":"{i}"}}"#),
+            )
+            .unwrap();
+            std::fs::write(root.join(format!("s{i}.jpg")), jpeg(64, 64)).unwrap();
+            std::fs::write(
+                root.join(format!("s{i}.json")),
+                format!(
+                    r#"{{"role":"stego","sha256":"s{i}","arm":{{"tool":"steghide"}},"clean":"nowhere/{i}.jpg","clean_sha256":"absent{i}"}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let entry = sizing_detector(tmp.path());
+
+        let mut said = Vec::new();
+        let result = score(&entry, &request(&root, None), |m: &str| {
+            said.push(m.to_string())
+        })
+        .expect("scores")
+        .0;
+
+        assert_eq!(result.arm.clean_format.as_deref(), Some("png"));
+        assert_eq!(result.arm.format, "jpeg");
+        assert!(
+            said.iter()
+                .any(|m| m.contains("every clean image here is png and every stego image is jpeg")),
+            "nothing said the two classes are different formats: {said:?}"
+        );
+        assert!(
+            said.iter().any(|m| m.contains("not evidence of")),
+            "the warning did not say what it means: {said:?}"
+        );
+    }
+
+    /// And a corpus whose two classes are the same format is not warned about,
+    /// because a warning that fires on every ordinary corpus is noise.
+    #[cfg(unix)]
+    #[test]
+    fn a_corpus_of_one_format_throughout_is_not_warned_about() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+        let mut said = Vec::new();
+        score(&entry, &request(&root, None), |m: &str| {
+            said.push(m.to_string())
+        })
+        .expect("scores");
+        assert!(
+            !said.iter().any(|m| m.contains("every clean image here is")),
+            "{said:?}"
+        );
+    }
+
     #[test]
     fn the_feed_hands_out_one_item_at_a_time_in_corpus_order() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -2647,6 +2861,74 @@ mod tests {
         assert_eq!(first.corpus, second.corpus);
         assert_eq!(first.declarations, second.declarations);
         assert_eq!(first.subject, second.subject);
+    }
+
+    /// A detector that prints nothing at all, successfully.
+    #[cfg(unix)]
+    fn silent_detector(dir: &Path) -> Entry {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("silent.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        toml::from_str(&format!(
+            "name = \"mute\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"\n\
+             [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n",
+            script.display().to_string()
+        ))
+        .expect("parses")
+    }
+
+    /// Rung 5 of the journey round: a plugin that printed nothing was refused,
+    /// correctly, with a message saying the researcher's ten-clean, ten-stego
+    /// corpus held "0 clean and 0 stego image(s)". He said he would have spent
+    /// twenty minutes auditing the corpus before suspecting his own adapter.
+    #[cfg(unix)]
+    #[test]
+    fn a_detector_that_answered_nothing_is_blamed_rather_than_the_corpus() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = silent_detector(tmp.path());
+
+        let err = score(&entry, &request(&root, None), |_| {}).expect_err("refused");
+        let said = err.to_string();
+        assert_eq!(err.reason(), "nothing-answered", "{said}");
+        assert!(
+            said.contains("3 clean and 3 stego"),
+            "the corpus was reported as empty: {said}"
+        );
+        assert!(
+            said.contains("The corpus is not the problem here"),
+            "nothing pointed at the tool: {said}"
+        );
+        assert!(said.contains("mute"), "the tool is not named: {said}");
+        assert!(
+            said.contains("--keep-raw"),
+            "no way to see what the tool printed: {said}"
+        );
+    }
+
+    /// And a corpus that genuinely has one side keeps the refusal that blames
+    /// the corpus, so the two cannot collapse into one.
+    #[cfg(unix)]
+    #[test]
+    fn a_corpus_with_only_one_side_is_still_the_thing_blamed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 0);
+        let entry = sizing_detector(tmp.path());
+
+        let err = score(&entry, &request(&root, None), |_| {}).expect_err("refused");
+        assert_eq!(err.reason(), "one-sided", "{err}");
     }
 
     /// A detector that gives the same answer to every image.

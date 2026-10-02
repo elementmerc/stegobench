@@ -234,7 +234,28 @@ pub struct Arm {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate: Option<Rate>,
     pub domain: Domain,
+    /// The format of the STEGO half, which is what this field has always been.
     pub format: String,
+    /// The format of the CLEAN half, where every clean image in the corpus
+    /// agreed on one.
+    ///
+    /// WHY THE OTHER HALF NEEDED ITS OWN FIELD
+    ///
+    /// A steganalysis researcher looked at a corpus directory for thirty
+    /// seconds, before running anything, and said: the clean class is PNG and
+    /// the stego class is JPEG, so any detector that can tell the two apart
+    /// scores 1.0 without doing steganalysis at all. He was right, and nothing
+    /// in the tool said it. The per-pair check catches a pair it can resolve;
+    /// a whole class being one format and the other class being another is a
+    /// property of the corpus that no pair comparison reaches, and `format`
+    /// described the stego half only, so the document read as though the
+    /// question had been answered.
+    ///
+    /// Absent where the clean images did not agree on one format, which is
+    /// normal for a corpus with several clean arms, and absent in every
+    /// document written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_format: Option<String>,
 }
 
 /// A payload size, carrying its unit.
@@ -734,6 +755,34 @@ pub struct Declarations {
     /// of setting it.
     #[serde(default)]
     pub contaminated: bool,
+    /// Whether the contamination declaration could be checked at all.
+    ///
+    /// `contaminated: false` is a positive claim, and an adversarial researcher
+    /// showed it is made in a case where the truth is "could not tell": declare
+    /// `--trained-on sub1`, score `cp -r`'s copy of sub1, and the names do not
+    /// match, so the flag comes out false on a byte-identical corpus with an
+    /// identical digest. The run says so in the terminal, in as many words, and
+    /// the document said only `false`.
+    ///
+    /// The tool gets this tri-state right for `pairing`, which has
+    /// `single-variable`, `unverified` and `confounded`, and got it wrong here.
+    /// A separate field rather than a wider `contaminated` because that one is
+    /// already load bearing in the submission rules, and a field whose meaning
+    /// changes under readers who have already written code against it is a
+    /// worse defect than the one being fixed.
+    #[serde(default)]
+    pub contamination_check: ContaminationCheck,
+    /// Which side of the train and test split this run scored.
+    ///
+    /// Absent means the whole corpus, train and test together, which is the
+    /// default and is the case this field exists for. `--split test` and a
+    /// whole-corpus run used to produce identical documents, and the only split
+    /// related field in either read `by-cover`, which means "a cover and its
+    /// stego twin stayed on one side": true of both, and not the question a
+    /// reviewer is asking. `--split`'s own help text predicted this precisely,
+    /// and help text is what a reviewer reading a submitted artefact never sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_scored: Option<String>,
     /// Whether this number came from whoever owns the detector, rather than
     /// from an independent run.
     ///
@@ -794,6 +843,28 @@ pub struct PairingEvidence {
     pub named_a_half_not_here: u64,
     /// Pairs that were compared and differed in more than the payload.
     pub differed: u64,
+}
+
+/// Whether a contamination declaration was checked, and against what.
+///
+/// Three states rather than two, for the same reason `Pairing` has three: a
+/// check that could not run is not a check that passed, and collapsing the two
+/// publishes the flattering one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContaminationCheck {
+    /// Nobody declared what the detector trained on, so there was nothing to
+    /// check. The default, and what every document written before this field
+    /// existed means.
+    #[default]
+    NotDeclared,
+    /// A declaration was made and this corpus could be identified, so the two
+    /// were compared and the answer in `contaminated` is a measurement.
+    Checked,
+    /// A declaration was made and this corpus could not be identified, so the
+    /// comparison was between names rather than between corpora.
+    /// **`contaminated: false` beside this value means "could not tell".**
+    DeclaredButUncheckable,
 }
 
 /// Whether this measurement is comparable to anybody else's.
@@ -909,14 +980,16 @@ impl Result1 {
         for a in &self.metrics.per_arm {
             if !(0.0..=1.0).contains(&a.auc) {
                 bad.push(format!(
-                    "per_arm {:?} has auc {}, which is outside 0 to 1 and is                      not a valid ROC AUC",
+                    "per_arm {:?} has auc {}, which is outside 0 to 1 and is \
+                     not a valid ROC AUC",
                     a.arm, a.auc
                 ));
             }
             if let Some([lo, hi]) = a.auc_ci95 {
                 if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) || lo > hi {
                     bad.push(format!(
-                        "per_arm {:?} has the interval [{lo}, {hi}], which is                          not an interval inside 0 to 1",
+                        "per_arm {:?} has the interval [{lo}, {hi}], which is \
+                         not an interval inside 0 to 1",
                         a.arm
                     ));
                 } else if a.auc < lo || a.auc > hi {
@@ -1537,6 +1610,7 @@ mod tests {
                 }),
                 domain: Domain::Spatial,
                 format: "png".into(),
+                clean_format: Some("png".into()),
             },
             metrics: Metrics {
                 auc: 0.9634,
@@ -1579,6 +1653,8 @@ mod tests {
                 configuration: Configuration::Named,
                 trained_on: None,
                 contaminated: false,
+                contamination_check: ContaminationCheck::NotDeclared,
+                split_scored: None,
                 self_reported: false,
                 pairing_evidence: PairingEvidence {
                     compared: 6,

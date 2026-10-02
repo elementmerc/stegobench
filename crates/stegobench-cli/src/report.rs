@@ -53,8 +53,8 @@ use std::path::{Path, PathBuf};
 
 use stegobench_core::exit;
 use stegobench_core::result::{
-    ArmMetrics, Configuration, CorpusSource, Determinism, Domain, Isolation, Pairing, PinnedBy,
-    PluginRef, RateUnit, Result1, SplitDiscipline,
+    ArmMetrics, Configuration, ContaminationCheck, CorpusSource, Determinism, Domain, Isolation,
+    Pairing, PinnedBy, PluginRef, RateUnit, Result1, SplitDiscipline,
 };
 
 use crate::cli::ReportFormat;
@@ -620,6 +620,38 @@ fn to_row(source: &Path, r: Result1) -> Row {
                 .is_some_and(|id| t.eq_ignore_ascii_case(id.trim()))
     }) {
         flags.push("TRAINED ON THIS CORPUS: not being measured".to_string());
+    } else if let Some(trained) = r.declarations.trained_on.as_deref() {
+        // THE DECLARATION SURVIVES EVEN WHEN THE MATCH FAILS.
+        //
+        // This table used to drop `trained_on` entirely whenever the names did
+        // not match, so the one honest thing a submitter did, saying what their
+        // detector learned from, disappeared from the artefact while staying in
+        // the JSON. A researcher got from flagged to unflagged with `cp -r`: the
+        // copy has a different name, the names stop matching, and the row went
+        // quiet about a declaration that had not changed.
+        //
+        // Said in two different strengths, because a corpus nothing could
+        // identify is a weaker statement than one that was identified and
+        // genuinely differs.
+        if r.declarations.contamination_check == ContaminationCheck::DeclaredButUncheckable {
+            flags.push(format!(
+                "TRAINED ON {trained}, AND THIS CORPUS COULD NOT BE IDENTIFIED:                  the two were compared by name, so whether they are the same                  corpus is unknown rather than no"
+            ));
+        } else {
+            flags.push(format!("trained on {trained}, which is not this corpus"));
+        }
+    }
+    if let Some(side) = r.declarations.split_scored.as_deref() {
+        flags.push(format!("scored the {side} split only"));
+    } else if r.declarations.split_discipline != SplitDiscipline::NotApplicable {
+        // A whole-corpus run over a corpus that HAS a split is the case the
+        // researcher used: for a detector that learned nothing it is harmless,
+        // and for one that learned anything it makes the figure unquotable,
+        // while the row's only split column reads `by-cover` either way.
+        flags.push(
+            "SCORED TRAIN AND TEST TOGETHER: quotable only for a detector that              learned nothing from this corpus"
+                .to_string(),
+        );
     }
     if r.declarations.self_reported {
         flags.push("self-reported, not re-run by anybody else".to_string());
@@ -1749,6 +1781,10 @@ mod tests {
         trained_on: Option<String>,
         /// Stego images naming a clean half the corpus does not contain.
         named_a_half_not_here: u64,
+        /// Whether the contamination declaration could be checked at all.
+        contamination_check: String,
+        /// Which side was scored, where the run scored one.
+        split_scored: Option<String>,
         /// Answers already on disk when the run started, and answers it took.
         resumed: u64,
         measured: u64,
@@ -1768,6 +1804,8 @@ mod tests {
                 n_error: 0,
                 trained_on: None,
                 named_a_half_not_here: 0,
+                contamination_check: "not-declared".into(),
+                split_scored: None,
                 resumed: 0,
                 measured: 10,
             }
@@ -1789,6 +1827,10 @@ mod tests {
             });
             if let Some(t) = &self.trained_on {
                 declarations["trained_on"] = serde_json::json!(t);
+            }
+            declarations["contamination_check"] = serde_json::json!(self.contamination_check);
+            if let Some(s) = &self.split_scored {
+                declarations["split_scored"] = serde_json::json!(s);
             }
             serde_json::json!({
                 "schema": stegobench_core::result::RESULT_SCHEMA_ID,
@@ -2035,6 +2077,90 @@ mod tests {
         let report = build(&[dir.path().to_path_buf()]).unwrap();
         let text = flat(&render(&report, ReportFormat::Text));
         assert!(!text.contains("NOTHING MEASURED HERE"), "{text}");
+    }
+
+    /// Rung 5: this table dropped `trained_on` entirely whenever the declared
+    /// name did not match the corpus name, so the one honest thing a submitter
+    /// did disappeared from the artefact while staying in the JSON. `cp -r` was
+    /// enough to get there, because the copy has a different name.
+    #[test]
+    fn a_declaration_that_could_not_be_checked_survives_into_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            trained_on: Some("some-other-corpus".into()),
+            contamination_check: "declared-but-uncheckable".into(),
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        for format in [
+            ReportFormat::Text,
+            ReportFormat::Markdown,
+            ReportFormat::Csv,
+        ] {
+            let text = flat(&render(&report, format));
+            assert!(
+                text.contains("TRAINED ON some-other-corpus"),
+                "{format:?} dropped the declaration: {text}"
+            );
+            assert!(
+                text.contains("unknown rather than no"),
+                "{format:?} read an unchecked declaration as a clean one: {text}"
+            );
+        }
+    }
+
+    /// A declaration that WAS checked and genuinely differs keeps the quieter
+    /// wording, so the loud one stays worth reading.
+    #[test]
+    fn a_checked_declaration_against_a_different_corpus_is_stated_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            trained_on: Some("bossbase".into()),
+            contamination_check: "checked".into(),
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(
+            text.contains("trained on bossbase, which is not this corpus"),
+            "{text}"
+        );
+        assert!(!text.contains("unknown rather than no"), "{text}");
+    }
+
+    /// Rung 5: `--split test` and a whole-corpus run produced identical
+    /// documents, and the warning that says why lives in `--split --help`,
+    /// which a reviewer reading a submitted artefact never sees.
+    #[test]
+    fn the_row_says_which_side_of_the_split_was_scored() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            split: "by-cover".into(),
+            split_scored: Some("test".into()),
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(text.contains("scored the test split only"), "{text}");
+        assert!(!text.contains("SCORED TRAIN AND TEST TOGETHER"), "{text}");
+    }
+
+    /// And the whole-corpus run over a corpus that HAS a split says so, which
+    /// is the case that makes a trained detector's figure unquotable.
+    #[test]
+    fn a_run_over_both_halves_of_a_split_corpus_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            split: "by-cover".into(),
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(text.contains("SCORED TRAIN AND TEST TOGETHER"), "{text}");
     }
 
     #[test]

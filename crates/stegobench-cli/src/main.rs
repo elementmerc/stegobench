@@ -7340,6 +7340,61 @@ mod tests {
         assert!(named.is_dir(), "{}", out.human);
     }
 
+    /// Rung 5 of the journey round claimed `plan` exits 0 on a corpus `score`
+    /// refuses with exit 3, having printed the refusal verbatim. Written to find
+    /// out rather than to assume: a plan whose exit code disagrees with the run
+    /// it describes is useless to the script that gates on it.
+    #[cfg(unix)]
+    #[test]
+    fn a_plan_over_a_leaking_corpus_refuses_with_the_code_the_run_would() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        // Every cover in train, every stego image in test, which puts each twin
+        // on the opposite side of the boundary from its own cover.
+        for i in 0..3 {
+            std::fs::write(corpus.join(format!("c{i}.png")), test_png(0)).unwrap();
+            std::fs::write(
+                corpus.join(format!("c{i}.json")),
+                format!(r#"{{"role":"clean","sha256":"{i}","split":"train"}}"#),
+            )
+            .unwrap();
+            std::fs::write(corpus.join(format!("s{i}.png")), test_png(64)).unwrap();
+            std::fs::write(
+                corpus.join(format!("s{i}.json")),
+                format!(
+                    r#"{{"role":"stego","source_png":"c{i}.png","sha256":"{i}","split":"test"}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let out = cmd_plan(
+            &resolved_at(&reg),
+            &[
+                "score".into(),
+                "--corpus".into(),
+                corpus.display().to_string(),
+                "--detector".into(),
+                "sizer".into(),
+            ],
+        );
+        assert_eq!(
+            out.code,
+            exit::PREFLIGHT_REFUSED,
+            "a plan over a corpus score refuses returned {}: {}",
+            out.code,
+            out.human
+        );
+        assert!(
+            out.human
+                .contains("different side of the train and test split"),
+            "{}",
+            out.human
+        );
+    }
+
     /// Asking for every detector when none of them is here is not a run that
     /// measured nothing; it is a refusal, and it keeps the exit code it has
     /// always had.
