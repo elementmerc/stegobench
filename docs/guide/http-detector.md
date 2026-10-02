@@ -254,7 +254,7 @@ Worth knowing before you start a long one:
 | `--keep-raw` | Keep what the detector printed for every image, not only for the ones no answer could be read from. It goes beside the records in `<records>.raw.jsonl`, and on an 18 image run it was 46 times the size of the records file. This is the flag for writing an adapter |
 | `--limit N` | A smoke test over the first N items. The result is marked `custom`, because a prefix of a corpus is not the corpus |
 | `--timeout SECONDS` | How long any single image gets before the detector is killed and that item is recorded as an error. Defaults to 60 |
-| `--corpus DIR` | A directory of unpacked samples on this machine, never a registered id. `stegobench fetch <id>` is what turns an id into a directory |
+| `--corpus DIR` | A directory of unpacked samples on this machine, never a registered id. `stegobench fetch <id> --tier <tier>` is what turns an id into a directory |
 | `--corpus-id ID` | Names the registered corpus the directory holds. It is a claim the harness checks, not one it takes |
 | `--records FILE` | Where the per-item answers are kept. It may not be inside the corpus: a file written there joins the corpus and the next run measures a different set |
 

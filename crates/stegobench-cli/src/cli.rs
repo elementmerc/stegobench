@@ -752,7 +752,16 @@ pub enum Command {
         /// Setting STEGOBENCH_CORPUS_DIR does the same thing for every fetch.
         /// An empty value counts as not set.
         // Not clap's `env`, for the reason given on `--registry`.
-        #[arg(long, value_name = "DIR")]
+        //
+        // `--out`, BECAUSE THREE OTHER COMMANDS ALREADY CALL IT THAT. `embed`,
+        // `score` and `report` all write their output to `--out`, and this one
+        // alone said `--dest`. The README and the corpus guide both wrote
+        // `--out` here, which was not a typo: it was the name the rest of the
+        // tree teaches, and a journey copied the README's own first command
+        // and got `unexpected argument '--out' found` with exit 2 before it
+        // had done anything else. `--dest` keeps working, unadvertised, so
+        // nothing written against the old name breaks.
+        #[arg(long = "out", alias = "dest", value_name = "DIR")]
         dest: Option<std::path::PathBuf>,
         /// Refuse a route that declares more bytes than this.
         ///
