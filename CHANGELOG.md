@@ -5,11 +5,10 @@ wants to know what the tool does today. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and dates are ISO
 8601 (`YYYY-MM-DD`).
 
-Nothing has been tagged yet, so there are no released versions below. The
-Unreleased section describes what's in the repository right now, including
-the parts that are deliberately not finished.
+## [1.0.0] — Pilot — 2026-10-03
 
-## [Unreleased]
+The first release. Everything below is what the tool does today; nothing in
+it is a promise about what comes next.
 
 ### CLI
 

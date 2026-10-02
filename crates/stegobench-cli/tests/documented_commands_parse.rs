@@ -292,3 +292,64 @@ fn every_command_the_docs_tell_a_reader_to_type_parses() {
         failures.join("\n")
     );
 }
+
+/// The README says "the output shown is output it printed". Nothing checked
+/// that, and two of its three verbatim samples had drifted by v1.0.0.
+///
+/// FOUND BY THE RELEASE GATE, 2026-10-03. `list detectors` had gained a
+/// column marking an entry nothing can drive, and the refusal `score` gives
+/// for a folder of somebody's own photographs had gained two lines. Both
+/// samples still looked plausible, which is the problem: a reader cannot
+/// tell a stale sample from a current one, and the claim above them is what
+/// makes the README worth reading.
+///
+/// Only the deterministic samples are checked. `doctor` prints what is
+/// installed on the machine running it, so its output is not a fixture and
+/// is deliberately shown in the README as a command rather than as output.
+#[test]
+fn the_readme_s_verbatim_samples_are_what_the_binary_prints() {
+    use std::process::Command;
+    let root = workspace_root();
+    let readme = fs::read_to_string(root.join("README.md")).expect("README.md");
+    let binary = env!("CARGO_BIN_EXE_stegobench");
+
+    // Each sample is the block that follows its `$ <command>` line, up to the
+    // closing fence.
+    let sample = |command: &str| -> String {
+        let marker = format!("$ {command}\n");
+        let at = readme
+            .find(&marker)
+            .unwrap_or_else(|| panic!("the README no longer shows `{command}`"));
+        let rest = &readme[at + marker.len()..];
+        let end = rest.find("```").expect("the sample block is fenced");
+        rest[..end].trim_end().to_string()
+    };
+
+    let registry = root.join("plugins/registry");
+    let printed = |args: &[&str]| -> String {
+        let out = Command::new(binary)
+            .args(args)
+            .arg("--registry")
+            .arg(&registry)
+            .output()
+            .expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    };
+
+    // `list detectors` prints the table and then a legend under a blank
+    // line; the README shows the table alone, so compare that much.
+    let listed = printed(&["list", "detectors"]);
+    let table = listed.split("\n\n").next().unwrap_or("").trim_end();
+    assert_eq!(
+        sample("stegobench list detectors"),
+        table,
+        "the README's `list detectors` sample is not what the binary prints"
+    );
+
+    let banner = printed(&[]);
+    assert_eq!(
+        sample("stegobench"),
+        banner.trim_end(),
+        "the README's bare-name sample is not what the binary prints"
+    );
+}

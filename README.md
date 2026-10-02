@@ -69,6 +69,8 @@ It can also run those detectors over images of your own, which is an answer rath
   stegobench doctor            what is installed, and what it needs
   stegobench help              the reasoning, one topic at a time
   stegobench --help            every command and flag
+
+  stegobench describe pentimento-core    10,000 covers with their licences attached, to quote a number from
 ```
 
 **2. What can it run?** The list is read from the registry, so it can't go
@@ -76,13 +78,13 @@ stale the way a README can.
 
 ```
 $ stegobench list detectors
-aletheia-rich    MIT                container  stegobench/aletheia-rich
-aletheia-rs      MIT                container  stegobench/aletheia
-aletheia-spa     MIT                container  stegobench/aletheia
-stegashield      proprietary        container  5iprojects/stegashield  needs STEGASHIELD_LICENCE
-stegcore         AGPL-3.0-or-later  local      stegcore
-stegexpose       none-granted       container  stegobench/stegexpose
-zsteg            MIT                container  stegobench/zsteg
+aletheia-rich MIT               container stegobench/aletheia-rich  stegobench can't drive it
+aletheia-rs   MIT               container stegobench/aletheia
+aletheia-spa  MIT               container stegobench/aletheia
+stegashield   proprietary       container 5iprojects/stegashield  needs STEGASHIELD_LICENCE
+stegcore      AGPL-3.0-or-later local     stegcore
+stegexpose    none-granted      container stegobench/stegexpose
+zsteg         MIT               container stegobench/zsteg
 ```
 
 `container` means pinned by image digest, sandboxed, no network. `local` means
@@ -138,6 +140,8 @@ $ stegobench score --corpus ./holiday-photos --detector all
 `score` measures a detector, which needs the answers in advance. Asking the detectors what they make of these files is `examine`, and what comes back is an answer rather than a measurement.
 `stegobench examine ./holiday-photos --detector <name>`
 `stegobench help scope`      the difference between the two
+`stegobench list detectors`  what is registered here
+`stegobench help pairing`    what a corpus has to carry first
 ```
 
 It exits 3, a pre-flight refusal, which a script can tell apart from an error
