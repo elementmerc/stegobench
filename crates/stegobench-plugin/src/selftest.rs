@@ -43,6 +43,74 @@ pub enum Verified {
     Answered(String),
 }
 
+/// The reading, unless the tool died without answering, in which case the
+/// death is the answer.
+///
+/// A TOOL THAT CRASHED HAS NOT SAID AN IMAGE IS CLEAN, AND FOR ONE REGISTERED
+/// DETECTOR IT SAID SO ABOUT EVERY IMAGE IT WAS GIVEN.
+///
+/// zsteg dies under this sandbox with a Ruby traceback and exit 1, which the
+/// SANDBOX comment below has recorded for some time. What nobody had noticed
+/// is what the harness then did with it: the traceback goes to stderr, stdout
+/// is empty, zsteg's parser finds no finding in either and returns
+/// `Verdict(false)`, and `Verdict(false)` means clean. A forensic analyst
+/// walking this build on 2026-10-02 was shown `clean` for four exhibits out
+/// of six, with "6 of 6 answered, 0 errored" underneath and exit code 0, and
+/// wrote them down as carrying no detector evidence. Four Ruby stack traces
+/// had been rendered as evidence of absence.
+///
+/// It also explains how the two-sided self-test passed for a tool that cannot
+/// process a single image here. `must_detect` passes because zsteg prints its
+/// finding before it dies; `must_clear` passes BECAUSE the tool crashed, since
+/// a crash and a clean verdict were the same value. A check that a crash can
+/// satisfy is not a check.
+///
+/// The rule: a non-zero exit with no positive finding is a failure. A positive
+/// finding is kept, because a tool that printed a hit and then died still
+/// found something, and that is the shape zsteg has on a JPEG. Consistent with
+/// the adapters, which already exit non-zero to report that they could not do
+/// the work, after a run once exited zero and produced nothing for 2,000
+/// images.
+fn answered_or_died(reading: Reading, out: &std::process::Output, name: &str) -> Reading {
+    if out.status.success() {
+        return reading;
+    }
+    match reading {
+        // It found something and then fell over. The finding stands; the fall
+        // is in the raw output the reader is pointed at.
+        found @ (Reading::Verdict(true) | Reading::Score(_)) => found,
+        Reading::Failed(why) => Reading::Failed(why),
+        Reading::Verdict(false) => {
+            let code = out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "a signal".to_string());
+            let last = String::from_utf8_lossy(&out.stderr);
+            let last = last.lines().next().unwrap_or("").trim();
+            Reading::Failed(format!(
+                "{name} exited {code} without answering, so this is not a \
+                 clean result: {}",
+                clip_line(last)
+            ))
+        }
+    }
+}
+
+/// One line of a tool's complaint, short enough to sit in a table cell's
+/// footnote without becoming the output.
+fn clip_line(line: &str) -> String {
+    const MOST: usize = 120;
+    if line.is_empty() {
+        return "it printed nothing at all".to_string();
+    }
+    if line.chars().count() <= MOST {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(MOST).collect();
+    format!("{kept}...")
+}
+
 /// The flags every containerised run in this project is locked down with.
 ///
 /// Public, and the ONE place they are written. `stegobench describe` prints a
@@ -301,11 +369,16 @@ fn run_one(
     // start lying about an entry the moment it declared a batch.
     if invoke.batch.is_some_and(|b| b > 1) {
         let keys = vec![inner.clone()];
-        return parsers::parse_keyed(&invoke.parser, &text, &raw.stderr.clone(), &keys)
+        let one = parsers::parse_keyed(&invoke.parser, &text, &raw.stderr.clone(), &keys)
             .pop()
             .unwrap_or_else(|| Reading::Failed("the batch parser returned nothing".into()));
+        return answered_or_died(one, &out, &entry.name);
     }
-    parsers::parse(&invoke.parser, &text, &raw.stderr.clone())
+    answered_or_died(
+        parsers::parse(&invoke.parser, &text, &raw.stderr.clone()),
+        &out,
+        &entry.name,
+    )
 }
 
 /// Runs a binary plugin directly, with no container.
@@ -355,7 +428,11 @@ fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration, raw: &mut Raw) -
         Ok(out) => {
             raw.stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             raw.stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            parsers::parse(&invoke.parser, &raw.stdout.clone(), &raw.stderr.clone())
+            answered_or_died(
+                parsers::parse(&invoke.parser, &raw.stdout.clone(), &raw.stderr.clone()),
+                &out,
+                program,
+            )
         }
         // Passed through rather than wrapped. The message already names the
         // tool and says what happened, and "could not run X: X gave no answer"
@@ -533,7 +610,12 @@ pub fn read_many_observed(
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     raw.stdout = stdout.clone();
     raw.stderr = stderr.clone();
+    // Every image in the batch shares the one invocation, so a batch that
+    // died without answering did not find all of them clean.
     parsers::parse_keyed(&invoke.parser, &stdout, &stderr, &keys)
+        .into_iter()
+        .map(|r| answered_or_died(r, &out, &entry.name))
+        .collect()
 }
 
 /// Ask this tool about one file, dispatching on whichever kind of plugin the
@@ -1103,7 +1185,9 @@ mod local_roundtrip_tests {
 
     use stegobench_core::registry::Entry;
 
-    use super::{roundtrip, Verified};
+    use super::{read_one_observed, roundtrip, Raw, Verified};
+    use crate::parsers::Reading;
+    use std::time::Duration;
 
     /// A stand-in embedder: `embed` concatenates a marker and the payload,
     /// `extract` gives the payload back. Enough to exercise every branch of
@@ -1133,6 +1217,86 @@ mod local_roundtrip_tests {
     fn fixtures(dir: &Path) -> &Path {
         std::fs::write(dir.join("clean.png"), b"\x89PNG\r\n\x1a\ncover bytes").expect("cover");
         dir
+    }
+
+    /// A detector entry whose program is the given script.
+    fn detector(command: &str) -> Entry {
+        toml::from_str(&format!(
+            "name = \"crasher\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [{command}]\nversion_args = [\"-v\"]\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"zsteg\"\n\
+             [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n"
+        ))
+        .expect("parses")
+    }
+
+    /// A TOOL THAT CRASHED HAS NOT CALLED AN IMAGE CLEAN.
+    ///
+    /// A forensic analyst was shown `clean` for four exhibits out of six on
+    /// 2026-10-02, with exit code 0 and "0 errored" underneath, and every one
+    /// of the four was a Ruby traceback from a detector that could not start.
+    /// The parser found no finding in an empty stdout and returned the verdict
+    /// that means clean, which is the same value a working detector returns
+    /// when it genuinely found nothing.
+    #[test]
+    fn a_detector_that_exits_nonzero_saying_nothing_has_not_found_an_image_clean() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // Exactly zsteg's shape under this sandbox: nothing on stdout, a
+        // complaint on stderr, exit 1.
+        let tool = fake_tool(
+            tmp.path(),
+            "crash.sh",
+            "case \"$1\" in -v) echo 1.0; exit 0;; esac\n\
+             echo \"tempfile.rb:159: Read-only file system (Errno::EROFS)\" >&2\n\
+             exit 1",
+        );
+        let e = detector(&format!("{tool:?}"));
+        let img = tmp.path().join("exhibit.png");
+        std::fs::write(&img, b"\x89PNG\r\n\x1a\nnot really a png").expect("image");
+        let mut raw = Raw::default();
+        let reading = read_one_observed(&e, &img, Duration::from_secs(30), &[], &mut raw);
+        match reading {
+            Reading::Failed(why) => {
+                assert!(
+                    why.contains("exited 1"),
+                    "the exit code belongs in it: {why}"
+                );
+                assert!(
+                    why.contains("not a clean result"),
+                    "the whole point is that it is NOT clean: {why}"
+                );
+            }
+            other => panic!(
+                "a crash was read as an answer about the image: {other:?}. This is \
+                 the defect that put four stack traces in front of a forensic \
+                 analyst as evidence of absence"
+            ),
+        }
+    }
+
+    /// The other half, and it is not symmetric: zsteg on a JPEG prints its
+    /// finding to stderr and THEN dies, so a tool that found something before
+    /// falling over has still found something.
+    #[test]
+    fn a_detector_that_reports_a_hit_and_then_dies_keeps_the_hit() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool = fake_tool(
+            tmp.path(),
+            "hit-then-crash.sh",
+            "case \"$1\" in -v) echo 1.0; exit 0;; esac\n\
+             echo \"[?] 29 bytes of extra data after image end\"\n\
+             echo \"then it fell over\" >&2\n\
+             exit 1",
+        );
+        let e = detector(&format!("{tool:?}"));
+        let img = tmp.path().join("exhibit.png");
+        std::fs::write(&img, b"\x89PNG\r\n\x1a\nnot really a png").expect("image");
+        let mut raw = Raw::default();
+        match read_one_observed(&e, &img, Duration::from_secs(30), &[], &mut raw) {
+            Reading::Verdict(true) => {}
+            other => panic!("a finding printed before the crash was thrown away: {other:?}"),
+        }
     }
 
     #[test]
