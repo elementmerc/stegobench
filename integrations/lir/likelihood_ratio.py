@@ -119,8 +119,19 @@ class CllrDecomposition:
     n_clean: int
 
     @property
-    def informative(self) -> bool:
-        """False when the system would have done better saying nothing at all."""
+    def beats_silence(self) -> bool:
+        """True when the system did better than answering "this tells you nothing".
+
+        **This is not the same as being informative, and it used to be called
+        that.** Beating 1.000 is necessary and nowhere near sufficient: a cell
+        can clear it by 0.001 while the smallest improvement worth reporting,
+        measured on a control rather than chosen, is around 0.05. Calling that
+        "informative" is the overstatement this module exists to prevent, so
+        the name now says only what the comparison proves.
+
+        For a verdict that accounts for usefulness as well, see
+        `analyse_panel.verdict_for`, which takes a stated threshold.
+        """
         return self.cllr < 1.0
 
 

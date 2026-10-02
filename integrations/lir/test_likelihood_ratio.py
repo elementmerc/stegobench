@@ -15,7 +15,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from analyse_panel import verdict_for
 from likelihood_ratio import (
+    CllrDecomposition,
     LogisticCalibrator,
     bound_cost,
     cllr,
@@ -586,3 +588,33 @@ class TestInputValidation:
     def test_pav_refuses_mismatched_lengths(self):
         with pytest.raises(ValueError, match="against"):
             pav([1.0, 2.0, 3.0], [0, 1])
+
+
+class TestBeatsSilence:
+    """The property used to be called `informative`, which claimed too much."""
+
+    @staticmethod
+    def _decomposition(cllr):
+        return CllrDecomposition(
+            cllr=cllr, cllr_min=cllr, cllr_cal=0.0,
+            bound_cost=0.0, n_payload=10, n_clean=10,
+        )
+
+    def test_it_reports_only_the_comparison_against_one(self):
+        assert self._decomposition(0.999).beats_silence
+        assert not self._decomposition(1.000).beats_silence
+        assert not self._decomposition(1.001).beats_silence
+
+    def test_beating_silence_is_not_being_useful(self):
+        """The reason for the rename, in one assertion.
+
+        A cell can beat 1.000 by 0.001 while the smallest improvement a
+        measured control calls worth reporting is around 0.05. Anything that
+        reads this property as a verdict is overstating by a factor of fifty.
+        """
+        barely = self._decomposition(0.999)
+        assert barely.beats_silence
+        assert verdict_for(0.01, barely.cllr, useful=0.95) == "detectable, not useful"
+
+    def test_the_old_name_is_gone(self):
+        assert not hasattr(self._decomposition(0.5), "informative")
