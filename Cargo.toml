@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.98"
 license = "AGPL-3.0-or-later"
@@ -26,9 +26,9 @@ readme = "README.md"
 # a local build resolves against; the version is what crates.io resolves
 # against, and a path dependency without one cannot be published at all. Both
 # live here so the four crates can only ever be released at one version.
-stegobench-core = { path = "crates/stegobench-core", version = "0.1.0" }
-stegobench-metrics = { path = "crates/stegobench-metrics", version = "0.1.0" }
-stegobench-plugin = { path = "crates/stegobench-plugin", version = "0.1.0" }
+stegobench-core = { path = "crates/stegobench-core", version = "1.0.0" }
+stegobench-metrics = { path = "crates/stegobench-metrics", version = "1.0.0" }
+stegobench-plugin = { path = "crates/stegobench-plugin", version = "1.0.0" }
 
 # Kept deliberately small. Every entry here runs with our privileges and is
 # reviewed like any other design decision (baseline Section 5). Anything that

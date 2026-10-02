@@ -240,7 +240,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--clean-prefix", default="clean")
     ap.add_argument("--domain", default="jpeg", choices=["spatial", "jpeg", "structural"])
     ap.add_argument("--format", default="jpeg")
-    ap.add_argument("--harness-version", default="0.1.0")
+    # Tracks the Rust workspace version in Cargo.toml, which is the harness
+    # this field names. It is a second copy of that number and there is no gate
+    # holding the two together yet, so a reader finding them disagreeing should
+    # believe Cargo.toml: the binary reads its own version from the crate
+    # metadata and cannot be wrong about it, while this default is typed.
+    ap.add_argument("--harness-version", default="1.0.0")
     ap.add_argument("--image-digests", default="",
                     help="comma-separated image=sha256:... pairs")
     args = ap.parse_args(argv)

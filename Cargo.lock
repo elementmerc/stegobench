@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "stegobench-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "stegobench-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "schemars",
  "serde",
@@ -456,11 +456,11 @@ dependencies = [
 
 [[package]]
 name = "stegobench-metrics"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "stegobench-plugin"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
