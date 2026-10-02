@@ -540,50 +540,102 @@ where
             break;
         }
 
-        let scored: Vec<(Record, crate::selftest::Raw)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = chunk
-                .chunks(batch)
-                .map(|group| scope.spawn(move || score_group(entry, group, timeout, adapter_roots)))
-                .collect();
-            handles
-                .into_iter()
-                .zip(chunk.chunks(batch))
-                .flat_map(|(handle, group)| {
-                    // A panicking worker is recorded as an error against the
-                    // items it was holding rather than taken as the end of the
-                    // run. The alternative loses every answer in the chunk,
-                    // including the ones that were fine, and leaves a records
-                    // file the next run cannot resume from.
-                    handle.join().unwrap_or_else(|_| {
-                        group
-                            .iter()
-                            .map(|item| {
-                                (
-                                    Record {
-                                        id: item.id.clone(),
-                                        score: None,
-                                        verdict: None,
-                                        error: Some(
-                                            "the worker scoring this item panicked; the run \
-                                             continued and this item was not measured"
-                                                .into(),
-                                        ),
-                                        elapsed_ms: None,
-                                    },
-                                    crate::selftest::Raw::default(),
-                                )
-                            })
-                            .collect()
-                    })
-                })
-                .collect()
+        // WHY THIS WAITS ON A CHANNEL RATHER THAN JOINING THE HANDLES
+        //
+        // Joining blocks until a worker finishes, and a worker now holds a whole
+        // BATCH. At 16 images of about 15 seconds each that is four minutes in
+        // which nothing is printed, no record is written, and the host side
+        // `docker` process sits at 0% CPU because the work is inside the
+        // container. A journey walked by a competent developer read exactly that
+        // as a hung tool and came within a minute of killing the run; he
+        // continued only because he knew to go and look at `docker stats`
+        // himself. Batching turned a per image heartbeat into a per batch one
+        // and silently broke the thirty to sixty second rule the rest of this
+        // project holds itself to.
+        //
+        // So the results arrive on a channel and the wait is bounded. A timeout
+        // is not a failure here, it is the heartbeat: it says the run is alive
+        // and how far it has got, which is the whole thing the user needed.
+        // Ordering is still a property of the structure rather than of a
+        // reassembly buffer, because each worker sends its own index and the
+        // results are put back in that order before anything is written.
+        let groups: Vec<&[WorkItem]> = chunk.chunks(batch).collect();
+        let mut done: Vec<Option<Vec<(Record, crate::selftest::Raw)>>> = vec![None; groups.len()];
+        let mut outstanding = groups.len();
+
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            for (i, group) in groups.iter().enumerate() {
+                let tx = tx.clone();
+                let group = *group;
+                scope.spawn(move || {
+                    // The send cannot outlive the receiver: the scope does not
+                    // end until every thread here has finished, and the receiver
+                    // lives for all of it. A failed send would mean the receiver
+                    // was gone, so there is nowhere to report it to and nothing
+                    // useful to do but stop.
+                    let _ = tx.send((i, score_group(entry, group, timeout, adapter_roots)));
+                });
+            }
+            // Dropped so the channel closes once the workers are finished,
+            // rather than this blocking forever on a sender it holds itself.
+            drop(tx);
+
+            while outstanding > 0 {
+                match rx.recv_timeout(HEARTBEAT) {
+                    Ok((i, scored)) => {
+                        done[i] = Some(scored);
+                        outstanding -= 1;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Alive, and saying so. The tally has not moved since
+                        // the last line, which is the point: a reader needs to
+                        // know the silence is work rather than a hang.
+                        progress(&tally);
+                        last_beat = Instant::now();
+                    }
+                    // Every sender is gone and the count still says otherwise,
+                    // which means a worker died without sending. The items it
+                    // held are filled in below rather than left as a short list
+                    // the caller would have to align itself.
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
         });
 
-        for ((record, raw), item) in scored.into_iter().zip(chunk.iter()) {
-            if let Some(problem) = raw_sink.keep(&item.id, &record, &raw) {
-                tally.raw_problem.get_or_insert(problem);
+        for (slot, group) in done.into_iter().zip(groups.iter()) {
+            // A worker that panicked or vanished is recorded as an error against
+            // the items it was holding rather than taken as the end of the run.
+            // The alternative loses every answer in the chunk, including the
+            // ones that were fine, and leaves a records file the next run
+            // cannot resume from.
+            let scored = slot.unwrap_or_else(|| {
+                group
+                    .iter()
+                    .map(|item| {
+                        (
+                            Record {
+                                id: item.id.clone(),
+                                score: None,
+                                verdict: None,
+                                error: Some(
+                                    "the worker scoring this item panicked; the run \
+                                     continued and this item was not measured"
+                                        .into(),
+                                ),
+                                elapsed_ms: None,
+                            },
+                            crate::selftest::Raw::default(),
+                        )
+                    })
+                    .collect()
+            });
+            for ((record, raw), item) in scored.into_iter().zip(group.iter()) {
+                if let Some(problem) = raw_sink.keep(&item.id, &record, &raw) {
+                    tally.raw_problem.get_or_insert(problem);
+                }
+                finish(record, &mut tally)?;
             }
-            finish(record, &mut tally)?;
         }
         if last_beat.elapsed() >= HEARTBEAT {
             progress(&tally);
