@@ -461,11 +461,18 @@ pub enum Command {
         /// the columns comparable as answers even though their scales are not
         /// comparable as numbers.
         ///
-        /// Not marked required, although one is: clap's own message for a
-        /// missing required flag names the flag and not one value that would
-        /// satisfy it, and a journey watched a reader meet that message with
-        /// no idea which of seven detectors to name. The refusal is ours so
-        /// that it can answer that.
+        // Not marked required, although one is: clap's own message for a
+        // missing required flag names the flag and not one value that would
+        // satisfy it, and a reader met that message with no idea which of
+        // seven detectors to name. The refusal is ours so that it can answer
+        // that.
+        //
+        // A `//` COMMENT RATHER THAN A `///` ONE, DELIBERATELY. Clap renders
+        // doc comments into `--help`, so this paragraph was being printed to
+        // users, internal process vocabulary and all, and a forensic analyst
+        // reading the help reported it as this project's private language
+        // showing through. Rationale for a decision belongs where maintainers
+        // read it; `--help` gets what the reader needs to type.
         #[arg(short = 'd', long = "detector", value_name = "NAME", num_args = 1..)]
         detectors: Vec<String>,
         /// Seconds one image gets before the detector is killed.

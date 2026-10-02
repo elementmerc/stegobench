@@ -1074,8 +1074,17 @@ fn short_sha256(text: &str) -> Option<String> {
 /// Rendered here rather than by `Availability::summary`, whose pad is a
 /// constant sixteen: a name of exactly sixteen characters ate the gap and ran
 /// into the word beside it, and no single row can know how wide the table is.
-fn doctor_row(check: &availability::Availability, width: usize) -> String {
+fn doctor_row(check: &availability::Availability, drivable: bool, width: usize) -> String {
     let state = match &check.presence {
+        // PRESENT IS NOT THE SAME AS USABLE, AND THE STATE COLUMN IS WHERE A
+        // READER STOPS. A forensic analyst read `present` beside an entry
+        // nothing here can drive and had to work out from a parenthetical
+        // further along the line that it was not available to them at all.
+        // `describe` and `list` were corrected for this the same day and
+        // `doctor` was missed.
+        Presence::Present { .. } if !drivable => {
+            "undrivable  nothing in its entry says what to launch".to_string()
+        }
         Presence::Present { pin } => format!("present   {}", pin_columns(pin)),
         Presence::Absent { reason } => format!("MISSING   {reason}"),
         Presence::Unknown { reason } => format!("unknown   {reason}"),
@@ -1166,7 +1175,7 @@ fn cmd_doctor(
             Verified::Answered(_) => answered += 1,
             Verified::Skipped(_) => skipped += 1,
         }
-        let row = doctor_row(&check, width);
+        let row = doctor_row(&check, entry.can_be_driven(), width);
         let detail = match &verdict {
             Verified::Failed(why) => format!("{row}  ({why})"),
             Verified::Answered(why) => {
@@ -5074,6 +5083,70 @@ mod tests {
     /// picked from what the argument declares (or `bash` for the one enum
     /// value, `completions`' shell), since the parse succeeding is what is
     /// under test, not what the placeholder does downstream.
+    //
+    // The vocabulary gate immediately below walks the same tree.
+    /// `--help` is for the reader, and this project's own process vocabulary
+    /// is not for the reader.
+    ///
+    /// RAISED BY A JOURNEY, 2026-10-02. A forensic analyst reading
+    /// `examine --help` found the sentence "a journey watched a reader meet
+    /// that message", and listed it as internal language showing through. It
+    /// was a `///` comment on a flag, which clap renders into the help, so
+    /// rationale written for maintainers was being printed to users.
+    ///
+    /// Walked over the rendered help of every subcommand rather than over the
+    /// source, because the defect is what clap PRINTS: the same words in a
+    /// `//` comment are correct and invisible, and a check on the source
+    /// could not tell the two apart.
+    #[test]
+    fn no_help_text_carries_this_project_s_internal_vocabulary() {
+        /// Words that mean something inside this project and nothing to a
+        /// reader. Not a spell checker: each of these is a term of art here
+        /// with an ordinary meaning elsewhere, so the match is deliberately
+        /// narrow and a false positive is rewritten rather than exempted.
+        const INTERNAL: &[&str] = &[
+            "a journey",
+            "journeys",
+            "persona",
+            "rung",
+            "the panel",
+            "subagent",
+            "DEFERRED",
+            "the baseline",
+            "the operator decided",
+        ];
+        let root = Cli::command();
+        let mut checked = 0;
+        let mut found: Vec<String> = Vec::new();
+        for sub in root.get_subcommands() {
+            let name = sub.get_name().to_string();
+            let rendered = sub.clone().render_long_help().to_string();
+            checked += 1;
+            for word in INTERNAL {
+                if rendered.to_lowercase().contains(&word.to_lowercase()) {
+                    let line = rendered
+                        .lines()
+                        .find(|l| l.to_lowercase().contains(&word.to_lowercase()))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    found.push(format!("{name} --help says {word:?}: {line}"));
+                }
+            }
+        }
+        assert!(
+            checked >= 10,
+            "rendered help for {checked} subcommand(s), so this looked at \
+             almost nothing"
+        );
+        assert!(
+            found.is_empty(),
+            "internal vocabulary reached the help text. A `///` comment on a \
+             flag is printed to users; move the rationale to a `//` comment:\n{}",
+            found.join("\n")
+        );
+    }
+
     #[test]
     fn every_subcommand_in_the_tree_accepts_json_and_the_run_output_is_parseable() {
         let root = Cli::command();
@@ -9025,6 +9098,7 @@ mod tests {
                         verified: None,
                         missing_secrets: Vec::new(),
                     },
+                    true,
                     width,
                 )
             })
