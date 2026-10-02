@@ -91,7 +91,30 @@ pub struct Entry {
     /// Unstated is not a yes. A publish path reads
     /// [`Redistribution::may_be_served`] and an entry that says nothing is
     /// refused rather than assumed.
-    #[serde(default)]
+    ///
+    /// SERIALISED AS TWO KEYS, AND WHY THE ANSWER TRAVELS WITH THE VALUE
+    ///
+    /// JSON carries `redistribution`, the declared value, and beside it
+    /// `may_be_served`, the derived answer to the question a publish path is
+    /// actually asking. The second is absent when the entry declares nothing,
+    /// which is a different statement from `false`: absent means the entry does
+    /// not say and a publish path must refuse, while `false` means the entry
+    /// says no and that image is skipped with a reason. Getting those two
+    /// confused inverts a publishing decision, so the shape makes them distinct
+    /// rather than leaving a reader to infer it.
+    ///
+    /// It is derived at the serialisation boundary from
+    /// [`Redistribution::may_be_served`] rather than stored, so there is one
+    /// expression of the rule and nothing to keep in step with it. The reason
+    /// it is exported at all is that the publish script used to decide for
+    /// itself, with its own list of the values that mean yes, and a rule
+    /// written in Rust and again in bash is a rule that can drift.
+    #[serde(
+        flatten,
+        default,
+        serialize_with = "serialise_republish",
+        deserialize_with = "deserialise_republish"
+    )]
     pub redistribution: Option<Redistribution>,
     /// Why `redistribution` says what it says, in enough detail to disagree with.
     ///
@@ -184,6 +207,56 @@ pub struct Entry {
     pub roundtrip: Option<Roundtrip>,
     #[serde(default)]
     pub notes: Option<String>,
+}
+
+/// The key the derived republish answer is written under.
+///
+/// Named after the method it comes from, so a reader comparing the document
+/// with the code has one word to look for. It is deliberately not a licence
+/// word: `may_be_served` answers "may we hand somebody a copy", which is true
+/// for a grant and for a recorded decision to mirror without one, and
+/// [`Redistribution::allows_publishing`] is the narrower question about
+/// whether a grant exists at all.
+pub const MAY_BE_SERVED_KEY: &str = "may_be_served";
+
+/// Writes `redistribution` and the derived `may_be_served` beside it.
+///
+/// Both keys or neither. An entry that declares nothing serialises as an empty
+/// map, which `flatten` folds into the surrounding object as no keys at all,
+/// and that absence is the honest answer: the entry does not say.
+fn serialise_republish<S>(value: &Option<Redistribution>, serialiser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    // `None` rather than a length, because a map of unknown length is what
+    // `flatten` wants: it folds the entries into the outer object and a
+    // declared length would be a length for the wrong object.
+    let mut map = serialiser.serialize_map(None)?;
+    if let Some(r) = value {
+        map.serialize_entry("redistribution", r)?;
+        map.serialize_entry(MAY_BE_SERVED_KEY, &r.may_be_served())?;
+    }
+    map.end()
+}
+
+/// Reads `redistribution` back, and ignores the derived key.
+///
+/// A flattened field is handed every key the named fields did not claim, so
+/// this picks the one it owns. `may_be_served` is derived output and is never
+/// read back: a registry file that carries it (one written out by `describe
+/// --raw`, say) is accepted and the declared value still decides, because the
+/// alternative is a document this tool prints and then refuses to read.
+fn deserialise_republish<'de, D>(deserialiser: D) -> Result<Option<Redistribution>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Declared {
+        #[serde(default)]
+        redistribution: Option<Redistribution>,
+    }
+    Ok(Declared::deserialize(deserialiser)?.redistribution)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1697,6 +1770,69 @@ must_clear = "b.png"
             !remaining.iter().any(|p| p.contains("redistribution")),
             "{remaining:?}"
         );
+    }
+
+    /// The JSON an entry with a verdict carries, which is the field a publish
+    /// path reads instead of deciding for itself.
+    ///
+    /// The rule used to live twice, in `Redistribution::may_be_served` and
+    /// again in the publish script's own list of the words that mean yes, so
+    /// the two could drift. This is the half that makes the script's copy
+    /// unnecessary, and the four values are checked separately because the
+    /// interesting case is not any single answer: it is that an entry saying
+    /// nothing and an entry saying no come out as DIFFERENT shapes.
+    #[test]
+    fn the_derived_republish_answer_travels_beside_the_verdict() {
+        for (declared, expected) in [
+            ("permitted", true),
+            ("mirrored-by-decision", true),
+            ("forbidden", false),
+            ("unknown", false),
+        ] {
+            let e = parse(&format!(
+                "redistribution = \"{declared}\"\n\
+                 redistribution_reason = \"A reason somebody can disagree with.\"\n\
+                 [image]\nreference = \"x@sha256:a\"\n\
+                 [emits]\noutput = \"verdict\"\n\
+                 [invoke]\nargv = [\"{{file}}\"]\nparser = \"zsteg\""
+            ));
+            let json = serde_json::to_value(&e).expect("an entry serialises");
+            assert_eq!(
+                json["redistribution"],
+                serde_json::json!(declared),
+                "{declared}: the declared value changed on the way out"
+            );
+            assert_eq!(
+                json.get(MAY_BE_SERVED_KEY),
+                Some(&serde_json::json!(expected)),
+                "{declared}: the derived answer is wrong or missing"
+            );
+            // The derived key is output, never input, and an entry read back
+            // through it still means what it declared.
+            let again: Entry = serde_json::from_value(json).expect("reads back");
+            assert_eq!(again.redistribution, e.redistribution, "{declared}");
+        }
+    }
+
+    /// An entry that declares nothing carries NO derived answer, rather than
+    /// carrying `false`.
+    ///
+    /// This distinction is the whole reason the field is worth exporting.
+    /// Absent means the entry does not say, and a publish path refuses the
+    /// entire run rather than guessing; `false` means the entry says no, and
+    /// that one image is skipped with the entry's own reason beside it.
+    /// Serialising the absence as `false` would turn the first into the second
+    /// and let a run that should have stopped look complete.
+    #[test]
+    fn an_entry_that_says_nothing_carries_no_derived_answer_at_all() {
+        let e = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"zsteg\"",
+        );
+        let json = serde_json::to_value(&e).expect("an entry serialises");
+        assert_eq!(json.get(MAY_BE_SERVED_KEY), None, "{json}");
+        assert_eq!(json.get("redistribution"), None, "{json}");
     }
 
     /// A detector the host can actually drive has to say what it prints.

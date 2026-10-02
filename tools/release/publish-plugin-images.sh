@@ -29,11 +29,15 @@
 # WHAT DECIDES WHETHER A GIVEN IMAGE GOES
 #
 # Not this script, and not its licence field. Each entry carries
-# `redistribution` and `redistribution_reason`, and this reads them. The three
-# outcomes are publish, skip with the entry's own recorded reason, and refuse to
-# proceed because the entry does not say. An entry that says nothing is not a
-# yes, and the refusal is the whole run rather than that one image, because a
-# skip inside a loop is how a partial publish comes to look like a complete one.
+# `redistribution` and `redistribution_reason`, and `stegobench list --json`
+# carries the derived answer `may_be_served` beside the declared value. This
+# reads that answer rather than working it out: the rule lives in
+# `Redistribution::may_be_served` in stegobench-core and nowhere else, so there
+# is no second copy here to fall out of step with it. The three outcomes are
+# publish, skip with the entry's own recorded reason, and refuse to proceed
+# because the entry does not say. An entry that says nothing is not a yes, and
+# the refusal is the whole run rather than that one image, because a skip inside
+# a loop is how a partial publish comes to look like a complete one.
 #
 # WHY EMBEDDERS ARE NOT IN THE DEFAULT SET
 #
@@ -99,7 +103,8 @@ Options:
   --help             this text.
 
 The decision to publish any one image comes from that entry's own
-`redistribution` field, never from this script.
+`redistribution` field, read as the `may_be_served` answer the listing derives
+from it, never from this script.
 TEXT
 }
 
@@ -202,6 +207,18 @@ rows="$(printf '%s' "${listing}" | jq -r --argjson kinds "${kind_filter}" '
       | { name: .name,
           reference: .image.reference,
           decision: (.redistribution // "unstated"),
+          # THE ANSWER, READ RATHER THAN WORKED OUT HERE.
+          #
+          # `may_be_served` is derived by the binary from the declared value,
+          # and it is the question this script asks. It is absent, not false,
+          # when the entry declares nothing, so `//` is no use: in jq `false`
+          # is falsy and `(.may_be_served // "unstated")` would turn a declared
+          # no into "does not say" and abort a run that should have skipped one
+          # image. `has` separates the two, which is the entire point of the
+          # field.
+          served: (if has("may_be_served")
+                   then (.may_be_served | tostring)
+                   else "unstated" end),
           # FLATTENED HERE, NOT WHERE IT IS PRINTED.
           #
           # `redistribution_reason` is a multi line basic string in the TOML, so
@@ -223,6 +240,7 @@ rows="$(printf '%s' "${listing}" | jq -r --argjson kinds "${kind_filter}" '
         reference: .[0].reference,
         names: (map(.name) | sort | join(", ")),
         decisions: (map(.decision) | unique),
+        served_answers: (map(.served) | unique),
         reasons: (map(.reason) | map(select(. != "")) | unique)
       })
     | sort_by(.reference)
@@ -230,6 +248,7 @@ rows="$(printf '%s' "${listing}" | jq -r --argjson kinds "${kind_filter}" '
     | [ .reference,
         .names,
         (.decisions | join(" and ")),
+        (.served_answers | join(" and ")),
         (.reasons | join(" / ")) ]
     | @tsv
 ')" || fail 1 "could not read the images out of the listing"
@@ -258,7 +277,7 @@ else
     printf 'Mode:     dry run. Nothing will be sent. Pass --publish to send.\n\n'
 fi
 
-while IFS=$'\t' read -r reference names decision reason; do
+while IFS=$'\t' read -r reference names decision served reason; do
     [ -n "${reference}" ] || continue
 
     grounds=""
@@ -275,18 +294,36 @@ while IFS=$'\t' read -r reference names decision reason; do
         *) fail 2 "${names} names ${reference}, which is not pinned by digest. Nothing here can publish bytes it cannot name" ;;
     esac
 
-    # WHAT COUNTS AS A YES
+    # WHAT COUNTS AS A YES, AND WHERE THAT IS DECIDED
     #
-    # `permitted` is a grant. `mirrored-by-decision` is no grant and a recorded
-    # decision to serve a copy anyway, which is a real position with a reason
-    # and a condition beside it. Both mean a copy may be served, which is the
-    # question a publish path asks; `Redistribution::may_be_served` in
-    # stegobench-core is the same rule and is the one to change if this ever
-    # moves. `forbidden` is a no with a reason. Everything else, including an
-    # entry that carries no field at all and including a value this script has
-    # never heard of, is "does not say", and does not get a guess.
-    case "${decision}" in
-        permitted|mirrored-by-decision)
+    # Not here, and that is the change. `may_be_served` in the listing is the
+    # binary's own answer to this exact question, derived from the declared
+    # value by `Redistribution::may_be_served` in stegobench-core: true for a
+    # grant and for a recorded decision to mirror without one, false for a
+    # refusal, and absent where the entry declares nothing. This script used to
+    # carry a second copy of that rule as its own list of the words that mean
+    # yes, and a publishing rule written in two languages is one that can
+    # drift, so the copy is gone and there is deliberately no fallback. A
+    # binary too old to emit the field reports "unstated" for every image and
+    # the run aborts saying so, which is the same safe direction an unstated
+    # entry already took and is the only direction worth failing in here.
+    #
+    # The declared value is still read, for two jobs that are not the rule:
+    # naming the value in a refusal, and marking a copy that goes up on a
+    # recorded decision rather than on a grant.
+    #
+    # The two are then checked against each other, because either one without
+    # the other means the document is not the one this expects, and acting on
+    # half of it is how a publish decision gets made by accident.
+    if [ "${served}" = "unstated" ] && [ "${decision}" != "unstated" ]; then
+        fail 2 "$(printf '%s names %s, whose entry declares redistribution %s, and the listing carries no may_be_served beside it.\n  That pairing means the stegobench binary that produced the listing predates the derived field.\n  This script no longer decides for itself which values mean yes, so it stops rather than guessing. Point STEGOBENCH at a current binary and run it again.' "${names}" "${reference}" "${decision}")"
+    fi
+    if [ "${served}" != "unstated" ] && [ "${decision}" = "unstated" ]; then
+        fail 2 "$(printf '%s names %s and the listing answers may_be_served %s with no redistribution declared beside it.\n  That cannot come from a registry entry: the derived answer is written only where a value is declared.\n  Treat the listing as untrustworthy rather than publishing from it.' "${names}" "${reference}" "${served}")"
+    fi
+
+    case "${served}" in
+        true)
             if [ -z "${reason}" ]; then
                 fail 2 "${names} says ${decision} and gives no reason. A publish decision with no reason beside it is the defect this project exists to correct: fill in redistribution_reason"
             fi
@@ -306,13 +343,28 @@ while IFS=$'\t' read -r reference names decision reason; do
                 grounds=""
             fi
             ;;
-        forbidden)
-            printf 'skip  %-16s %s\n' "${name}" "${reason:-forbidden, and the entry gives no reason}"
-            skipped+=("${name}|${reason:-forbidden, with no reason recorded}")
+        false)
+            # THE DECLARED VALUE IS ON THE LINE, NOT JUST THE REASON.
+            #
+            # A no that nobody has established and a no somebody read the terms
+            # for both land here, and they call for different follow-up work:
+            # `unknown` is a question still open and `forbidden` is a question
+            # answered. The skip line used to print the reason alone, which
+            # made those two read identically.
+            printf 'skip  %-16s %s: %s\n' "${name}" "${decision}" \
+                "${reason:-no reason recorded, which an entry is refused for}"
+            skipped+=("${name}|${decision}, ${reason:-no reason recorded}")
             continue
             ;;
         *)
-            fail 2 "$(printf '%s names %s and its entry does not say whether that image may be served (redistribution is %s).\n  Fill in redistribution and redistribution_reason on that entry. Corpora entries have carried both since the beginning and are the pattern.\n  An unstated answer is refused rather than assumed, and the whole run stops rather than skipping one image, because a skip in a loop is how a partial publish looks complete.' "${names}" "${reference}" "${decision}")"
+            if [ "${served}" != "unstated" ]; then
+                # Two entries share one image and disagree about it, which
+                # arrives here as both answers joined. That is a contradiction
+                # in the registry rather than something to resolve at the
+                # moment of publication.
+                fail 2 "$(printf '%s share %s and disagree about whether it may be served (redistribution is %s, may_be_served is %s).\n  One image is one set of bytes, so it goes up once or not at all, and nothing here picks a side between two entries.\n  Settle it in the entries and run this again.' "${names}" "${reference}" "${decision}" "${served}")"
+            fi
+            fail 2 "$(printf '%s names %s and its entry does not say whether that image may be served (redistribution is %s, may_be_served is %s).\n  Fill in redistribution and redistribution_reason on that entry. Corpora entries have carried both since the beginning and are the pattern.\n  An unstated answer is refused rather than assumed, and the whole run stops rather than skipping one image, because a skip in a loop is how a partial publish looks complete.' "${names}" "${reference}" "${decision}" "${served}")"
             ;;
     esac
 
