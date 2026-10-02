@@ -198,7 +198,9 @@ impl RawSink {
             Err(e) => {
                 self.file = None;
                 Some(format!(
-                    "could not keep what the tool printed: {e}. The                      measurement is unaffected and nothing further will be                      kept for this run"
+                    "could not keep what the tool printed: {e}. The \
+                     measurement is unaffected and nothing further will be \
+                     kept for this run"
                 ))
             }
         }
@@ -680,7 +682,13 @@ mod tests {
         (0..n)
             .map(|i| {
                 let path = dir.join(format!("{i:05}.png"));
-                std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("image");
+                // The index goes in the BYTES, not only in the name. Since
+                // 2026-10-02 a tool is handed every image under one neutral
+                // name, so a stand-in that tells them apart has to read them,
+                // which is what a real detector does anyway.
+                let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+                bytes.extend_from_slice(format!("{i:05}").as_bytes());
+                std::fs::write(&path, bytes).expect("image");
                 WorkItem {
                     id: format!("{i:05}"),
                     path,
@@ -984,7 +992,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let e = scripted(&tool(
             dir.path(),
-            "case \"$1\" in *00001.png) exit 1 ;; *) echo 0.5 ;; esac",
+            "case \"$(cat \"$1\")\" in *00001) exit 1 ;; *) echo 0.5 ;; esac",
         ));
         let mut out = Cursor::new(Vec::new());
         let mut sink = JsonLines::new(&mut out);

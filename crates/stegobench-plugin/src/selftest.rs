@@ -76,6 +76,78 @@ pub const SANDBOX: &[&str] = &[
     "--memory=2g",
 ];
 
+/// The stem every image is presented to a tool under.
+///
+/// WHY A TOOL IS NEVER TOLD WHAT IT IS LOOKING AT
+/// ----------------------------------------------
+/// A tool has to be told WHICH file to look at. It does not have to be told
+/// what that file is, and the names on disk say it out loud: `lsb-0.4bpp.png`
+/// against `clean.png` for the self-test fixtures, and one directory per
+/// embedding arm in a corpus.
+///
+/// An adversarial researcher walked this build on 2026-10-02 with a plugin
+/// that did no steganalysis whatsoever. Its whole decision was the basename:
+///
+/// ```sh
+/// case "$b" in *lsb*|*appended*) echo 0.990 ;; *) echo 0.010 ;; esac
+/// ```
+///
+/// It answered both fixtures correctly, earned the `verified` badge, and the
+/// result document it then produced recorded `selftest: "passed"`. The
+/// two-sided check was sound; the filenames gave the answer away. The same
+/// trick works on a corpus, where the arm is a directory name.
+///
+/// So every image is presented under this stem, in a directory of its own, so
+/// a label file sitting beside the image is out of reach as well. The
+/// EXTENSION IS KEPT, because a real decoder dispatches on `.png` against
+/// `.jpg` and a tool that cannot read its input is not a finding about the
+/// tool.
+///
+/// Both self-test fixtures get the SAME stem in two DIFFERENT directories, and
+/// the directories are fresh temporary ones, so their names are unpredictable
+/// too. That is deliberate rather than a side effect: a path a plugin author
+/// can predict is a path they can special case. The VERDICT stays
+/// reproducible, because the only thing that differs between two runs of the
+/// same tool over the same bytes is a string carrying no information about
+/// them.
+const PRESENTED_STEM: &str = "image";
+
+/// The name one file is presented under: the neutral stem, its own extension.
+fn presented_name(path: &Path) -> String {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{PRESENTED_STEM}.{ext}"),
+        // A file with no extension is presented without one, which is what it
+        // already had. Inventing one would change what a decoder dispatches on.
+        _ => PRESENTED_STEM.to_string(),
+    }
+}
+
+/// Stages one file where a tool running on this machine can read it, under a
+/// name that says nothing about it.
+///
+/// Returns the scratch directory, which has to stay alive for as long as the
+/// tool runs, and the path inside it. The container route needs none of this:
+/// a bind mount already renames the file for free.
+///
+/// A hard link first, because `score` takes this path too and a copy per image
+/// is a copy of the whole corpus. It is no more exposure than before: this
+/// route used to hand the tool the original path itself. Where the scratch
+/// directory is on another filesystem the link fails and the bytes are copied,
+/// and a failure to stage is reported rather than quietly becoming the
+/// revealing name again.
+fn presented_copy(file: &Path) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let absolute = file
+        .canonicalize()
+        .map_err(|e| format!("{} could not be resolved: {e}", file.display()))?;
+    let dir = tempfile::tempdir().map_err(|e| format!("no scratch directory: {e}"))?;
+    let staged = dir.path().join(presented_name(&absolute));
+    if std::fs::hard_link(&absolute, &staged).is_err() {
+        std::fs::copy(&absolute, &staged)
+            .map_err(|e| format!("could not stage {}: {e}", absolute.display()))?;
+    }
+    Ok((dir, staged))
+}
+
 /// Runs one image through a containerised tool and parses what comes back.
 ///
 /// The container is locked down the way every run in this project is: no
@@ -95,9 +167,14 @@ fn run_one(
     let Ok(absolute) = fixture.canonicalize() else {
         return Reading::Failed(format!("fixture {} not found", fixture.display()));
     };
-    let Some(name) = absolute.file_name().and_then(|n| n.to_str()) else {
+    if absolute.file_name().is_none() {
         return Reading::Failed("fixture has no usable filename".into());
-    };
+    }
+    // The name the TOOL sees, which is not the name on disk. A bind mount makes
+    // this free here: the container is handed a neutral stem and never learns
+    // what the file was called. See [`PRESENTED_STEM`].
+    let name = presented_name(&absolute);
+    let name = name.as_str();
     // A writable working directory, when the tool writes beside its input.
     // The scratch directory is dropped when this function returns, so nothing
     // a tool leaves behind outlives the check.
@@ -250,7 +327,14 @@ fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration, raw: &mut Raw) -
     if !fixture.is_file() {
         return Reading::Failed(format!("fixture {} not found", fixture.display()));
     }
-    let file = fixture.display().to_string();
+    // There is no mount namespace on this route, so the file is staged under a
+    // neutral name instead. `_scratch` is held until this function returns,
+    // which is after the tool has exited. See [`PRESENTED_STEM`].
+    let (_scratch, staged) = match presented_copy(fixture) {
+        Ok(pair) => pair,
+        Err(why) => return Reading::Failed(why),
+    };
+    let file = staged.display().to_string();
     let mut argv: Vec<String> = bin.command[1..].to_vec();
     argv.extend(invoke.argv.iter().map(|a| {
         // `{files}` as a batch of one, exactly as the container path treats it.
@@ -381,6 +465,10 @@ pub fn read_many_observed(
     // photographs at one path and the second would shadow the first. The
     // numbered name is also the key the tool echoes back, so the mapping from
     // answer to image is a string this code constructed rather than a guess.
+    //
+    // It carries the same property [`PRESENTED_STEM`] exists for, by accident
+    // rather than by design: a position tells a tool nothing about what it is
+    // looking at. Do not put the basename back.
     let mut keys: Vec<String> = Vec::with_capacity(files.len());
     for (i, file) in files.iter().enumerate() {
         let Ok(absolute) = file.canonicalize() else {
@@ -489,7 +577,14 @@ fn run_host_adapter(
         Ok(p) => p.display().to_string(),
         Err(why) => return Reading::Failed(why.to_string()),
     };
-    let file = fixture.display().to_string();
+    // Same reason as the binary route: the adapter runs on this machine and
+    // would otherwise be handed a path that names the arm. See
+    // [`PRESENTED_STEM`].
+    let (_scratch, staged) = match presented_copy(fixture) {
+        Ok(pair) => pair,
+        Err(why) => return Reading::Failed(why),
+    };
+    let file = staged.display().to_string();
     let program = invoke
         .entrypoint
         .clone()
@@ -657,7 +752,7 @@ mod tests {
         std::fs::write(
             &script,
             "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\n\
-             case \"$1\" in *a.png) echo 0.9 ;; *) echo 0.1 ;; esac\n",
+             case \"$1\" in *.png) echo 0.9 ;; *) echo 0.1 ;; esac\n",
         )
         .unwrap();
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
@@ -684,6 +779,211 @@ mod tests {
         );
     }
 
+    /// A stand-in detector, written to a scratch directory and made runnable.
+    ///
+    /// It answers `--version` first, because a registry entry has to declare
+    /// `version_args` and the probe is run before anything else.
+    #[cfg(unix)]
+    fn stand_in(dir: &Path, name: &str, body: &str) -> Entry {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join(name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = \"--version\" ] && {{ echo 'stand-in 1.0'; exit 0; }}\n\
+                 {body}\n"
+            ),
+        )
+        .expect("script");
+        let mut perms = std::fs::metadata(&script).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+        entry(&format!(
+            "[binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"",
+            script.display().to_string()
+        ))
+    }
+
+    /// The two fixtures `entry` names, with the stego one carrying a marker in
+    /// its bytes so an honest stand-in has something to find.
+    #[cfg(unix)]
+    fn two_fixtures(dir: &Path) -> &Path {
+        std::fs::write(dir.join("a.png"), b"\x89PNG\r\n\x1a\nPAYLOAD").expect("stego fixture");
+        std::fs::write(dir.join("b.png"), b"\x89PNG\r\n\x1a\nnothing").expect("clean fixture");
+        dir
+    }
+
+    /// Rung 5, 2026-10-02. The researcher's plugin did no steganalysis at all:
+    /// its entire decision was the basename, `*lsb*` or `*appended*` meant
+    /// 0.990 and everything else meant 0.010. It passed the two-sided check,
+    /// earned the `verified` badge, and the result document it produced
+    /// recorded `selftest: "passed"`.
+    ///
+    /// Named after the real fixtures rather than the test's own, because the
+    /// public fixture names are the information that was leaking.
+    #[cfg(unix)]
+    #[test]
+    fn a_detector_that_keys_on_the_fixture_name_can_no_longer_pass() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let e = stand_in(
+            tmp.path(),
+            "cheat.sh",
+            "b=$(basename \"$1\")\n\
+             case \"$b\" in *lsb*|*appended*|*a.png) echo 0.990 ;; *) echo 0.010 ;; esac",
+        );
+        let fx = tempfile::tempdir().expect("fixtures");
+        match run(&e, two_fixtures(fx.path())) {
+            Verified::Failed(why) => assert!(why.contains("no to everything"), "got {why}"),
+            other => panic!("a name-keyed plugin was verified: {other:?}"),
+        }
+    }
+
+    /// The other half, and the half that matters more: a plugin that actually
+    /// reads the bytes must be unaffected.
+    #[cfg(unix)]
+    #[test]
+    fn a_detector_that_reads_the_bytes_still_passes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let e = stand_in(
+            tmp.path(),
+            "honest.sh",
+            "if grep -q PAYLOAD \"$1\"; then echo 0.9; else echo 0.1; fi",
+        );
+        let fx = tempfile::tempdir().expect("fixtures");
+        match run(&e, two_fixtures(fx.path())) {
+            Verified::Passed => {}
+            other => panic!("an honest plugin stopped passing: {other:?}"),
+        }
+    }
+
+    /// The verdict is reproducible although the path is not.
+    ///
+    /// The staging directory is deliberately unpredictable, so this is the
+    /// property that makes that safe: two runs of one tool over the same bytes
+    /// reach the same answer, for the honest tool and the cheat alike.
+    #[cfg(unix)]
+    #[test]
+    fn two_runs_reach_the_same_verdict_although_the_path_differs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let honest = stand_in(
+            tmp.path(),
+            "honest.sh",
+            "if grep -q PAYLOAD \"$1\"; then echo 0.9; else echo 0.1; fi",
+        );
+        let cheat = stand_in(
+            tmp.path(),
+            "cheat.sh",
+            "case \"$(basename \"$1\")\" in *a.png) echo 0.9 ;; *) echo 0.1 ;; esac",
+        );
+        let fx = tempfile::tempdir().expect("fixtures");
+        let dir = two_fixtures(fx.path());
+        for e in [&honest, &cheat] {
+            assert_eq!(run(e, dir), run(e, dir), "the same tool answered twice");
+        }
+    }
+
+    /// The tool is handed a name that says nothing, and an extension that says
+    /// everything it legitimately needs.
+    ///
+    /// Asserted through what the TOOL saw rather than through what this code
+    /// believes it sent, which is the only version of this assertion worth
+    /// having.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_is_handed_a_neutral_stem_and_its_own_extension() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let e = stand_in(
+            tmp.path(),
+            "reporter.sh",
+            "case \"$(basename \"$1\")\" in image.png) echo 0.9 ;; *) echo 0.1 ;; esac",
+        );
+        let fixture = tmp.path().join("lsb-0.4bpp.png");
+        std::fs::write(&fixture, b"\x89PNG\r\n\x1a\n").expect("fixture");
+        assert_eq!(
+            read_one(&e, &fixture, Duration::from_secs(5), &[]),
+            Reading::Score(0.9),
+            "the tool saw a name other than the neutral one"
+        );
+    }
+
+    /// A label sitting beside the image is out of reach too.
+    ///
+    /// Pentimento writes a JSON sidecar next to every image, and a detector
+    /// that reads it is reading the answer. Staging the image alone in a fresh
+    /// directory closes that without anybody having to remember.
+    #[cfg(unix)]
+    #[test]
+    fn a_label_file_beside_the_image_cannot_be_read() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let e = stand_in(
+            tmp.path(),
+            "peeker.sh",
+            "if [ -f \"$(dirname \"$1\")/lsb-0.4bpp.json\" ]; then echo 0.9; else echo 0.1; fi",
+        );
+        let fixture = tmp.path().join("lsb-0.4bpp.png");
+        std::fs::write(&fixture, b"\x89PNG\r\n\x1a\n").expect("fixture");
+        std::fs::write(tmp.path().join("lsb-0.4bpp.json"), b"{\"arm\":\"lsb\"}").expect("sidecar");
+        assert_eq!(
+            read_one(&e, &fixture, Duration::from_secs(5), &[]),
+            Reading::Score(0.1),
+            "the tool could still read the label beside the image"
+        );
+    }
+
+    /// The third route, which the researcher did not reach and which leaks
+    /// exactly the same thing.
+    ///
+    /// A `host = true` entry runs its adapter on this machine, so like the
+    /// binary route it has no mount to rename the file for it. StegaShield is
+    /// registered this way and is a subject, which is the entry a flattering
+    /// result would most want.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_adapter_is_handed_the_neutral_name_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let adapter = tmp.path().join("adapter.sh");
+        std::fs::write(
+            &adapter,
+            "#!/bin/sh\ncase \"$(basename \"$1\")\" in image.png) echo 0.9 ;; *) echo 0.1 ;; esac\n",
+        )
+        .expect("adapter");
+        let mut perms = std::fs::metadata(&adapter).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&adapter, perms).expect("chmod");
+
+        let e = entry(&format!(
+            "[image]\nreference = \"x@sha256:a\"\nsize_mb = 1\nbundled = true\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nhost = true\nentrypoint = \"sh\"\nadapter = {:?}\n\
+             argv = [\"{{adapter}}\", \"{{file}}\"]\nparser = \"number\"",
+            adapter.display().to_string()
+        ));
+        let fixture = tmp.path().join("lsb-0.4bpp.png");
+        std::fs::write(&fixture, b"\x89PNG\r\n\x1a\n").expect("fixture");
+        assert_eq!(
+            read_one(&e, &fixture, Duration::from_secs(5), &[]),
+            Reading::Score(0.9),
+            "the adapter saw a name other than the neutral one"
+        );
+    }
+
+    #[test]
+    fn the_presented_name_keeps_the_extension_and_drops_everything_else() {
+        assert_eq!(presented_name(Path::new("/x/lsb-0.4bpp.png")), "image.png");
+        assert_eq!(presented_name(Path::new("/x/clean.JPG")), "image.JPG");
+        assert_eq!(presented_name(Path::new("/x/appended")), "image");
+        // The container route builds its mount from exactly this, so the two
+        // fixtures arrive at one path inside two different containers and are
+        // indistinguishable by name.
+        assert_eq!(
+            presented_name(Path::new("/x/a.png")),
+            presented_name(Path::new("/y/b.png"))
+        );
+    }
+
     #[test]
     fn a_tool_with_no_invoke_block_is_skipped_not_failed() {
         // Skipped and Failed must stay distinct: "we have not taught the host
@@ -700,7 +1000,7 @@ mod tests {
         // tool we cannot run is not a tool that works.
         let e = entry(
             "[binary]\ncommand = [\"definitely-not-real-xyzzy\"]\nversion_args = [\"-v\"]\n\
-             [invoke]\nargv = [\"{file}\"]\nparser = \"stegcore\"",
+             [invoke]\nargv = [\"/work\"]\nwritable_workdir = true\nparser = \"stegcore\"",
         );
         let fx = fixtures_present();
         match run(&e, fx.path()) {
