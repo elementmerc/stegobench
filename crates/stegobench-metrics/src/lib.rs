@@ -405,6 +405,52 @@ pub fn roc_auc(scores: &[f64], labels: &[bool]) -> Option<f64> {
 /// Empty when either class is absent, when the two slices are of different
 /// lengths, and when any score is NaN. See [`roc_auc`].
 pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
+    // Derived from `roc_points` rather than computed again, so the curve and the
+    // thresholds that produced it cannot drift apart. A second copy of this
+    // sweep is exactly the "arithmetic that quietly disagrees" this crate exists
+    // to avoid.
+    roc_points(scores, labels)
+        .into_iter()
+        .map(|p| (p.fpr, p.tpr))
+        .collect()
+}
+
+/// One vertex of the ROC curve, including the score that produced it.
+///
+/// WHY THE THRESHOLD IS CARRIED AND NOT THROWN AWAY
+///
+/// A developer wiring detection into a product needs one number: the score to
+/// compare against. Every other figure here says how GOOD the detector is at a
+/// false-alarm budget; only this one says what to type into the `if`.
+///
+/// It used to be computed and discarded. A journey walked by a developer whose
+/// whole goal was picking a cutoff searched the result document for it, found
+/// nothing, and wrote his own ROC code against the records file to get it. His
+/// figures reproduced these to within tie handling, which is the good news and
+/// also the point: the tool had already done the arithmetic and made him do it
+/// again, and a second implementation of a metric is the thing this crate was
+/// built to prevent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RocPoint {
+    /// Flag an image when its score is greater than or equal to this.
+    ///
+    /// `None` at the origin, where nothing is flagged at all. That vertex is
+    /// real and belongs on the curve, and it has no threshold because there is
+    /// no score high enough to be worth flagging; reporting a number there
+    /// would be inventing one.
+    pub threshold: Option<f64>,
+    pub fpr: f64,
+    pub tpr: f64,
+}
+
+/// The ROC curve as vertices carrying the threshold each one sits at.
+///
+/// Swept from the highest score downward, predicting positive when
+/// `score >= threshold`. Begins at the origin, where nothing is flagged, and
+/// ends at `(1, 1)`, where everything is.
+///
+/// Empty under exactly the conditions [`roc_curve`] is empty.
+pub fn roc_points(scores: &[f64], labels: &[bool]) -> Vec<RocPoint> {
     if !rankable(scores, labels) {
         return Vec::new();
     }
@@ -417,7 +463,11 @@ pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
     let mut pairs: Vec<(f64, bool)> = scores.iter().copied().zip(labels.iter().copied()).collect();
     pairs.sort_by(|a, b| cmp_f64(b.0, a.0)); // descending score
 
-    let mut curve = vec![(0.0, 0.0)];
+    let mut curve = vec![RocPoint {
+        threshold: None,
+        fpr: 0.0,
+        tpr: 0.0,
+    }];
     let (mut tp, mut fp) = (0.0f64, 0.0f64);
     let mut i = 0;
     while i < pairs.len() {
@@ -432,7 +482,14 @@ pub fn roc_curve(scores: &[f64], labels: &[bool]) -> Vec<(f64, f64)> {
             }
             i += 1;
         }
-        curve.push((fp / n_neg, tp / n_pos));
+        // The threshold is the score of the group just consumed, because every
+        // sample at it has now been counted as flagged, which is what
+        // `score >= threshold` means.
+        curve.push(RocPoint {
+            threshold: Some(thr),
+            fpr: fp / n_neg,
+            tpr: tp / n_pos,
+        });
     }
     curve
 }
@@ -505,6 +562,17 @@ pub struct OperatingPoint {
     pub achieved_fpr: f64,
     /// The budget the caller asked for.
     pub requested_fpr: f64,
+    /// Flag an image when its score is greater than or equal to this.
+    ///
+    /// The number a developer actually needs, and the one this struct used to
+    /// compute and discard. See [`RocPoint::threshold`] for why `None` is a real
+    /// answer rather than a missing one: at the origin nothing is flagged, so
+    /// there is no cutoff worth printing.
+    ///
+    /// It is a raw detector score and carries that detector's units and scale.
+    /// It does not transfer to another tool, or to another version of the same
+    /// tool, which is a property of the thing rather than a limitation here.
+    pub threshold: Option<f64>,
 }
 
 impl OperatingPoint {
@@ -533,7 +601,7 @@ pub fn operating_point(scores: &[f64], labels: &[bool], max_fpr: f64) -> Option<
     if !(0.0..=1.0).contains(&max_fpr) {
         return None;
     }
-    let curve = roc_curve(scores, labels);
+    let curve = roc_points(scores, labels);
     if curve.is_empty() {
         return None;
     }
@@ -541,19 +609,24 @@ pub fn operating_point(scores: &[f64], labels: &[bool], max_fpr: f64) -> Option<
     // budget. Ties on tpr take the lowest fpr, because two points with the
     // same detection rate are the same answer bought more or less cheaply,
     // and reporting the dearer one would overstate what the budget cost.
-    let mut best: Option<(f64, f64)> = None;
-    for &(fpr, tpr) in curve.iter().filter(|&&(f, _)| f <= max_fpr + 1e-12) {
+    let mut best: Option<RocPoint> = None;
+    for &point in curve.iter().filter(|p| p.fpr <= max_fpr + 1e-12) {
         best = Some(match best {
-            None => (fpr, tpr),
-            Some((bf, bt)) if tpr > bt || (tpr == bt && fpr < bf) => (fpr, tpr),
+            None => point,
+            Some(b) if point.tpr > b.tpr || (point.tpr == b.tpr && point.fpr < b.fpr) => point,
             Some(b) => b,
         });
     }
-    let (achieved_fpr, tpr) = best.unwrap_or((0.0, 0.0));
+    let chosen = best.unwrap_or(RocPoint {
+        threshold: None,
+        fpr: 0.0,
+        tpr: 0.0,
+    });
     Some(OperatingPoint {
-        tpr,
-        achieved_fpr,
+        tpr: chosen.tpr,
+        achieved_fpr: chosen.fpr,
         requested_fpr: max_fpr,
+        threshold: chosen.threshold,
     })
 }
 
@@ -756,6 +829,124 @@ mod tests {
         }
     }
 
+    // ---- the threshold, which is the number a developer came for ---------
+
+    #[test]
+    fn the_curve_and_the_points_it_is_derived_from_agree_exactly() {
+        // `roc_curve` is now a projection of `roc_points`, and this is what
+        // stops a future edit making them two implementations again.
+        let scores = [0.9, 0.8, 0.8, 0.4, 0.1, 0.1, 0.7];
+        let labels = [true, true, false, true, false, false, false];
+        let from_points: Vec<(f64, f64)> = roc_points(&scores, &labels)
+            .into_iter()
+            .map(|p| (p.fpr, p.tpr))
+            .collect();
+        assert_eq!(roc_curve(&scores, &labels), from_points);
+    }
+
+    #[test]
+    fn the_origin_carries_no_threshold_because_nothing_is_flagged_there() {
+        let points = roc_points(&[0.9, 0.1], &[true, false]);
+        assert_eq!(points[0].threshold, None);
+        assert_eq!((points[0].fpr, points[0].tpr), (0.0, 0.0));
+        // Every other vertex has one.
+        assert!(points[1..].iter().all(|p| p.threshold.is_some()));
+    }
+
+    #[test]
+    fn the_threshold_at_a_vertex_flags_exactly_the_images_that_vertex_counts() {
+        // The contract is `score >= threshold`. Checked by applying it rather
+        // than by trusting the sweep: this is the number somebody puts in an
+        // `if`, so it has to mean what it says.
+        let scores = [0.9, 0.75, 0.75, 0.6, 0.2, 0.05];
+        let labels = [true, true, false, true, false, false];
+        let n_pos = labels.iter().filter(|l| **l).count() as f64;
+        let n_neg = labels.len() as f64 - n_pos;
+        for point in roc_points(&scores, &labels) {
+            let Some(threshold) = point.threshold else {
+                continue;
+            };
+            let flagged: Vec<bool> = scores.iter().map(|s| *s >= threshold).collect();
+            let tp = flagged
+                .iter()
+                .zip(labels)
+                .filter(|(f, l)| **f && *l)
+                .count() as f64;
+            let fp = flagged
+                .iter()
+                .zip(labels)
+                .filter(|(f, l)| **f && !*l)
+                .count() as f64;
+            assert_eq!(
+                (fp / n_neg, tp / n_pos),
+                (point.fpr, point.tpr),
+                "threshold {threshold} does not produce the rates its vertex claims"
+            );
+        }
+    }
+
+    #[test]
+    fn an_operating_point_reports_the_threshold_that_bought_its_rates() {
+        let scores = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4];
+        let labels = [true, true, true, false, false, false];
+        let point = operating_point(&scores, &labels, 0.0).expect("a point");
+        // Perfect separation, so a zero budget buys everything, and the cutoff
+        // is the lowest stego score rather than the highest clean one.
+        assert_eq!(point.tpr, 1.0);
+        assert_eq!(point.achieved_fpr, 0.0);
+        assert_eq!(point.threshold, Some(0.7));
+    }
+
+    #[test]
+    fn the_threshold_moves_down_as_the_budget_is_loosened() {
+        let scores = [0.9, 0.5, 0.8, 0.4, 0.7, 0.3];
+        let labels = [true, true, true, false, false, false];
+        let tight = operating_point(&scores, &labels, 0.0).expect("tight");
+        let loose = operating_point(&scores, &labels, 1.0).expect("loose");
+        let (Some(t), Some(l)) = (tight.threshold, loose.threshold) else {
+            panic!("both budgets should name a cutoff here");
+        };
+        assert!(
+            l <= t,
+            "loosening the budget raised the cutoff: {t} then {l}"
+        );
+        assert!(loose.tpr >= tight.tpr);
+    }
+
+    #[test]
+    fn the_threshold_agrees_with_the_rate_tpr_at_fpr_reports() {
+        // The two must not disagree: one is the figure published and the other
+        // is the cutoff published beside it.
+        let scores = [0.31, 0.62, 0.11, 0.88, 0.47, 0.05, 0.73, 0.22];
+        let labels = [false, true, false, true, true, false, true, false];
+        for budget in [0.0, 0.25, 0.5, 1.0] {
+            let point = operating_point(&scores, &labels, budget).expect("a point");
+            assert_eq!(
+                Some(point.tpr),
+                tpr_at_fpr(&scores, &labels, budget),
+                "operating_point and tpr_at_fpr disagree at budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_detector_answering_one_number_to_everything_has_one_usable_threshold() {
+        // Every score identical: the curve is the origin and one vertex, and the
+        // cutoff flags everything. Worth pinning because this is the shape a
+        // broken adapter produces and it must not panic or invent a number.
+        let points = roc_points(&[0.5; 4], &[true, true, false, false]);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[1].threshold, Some(0.5));
+        assert_eq!((points[1].fpr, points[1].tpr), (1.0, 1.0));
+    }
+
+    #[test]
+    fn an_unrankable_set_yields_no_points_and_therefore_no_threshold() {
+        assert!(roc_points(&[f64::NAN, 0.1], &[true, false]).is_empty());
+        assert!(roc_points(&[0.1], &[true]).is_empty());
+        assert!(operating_point(&[f64::NAN, 0.1], &[true, false], 0.5).is_none());
+    }
+
     #[test]
     fn the_resolution_of_a_corpus_with_no_clean_images_is_not_a_number_to_divide_by() {
         assert!(fpr_resolution(0).is_infinite());
@@ -764,6 +955,7 @@ mod tests {
             tpr: 1.0,
             achieved_fpr: 0.0,
             requested_fpr: 0.5,
+            threshold: Some(0.9),
         };
         assert!(!p.budget_was_expressible(0));
     }

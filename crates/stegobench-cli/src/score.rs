@@ -505,10 +505,24 @@ where
             checks.pairing_breaks.count,
             checks.pairing_breaks.examples()
         )),
+        // Two different situations reached this verdict and they need different
+        // next steps. A corpus whose records name nothing cannot be checked at
+        // all; a corpus whose records name a clean half that was not extracted
+        // beside them is one directory away from being checkable, and saying
+        // only "could not be checked" leaves the user to work that out from a
+        // sidecar by hand, which is what one did.
+        Pairing::Unverified if checks.unreadable > 0 => progress(&format!(
+            "the pairing rule could not be checked: {} stego image(s) name a \
+             clean half that is not in this corpus. Extract the clean arm they \
+             refer to alongside them and the rule becomes checkable; a record's \
+             own `clean` field names the one it wants. The result says \
+             unverified rather than claiming the rule held",
+            checks.unreadable
+        )),
         Pairing::Unverified => progress(
             "the pairing rule could not be checked: no stego image here names \
-             a cover this could read alongside it. The result says unverified \
-             rather than claiming the rule held",
+             a cover or a clean half this could read alongside it. The result \
+             says unverified rather than claiming the rule held",
         ),
         Pairing::SingleVariable => {
             if checks.unreadable > 0 {
@@ -784,6 +798,27 @@ where
         let stem = name.strip_suffix(".records.jsonl").unwrap_or(&name);
         records.with_file_name(format!("{stem}.raw.jsonl"))
     };
+    // Said BEFORE the first image, because a batched detector answers in groups
+    // and the gap before the first answer is the whole batch. A developer
+    // walking this watched five minutes of nothing, found the host side process
+    // at 0% CPU because the work was inside the container, and came within a
+    // minute of killing the run as hung. The run was fine. One line at the start
+    // is what turns that silence into something expected.
+    if let Some(batch) = entry
+        .invoke
+        .as_ref()
+        .and_then(|i| i.batch)
+        .filter(|b| *b > 1)
+    {
+        progress(&format!(
+            "{} asks about {batch} image(s) per container, so the first answers \
+             arrive together rather than one at a time. Progress is reported \
+             every {}s while that happens, including when the count has not \
+             moved yet",
+            entry.name,
+            runner::HEARTBEAT.as_secs()
+        ));
+    }
     let own_started = Instant::now();
     let tally = runner::score(
         runner::Run {
@@ -818,7 +853,13 @@ where
     // come from the records, joined by position, because both are produced in
     // the same deterministic order and the runner refuses to continue when
     // they disagree.
-    let (scores, labels, arms, errored) = join(records, &prepared.labels, &prepared.arms)?;
+    let Joined {
+        scores,
+        labels,
+        arms,
+        errored,
+        answers_a_verdict,
+    } = join(records, &prepared.labels, &prepared.arms)?;
     let n_stego = labels.iter().filter(|l| **l).count() as u64;
     let n_clean = labels.len() as u64 - n_stego;
     if n_clean == 0 || n_stego == 0 {
@@ -845,10 +886,24 @@ where
             checks.pairing_breaks.count,
             checks.pairing_breaks.examples()
         )),
+        // Two different situations reached this verdict and they need different
+        // next steps. A corpus whose records name nothing cannot be checked at
+        // all; a corpus whose records name a clean half that was not extracted
+        // beside them is one directory away from being checkable, and saying
+        // only "could not be checked" leaves the user to work that out from a
+        // sidecar by hand, which is what one did.
+        Pairing::Unverified if checks.unreadable > 0 => progress(&format!(
+            "the pairing rule could not be checked: {} stego image(s) name a \
+             clean half that is not in this corpus. Extract the clean arm they \
+             refer to alongside them and the rule becomes checkable; a record's \
+             own `clean` field names the one it wants. The result says \
+             unverified rather than claiming the rule held",
+            checks.unreadable
+        )),
         Pairing::Unverified => progress(
             "the pairing rule could not be checked: no stego image here names \
-             a cover this could read alongside it. The result says unverified \
-             rather than claiming the rule held",
+             a cover or a clean half this could read alongside it. The result \
+             says unverified rather than claiming the rule held",
         ),
         Pairing::SingleVariable => {
             if checks.unreadable > 0 {
@@ -920,6 +975,19 @@ where
     // Said out loud rather than recorded in the document, because `result-v1`
     // has no field for either and inventing one quietly is how a schema stops
     // meaning what it says. See DEFERRED.md.
+    // Said before the findings, because it changes how the next sentence reads:
+    // an identical-answers warning about a verdict-only tool is a much weaker
+    // claim than the same warning about one that had a scale to spread over.
+    if answers_a_verdict {
+        progress(&format!(
+            "{} answers yes or no rather than giving a score, so every record \
+             here has `score: null` and a `verdict` instead. That is the answer, \
+             not a gap, which is why none of these count as unscored. It also \
+             means there is no threshold to choose for this detector: a run with \
+             it is already at its only operating point",
+            entry.name
+        ));
+    }
     for finding in stegobench_metrics::findings(&scores, &labels) {
         progress(&match finding {
             stegobench_metrics::Finding::EveryScoreIdentical { count } => format!(
@@ -942,6 +1010,7 @@ where
 
     let mut tpr_at_fpr = BTreeMap::new();
     let mut fpr_achieved = BTreeMap::new();
+    let mut threshold_at_fpr = BTreeMap::new();
     // A budget finer than one clean image cannot be spent, and the figure
     // then belongs to a rate nobody asked for. Collected so it is said once
     // with all three rates rather than three times.
@@ -952,7 +1021,19 @@ where
                 let key = format!("{fpr:.2}");
                 tpr_at_fpr.insert(key.clone(), tpr);
                 if let Some(point) = stegobench_metrics::operating_point(&scores, &labels, fpr) {
-                    fpr_achieved.insert(key, point.achieved_fpr);
+                    fpr_achieved.insert(key.clone(), point.achieved_fpr);
+                    // The cutoff that bought this rate. Published because every
+                    // other figure here says how good the detector is and only
+                    // this one says what to compare against, and a developer
+                    // whose whole task was choosing it searched the document,
+                    // found nothing, and reimplemented the sweep himself.
+                    //
+                    // Absent rather than zero where the point is the origin: a
+                    // threshold of 0.0 would be a number somebody could type,
+                    // and nothing is flagged there.
+                    if let Some(threshold) = point.threshold {
+                        threshold_at_fpr.insert(key, threshold);
+                    }
                     if !point.budget_was_expressible(n_clean as usize) {
                         unspendable.push(format!("{:.0}%", fpr * 100.0));
                     }
@@ -1064,6 +1145,7 @@ where
             auc_ci95,
             tpr_at_fpr,
             fpr_achieved,
+            threshold_at_fpr,
             verdict_rate: None,
             n_clean,
             n_stego,
@@ -2017,16 +2099,31 @@ fn intern(table: &mut Vec<String>, name: Option<&str>) -> Option<u16> {
     u16::try_from(table.len() - 1).ok()
 }
 
+/// What `join` read out of a records file.
+///
+/// A struct rather than the tuple it used to be: four of the five fields are
+/// positionally parallel sequences and a count, and a tuple lets two of them
+/// swap and still compile.
+struct Joined {
+    scores: Vec<f64>,
+    labels: Vec<bool>,
+    arms: Vec<Option<u16>>,
+    errored: u64,
+    /// True when every answer came from a `verdict` and none from a `score`.
+    ///
+    /// A verdict-only detector reads as a broken one. Its records all carry
+    /// `score: null`, the report says `0 unscored`, and the two look like a
+    /// contradiction until somebody compares a record of this detector's with a
+    /// record of a scoring one's. They are not in conflict: a verdict IS the
+    /// answer, mapped to 1.0 or 0.0 here so the same arithmetic runs over both.
+    answers_a_verdict: bool,
+}
+
 /// Scores and labels, joined by position.
 ///
 /// The labels are handed in rather than re-read, because they are a property
 /// of the corpus and every detector of one command shares them.
-#[allow(clippy::type_complexity)]
-fn join(
-    records: &Path,
-    labels: &[bool],
-    arms: &[Option<u16>],
-) -> Result<(Vec<f64>, Vec<bool>, Vec<Option<u16>>, u64), ScoreError> {
+fn join(records: &Path, labels: &[bool], arms: &[Option<u16>]) -> Result<Joined, ScoreError> {
     let file = std::fs::File::open(records).map_err(|e| ScoreError::Records {
         path: records.display().to_string(),
         source: e,
@@ -2038,6 +2135,7 @@ fn join(
     // drops out here and a per-arm count taken from the corpus afterwards
     // would claim images the detector never scored.
     let mut kept_arms = Vec::new();
+    let mut any_score = false;
     for ((line, label), arm) in BufReader::new(file)
         .lines()
         .zip(labels.iter())
@@ -2050,6 +2148,9 @@ fn join(
         let Ok(record) = serde_json::from_str::<Record>(&line) else {
             break;
         };
+        if record.score.is_some() {
+            any_score = true;
+        }
         match record
             .score
             .or(record.verdict.map(|v| if v { 1.0 } else { 0.0 }))
@@ -2066,7 +2167,13 @@ fn join(
             None => errored += 1,
         }
     }
-    Ok((scores, kept, kept_arms, errored))
+    Ok(Joined {
+        answers_a_verdict: !any_score && !scores.is_empty(),
+        scores,
+        labels: kept,
+        arms: kept_arms,
+        errored,
+    })
 }
 
 /// One AUC per arm, each against the whole clean set.
@@ -2458,6 +2565,95 @@ mod tests {
             script.display().to_string()
         ))
         .expect("parses")
+    }
+
+    /// A detector that answers yes or no, and whose answer varies.
+    ///
+    /// Varies deliberately, so the identical-answers warning stays silent and
+    /// the verdict notice is the only thing the test can be reading.
+    #[cfg(unix)]
+    fn verdict_detector(dir: &Path) -> Entry {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("verdict.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\n\
+             case \"$1\" in *s*) echo \"[?] b1,lsb,bY .. text: hello\" ;; esac\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        toml::from_str(&format!(
+            "name = \"verdicter\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
+             [binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"verdict\"\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"zsteg\"\n\
+             [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n",
+            script.display().to_string()
+        ))
+        .expect("parses")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verdict_only_detector_says_so_rather_than_reading_as_a_gap() {
+        // Rung 3 of the journey round: every zsteg record said `score: null`
+        // while the report said `0 unscored`, and the persona spent a while
+        // deciding which of the two was the bug before working out that neither
+        // was. He only got there by diffing a record of zsteg's against one of
+        // stegexpose's by hand.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = verdict_detector(tmp.path());
+
+        let mut said = Vec::new();
+        let result = score(&entry, &request(&root, None), |m: &str| {
+            said.push(m.to_string())
+        })
+        .expect("a verdict detector still produces a result")
+        .0;
+
+        assert_eq!(result.metrics.n_error, 0, "a verdict is an answer");
+        assert!(
+            said.iter().any(|m| m.contains("not a gap")),
+            "nothing explained the null scores: {said:?}"
+        );
+        assert!(
+            said.iter().any(|m| m.contains("no threshold to choose")),
+            "nothing said a verdict detector has no cutoff: {said:?}"
+        );
+        assert!(
+            result.metrics.threshold_at_fpr.is_empty()
+                || result
+                    .metrics
+                    .threshold_at_fpr
+                    .values()
+                    .all(|t| *t == 0.0 || *t == 1.0),
+            "a verdict detector's only cutoffs are its two answers: {:?}",
+            result.metrics.threshold_at_fpr
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scoring_detector_is_not_told_it_answers_a_verdict() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        corpus(&root, 3, 3);
+        let entry = sizing_detector(tmp.path());
+
+        let mut said = Vec::new();
+        score(&entry, &request(&root, None), |m: &str| {
+            said.push(m.to_string())
+        })
+        .expect("scores");
+
+        assert!(
+            !said.iter().any(|m| m.contains("not a gap")),
+            "a scoring detector was told it answers a verdict: {said:?}"
+        );
     }
 
     #[cfg(unix)]

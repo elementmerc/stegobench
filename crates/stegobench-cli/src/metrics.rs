@@ -210,6 +210,17 @@ pub struct Report {
     /// never had. The figure is right; the label would be wrong without this
     /// beside it.
     pub achieved_fpr: BTreeMap<String, f64>,
+    /// The detector score to compare against to reach each budget.
+    ///
+    /// Keyed identically to `tpr_at_fpr`. Flag an image when its score is at or
+    /// above this. Every other figure here says how good the detector is; this
+    /// is the one that says what to put in the `if`, and it is what a developer
+    /// choosing a cutoff came for.
+    ///
+    /// A key is absent where the chosen point flags nothing, so there is no
+    /// cutoff to give. Raw scores in the detector's own units, which do not
+    /// transfer to another tool or another version of the same one.
+    pub threshold_at_fpr: BTreeMap<String, f64>,
     pub n_clean: usize,
     pub n_stego: usize,
     /// What the metrics crate found wrong with these scores, if anything.
@@ -259,6 +270,7 @@ impl Report {
             "auc_ci95": self.auc_ci95,
             "tpr_at_fpr": self.tpr_at_fpr,
             "achieved_fpr": self.achieved_fpr,
+            "threshold_at_fpr": self.threshold_at_fpr,
             "fpr_resolution": stegobench_metrics::fpr_resolution(self.n_clean),
             "n_clean": self.n_clean,
             "n_stego": self.n_stego,
@@ -298,6 +310,12 @@ impl Report {
         );
         for (budget, tpr) in &self.tpr_at_fpr {
             text.push_str(&format!("\nTPR at {budget:<7} {tpr:.4}"));
+            // The cutoff, printed beside the rate it buys rather than left for
+            // the reader to derive. A developer whose whole task was picking one
+            // searched for it, found nothing, and reimplemented this sweep.
+            if let Some(threshold) = self.threshold_at_fpr.get(budget) {
+                text.push_str(&format!("  flag at score >= {threshold}"));
+            }
             // Only where the two differ, so an adequate sample reads exactly
             // as it did before and the note means something when it appears.
             if let Some(got) = self.achieved_fpr.get(budget) {
@@ -487,6 +505,7 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
         .ok_or_else(|| why_unrankable(&scores, &labels, ""))?;
     let mut tpr_at_fpr = BTreeMap::new();
     let mut achieved_fpr = BTreeMap::new();
+    let mut threshold_at_fpr = BTreeMap::new();
     for (text, value) in budgets {
         let tpr = stegobench_metrics::tpr_at_fpr(&scores, &labels, *value).ok_or_else(|| {
             why_unrankable(
@@ -498,6 +517,9 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
         tpr_at_fpr.insert(text.clone(), tpr);
         if let Some(point) = stegobench_metrics::operating_point(&scores, &labels, *value) {
             achieved_fpr.insert(text.clone(), point.achieved_fpr);
+            if let Some(threshold) = point.threshold {
+                threshold_at_fpr.insert(text.clone(), threshold);
+            }
         }
     }
     Ok(Report {
@@ -505,6 +527,7 @@ pub fn compute(input: Input, budgets: &[(String, f64)]) -> Result<Report, Metric
         auc_ci95,
         tpr_at_fpr,
         achieved_fpr,
+        threshold_at_fpr,
         n_clean,
         n_stego,
         findings: stegobench_metrics::findings(&scores, &labels),

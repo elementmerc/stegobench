@@ -322,6 +322,35 @@ pub struct Metrics {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub fpr_achieved: BTreeMap<String, f64>,
+    /// The detector score to compare against to land on each budget.
+    ///
+    /// Keyed identically to `tpr_at_fpr`. Flag an image when its score is
+    /// greater than or equal to this value.
+    ///
+    /// WHY A MEASUREMENT DOCUMENT CARRIES AN OPERATING INSTRUCTION
+    ///
+    /// Every other figure here says how good a detector is. This one says what
+    /// to put in the `if`, and it is the only field a developer wiring detection
+    /// into a product needs. It was computed internally to produce `tpr_at_fpr`
+    /// and then discarded, so a developer whose entire task was choosing a
+    /// cutoff searched a result document for it, found nothing, and wrote his
+    /// own ROC sweep against the records file. His numbers matched ours, which
+    /// is the point: the tool made somebody build a second copy of a metric it
+    /// had already computed.
+    ///
+    /// **It is a raw score in the detector's own units and does not travel.**
+    /// Another tool's scores are on another scale, and so are the same tool's
+    /// after a version change, so this is a threshold for this subject at this
+    /// version over this corpus and nothing wider.
+    ///
+    /// A key is absent where the chosen point is the origin, at which nothing is
+    /// flagged and there is no cutoff. Absent rather than `0.0`, because 0.0 is
+    /// a number somebody would type.
+    ///
+    /// Empty where nobody recorded it, which is every document written before
+    /// this field existed, and empty is not a claim that no threshold exists.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub threshold_at_fpr: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict_rate: Option<f64>,
     pub n_clean: u64,
@@ -868,6 +897,28 @@ impl Result1 {
                 Err(_) => {}
             }
         }
+        for (fpr, threshold) in &self.metrics.threshold_at_fpr {
+            if !self.metrics.tpr_at_fpr.contains_key(fpr) {
+                bad.push(format!(
+                    "threshold_at_fpr names {fpr:?} and tpr_at_fpr carries no \
+                     figure for it, so this document hands out a cutoff for a \
+                     budget it does not report"
+                ));
+            }
+            // Deliberately NOT range checked. A threshold is a raw detector
+            // score in that detector's own units, and those are not rates: one
+            // tool answers a probability, another a chi-squared statistic,
+            // another a negative estimate of an embedding rate. Any bound here
+            // would be this project's opinion about somebody else's scale, and
+            // the first detector it was wrong about would have a correct cutoff
+            // refused. Only a value that cannot be compared at all is refused.
+            if !threshold.is_finite() {
+                bad.push(format!(
+                    "threshold_at_fpr[{fpr}] = {threshold} is not a finite \
+                     number, so nothing could be compared against it"
+                ));
+            }
+        }
         if self.metrics.n_clean == 0 || self.metrics.n_stego == 0 {
             bad.push(
                 "a measurement needs both clean and stego images; set n_clean \
@@ -1366,6 +1417,7 @@ mod tests {
                 auc_ci95: None,
                 tpr_at_fpr: BTreeMap::from([("0.01".into(), 0.4133), ("0.10".into(), 0.9033)]),
                 fpr_achieved: BTreeMap::new(),
+                threshold_at_fpr: BTreeMap::new(),
                 verdict_rate: None,
                 n_clean: 300,
                 n_stego: 300,
