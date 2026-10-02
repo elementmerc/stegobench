@@ -544,7 +544,10 @@ mod tests {
     fn blank_lines_and_trailing_whitespace_are_not_answers_and_are_not_errors() {
         let k = keys(1);
         let out = format!("\n  \n{}\t0.5  \n\n", k[0]);
-        assert_eq!(parse_keyed("number", &out, "", &k), vec![Reading::Score(0.5)]);
+        assert_eq!(
+            parse_keyed("number", &out, "", &k),
+            vec![Reading::Score(0.5)]
+        );
     }
 
     #[test]

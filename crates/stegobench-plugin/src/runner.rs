@@ -497,8 +497,9 @@ where
             if group.is_empty() {
                 break;
             }
-            for ((record, raw), item) in
-                score_group(entry, &group, timeout, adapter_roots).into_iter().zip(group.iter())
+            for ((record, raw), item) in score_group(entry, &group, timeout, adapter_roots)
+                .into_iter()
+                .zip(group.iter())
             {
                 if let Some(problem) = raw_sink.keep(&item.id, &record, &raw) {
                     tally.raw_problem.get_or_insert(problem);
