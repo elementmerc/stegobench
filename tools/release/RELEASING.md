@@ -264,6 +264,123 @@ names `release.yml` gives its assets.
 - [ ] `cargo binstall stegobench-cli` fetches the archive rather than
       compiling, and the version it reports matches the tag.
 
+**Neither repository exists yet**, so neither command above can work yet. They
+are two empty repositories under our own account, which means creating them
+waits on nobody's review, and until they exist the generator is tested and
+unused. Create `elementmerc/homebrew-tap` with a `Formula/` directory and the
+Scoop bucket with a `bucket/` directory, then run the generator above. The
+CHANGELOG already says plainly that these are not installable, so nothing
+published overstates it and there is no hurry beyond your own.
+
+The first push to either one is also the moment to flip that channel to
+`required = true` in `tools/release/channels.toml`. A live destination left
+optional means a later takedown of something people are already using gets
+reported and passes, which is the dependence on somebody remembering that the
+whole verifier exists to remove.
+
+## Zenodo, and the ordering trap in it
+
+Zenodo issues a DOI per release and supports tombstoned withdrawal, which is
+what makes the tool citable beside the corpus and is the prerequisite for most
+academic reach. It needs no approval and no application. It costs one checkbox.
+
+**The trap: enabling Zenodo is not retroactive.** It works by webhook. You
+switch the repository on in Zenodo's GitHub settings page, and from that moment
+Zenodo mints a DOI for every GitHub release *published afterwards*. Switch it on
+the day after the first release is published and that release has no DOI, for
+ever, and the first DOI anybody cites is the second release. So this is not an
+"after publishing" step even though it reads like one.
+
+The order, and it only works in this order:
+
+- [ ] Switch the repository on at `https://zenodo.org/account/settings/github/`
+      **before** the draft release is published. Enabling it before the tag is
+      even cut is fine and is the safest moment.
+- [ ] Publish the draft. Zenodo sees the release event and creates a record.
+- [ ] Read the DOI off the Zenodo record. It comes in two forms and the
+      difference matters: the **concept DOI** always resolves to the newest
+      version and is what prose should cite, while the **version DOI** names
+      one release and is what a result document should name. Record the version
+      DOI for this release.
+- [ ] Feed it to the metadata generator, which already takes it:
+
+      ```sh
+      python3 tools/release/generate_metadata.py \
+          --version 1.0.0 --date-released 2026-10-02 \
+          --doi 10.5281/zenodo.NNNNNNN
+      ```
+
+- [ ] Commit the regenerated `CITATION.cff` and `codemeta.json`. GitHub and
+      Zenodo both render the first one, so a wrong citation is wrong in two
+      places at once.
+- [ ] Check the live record rather than the upload's exit code. An Archive page
+      carried a wrong cover count here for four days, and the lesson generalises
+      to every destination: read the page a stranger would load.
+
+Zenodo's default quota is 50 GB per record, which is ample for source and
+binaries. It would matter only for a curated corpus tier larger than Core, and
+that is a request per record rather than something to plan around.
+
+One checkbox worth doing immediately after the first DOI exists, and not
+before, because there is nothing to attach until then:
+
+- [ ] Link your ORCID in Zenodo once. Every record afterwards attaches itself
+      to it with no further action.
+
+## Software Heritage
+
+Software Heritage archives the whole repository, history included, so a
+reviewer can still read the code when a URL has rotted. No account, no
+approval, no application, and it is the cheapest item in this file.
+
+As of 2026-10-02 this repository is **not archived**: asking the API for it
+answers `NotFoundExc`. Do it before the tag rather than after, because what gets
+archived is the history as it stands when the crawler runs, and there is no
+reason to have the first snapshot miss the release commit.
+
+- [ ] Ask for it:
+
+      ```sh
+      curl -X POST \
+        https://archive.softwareheritage.org/api/1/origin/save/git/url/https://github.com/elementmerc/stegobench/
+      ```
+
+      The reply carries a `save_request_status`. `accepted` means it is queued,
+      not done.
+
+- [ ] Check it landed, which is a separate question from whether the request was
+      accepted:
+
+      ```sh
+      curl https://archive.softwareheritage.org/api/1/origin/https://github.com/elementmerc/stegobench/get/
+      ```
+
+      A 404 with `NotFoundExc` means nothing has been archived yet. Anything
+      else means it has, and the response names the visit.
+
+- [ ] Put the resulting SWHID in the citation metadata if you want a reference
+      that survives this repository disappearing. That is the one thing a DOI
+      does not give you, because a DOI names a record and an SWHID names the
+      bytes.
+
+Repeat the POST after later releases. Software Heritage crawls on its own
+schedule, and asking is how you decide when rather than waiting.
+
+## The AUR, and why it is not on this list
+
+An Arch user package would need an AUR account, an SSH key registered to it, a
+hand written `PKGBUILD` in a separate git repository, and a `.SRCINFO`
+regenerated on every version. `tools/release/generate_packaging.py` emits
+nothing for it, so that is new code plus a new credential plus a new repository,
+for one distribution, at a point where the tap and the bucket do not exist
+either.
+
+`cargo binstall stegobench-cli` already serves the Arch user who wants a binary
+rather than a build, and it needs no file at all. The sensible moment to look at
+this again is once the tap and the bucket are live, so the generator grows a
+third target rather than a special case. Recorded here as a decision with its
+reasoning rather than left as a gap somebody rediscovers.
+
 ## After publishing
 
 - [ ] Run the post-publish verifier, which does most of the rest of this list

@@ -635,7 +635,9 @@ fn to_row(source: &Path, r: Result1) -> Row {
         // genuinely differs.
         if r.declarations.contamination_check == ContaminationCheck::DeclaredButUncheckable {
             flags.push(format!(
-                "TRAINED ON {trained}, AND THIS CORPUS COULD NOT BE IDENTIFIED:                  the two were compared by name, so whether they are the same                  corpus is unknown rather than no"
+                "TRAINED ON {trained}, AND THIS CORPUS COULD NOT BE IDENTIFIED: \
+                 the two were compared by name, so whether they are the same \
+                 corpus is unknown rather than no"
             ));
         } else {
             flags.push(format!("trained on {trained}, which is not this corpus"));
@@ -649,7 +651,8 @@ fn to_row(source: &Path, r: Result1) -> Row {
         // and for one that learned anything it makes the figure unquotable,
         // while the row's only split column reads `by-cover` either way.
         flags.push(
-            "SCORED TRAIN AND TEST TOGETHER: quotable only for a detector that              learned nothing from this corpus"
+            "SCORED TRAIN AND TEST TOGETHER: quotable only for a detector that \
+             learned nothing from this corpus"
                 .to_string(),
         );
     }
