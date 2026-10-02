@@ -471,18 +471,65 @@ impl Examination {
         exit::OK
     }
 
+    /// What each row of the table is called.
+    ///
+    /// The bare filename where that identifies the file, and as much of the
+    /// path as it takes where it does not.
+    ///
+    /// RAISED BY A JOURNEY, 2026-10-02: a corpus names its samples by position
+    /// inside each arm, so examining one cover and one stego image printed two
+    /// rows both labelled `000000.png` and nothing said which was which. A
+    /// table whose rows cannot be told apart is worse than one that prints
+    /// long paths, because the reader does not know they are looking at two
+    /// different files.
+    fn row_labels(images: &[PathBuf]) -> Vec<String> {
+        let base = |p: &PathBuf| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.display().to_string())
+        };
+        let mut labels: Vec<String> = images.iter().map(base).collect();
+        // Decided on the ORIGINAL names and applied to every member of a
+        // colliding group. Testing against the vector while mutating it
+        // qualified one row of each pair and left the other bare, so the pair
+        // that needed telling apart still read `covers/000000.png` beside a
+        // plain `000000.png`.
+        let colliding = |labels: &[String]| -> Vec<bool> {
+            labels
+                .iter()
+                .map(|l| labels.iter().filter(|o| *o == l).count() > 1)
+                .collect()
+        };
+        // One pass fits the shape that produces this: samples under one
+        // directory per arm. Anything still colliding falls back to the whole
+        // path, which is unambiguous by construction.
+        for (i, _) in colliding(&labels)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, c)| *c)
+            .collect::<Vec<_>>()
+        {
+            let path = &images[i];
+            labels[i] = match path.parent().and_then(|p| p.file_name()) {
+                Some(dir) => format!("{}/{}", dir.to_string_lossy(), base(path)),
+                None => path.display().to_string(),
+            };
+        }
+        for (i, _) in colliding(&labels)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, c)| *c)
+            .collect::<Vec<_>>()
+        {
+            labels[i] = images[i].display().to_string();
+        }
+        labels
+    }
+
     /// The table, one row per image and one column per detector.
     pub fn table(&self) -> String {
         let mut name_width = "image".len();
-        let labels: Vec<String> = self
-            .images
-            .iter()
-            .map(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| p.display().to_string())
-            })
-            .collect();
+        let labels = Self::row_labels(&self.images);
         for label in &labels {
             name_width = name_width.max(label.chars().count());
         }
@@ -539,6 +586,46 @@ impl Examination {
             .any(|c| c.answers.iter().any(|a| !matches!(a, Answer::Failed(_))))
     }
 
+    /// The detectors that gave one answer to every image, where there was
+    /// more than one image to answer about.
+    ///
+    /// RAISED BY A JOURNEY, 2026-10-02. zsteg answered the same thing in every
+    /// row, and the persona could not tell "it found nothing in any of them"
+    /// from "the adapter is not reading its output". Both produce an identical
+    /// column, one is a result and the other is a broken tool, and the table
+    /// said nothing. A column like this is not evidence either way until
+    /// somebody has looked at what the tool actually printed, which is what
+    /// `--raw` is for.
+    ///
+    /// Not raised for a single image, where one answer is the only possible
+    /// shape, and not for a column that failed or was unavailable, which the
+    /// cells already say.
+    fn one_answer_for_everything(&self) -> Vec<&str> {
+        if self.images.len() < 2 {
+            return Vec::new();
+        }
+        self.columns
+            .iter()
+            .filter(|c| c.unavailable.is_none())
+            .filter(|c| {
+                let mut answered = c
+                    .answers
+                    .iter()
+                    .filter(|a| !matches!(a, Answer::Failed(_)))
+                    .map(|a| a.cell());
+                match answered.next() {
+                    Some(first) => {
+                        c.answers.len() == self.images.len()
+                            && answered.clone().count() + 1 == self.images.len()
+                            && answered.all(|a| a == first)
+                    }
+                    None => false,
+                }
+            })
+            .map(|c| c.detector.as_str())
+            .collect()
+    }
+
     /// The lines that go under the table.
     ///
     /// Short on purpose. The argument for why an examination is weak evidence
@@ -593,6 +680,17 @@ impl Examination {
                     self.images.len()
                 ));
             }
+        }
+        let flat = self.one_answer_for_everything();
+        if !flat.is_empty() {
+            notes.push(format!(
+                "{} gave one answer to all {} image(s). That is what finding \
+                 nothing looks like, and it is also what a misread output \
+                 looks like; the table cannot tell you which. `--raw <FILE>` \
+                 keeps what the tool printed, which can.",
+                flat.join(", "),
+                self.images.len()
+            ));
         }
         notes
     }
@@ -821,6 +919,89 @@ mod tests {
             1,
         );
         assert_eq!(e.exit_code(), stegobench_core::exit::PLUGIN_FAILED);
+    }
+
+    /// A corpus names its samples by position inside each arm, so two files
+    /// from two arms share a basename and the table had two rows called
+    /// `000000.png`.
+    #[test]
+    fn two_images_sharing_a_basename_get_rows_a_reader_can_tell_apart() {
+        let e = Examination {
+            images: vec![
+                PathBuf::from("corpus/covers/000000.png"),
+                PathBuf::from("corpus/lsb-0400/000000.png"),
+                PathBuf::from("corpus/covers/000001.png"),
+            ],
+            columns: vec![answered(
+                "alfa",
+                vec![Answer::Score(0.1), Answer::Score(0.2), Answer::Score(0.3)],
+            )],
+        };
+        let table = e.table();
+        assert!(
+            table.contains("covers/000000.png") && table.contains("lsb-0400/000000.png"),
+            "BOTH sides of the collision have to be qualified, or the reader \
+             still cannot tell which row is which:\n{table}"
+        );
+        // The row that was never ambiguous keeps its short name: qualifying
+        // everything would make every table longer to fix two rows.
+        assert!(
+            table
+                .lines()
+                .any(|l| l.starts_with("000001.png") || l.starts_with("000001.png ")),
+            "a name that collided with nothing was lengthened anyway:\n{table}"
+        );
+    }
+
+    /// An identical column is a result and a broken parser at the same time,
+    /// and the table cannot tell them apart. Saying so is the whole fix.
+    #[test]
+    fn one_answer_for_every_image_is_called_out_under_the_table() {
+        let flat = examination(
+            vec![answered(
+                "zsteg",
+                vec![Answer::Verdict(false), Answer::Verdict(false)],
+            )],
+            2,
+        );
+        let note = flat
+            .footnotes()
+            .into_iter()
+            .find(|n| n.contains("one answer to all"))
+            .expect("a column with one answer in every row is called out");
+        assert!(note.contains("zsteg"), "{note}");
+        assert!(
+            note.contains("--raw"),
+            "the note has to say what to do next"
+        );
+
+        // A column that varies is not called out, or the note becomes
+        // furniture nobody reads.
+        let varied = examination(
+            vec![answered(
+                "zsteg",
+                vec![Answer::Verdict(false), Answer::Verdict(true)],
+            )],
+            2,
+        );
+        assert!(
+            !varied
+                .footnotes()
+                .iter()
+                .any(|n| n.contains("one answer to all")),
+            "a column with two different answers was called out as flat"
+        );
+
+        // One image is one answer by necessity, and saying so would be noise
+        // on every single-image examination.
+        let alone = examination(vec![answered("zsteg", vec![Answer::Verdict(false)])], 1);
+        assert!(
+            !alone
+                .footnotes()
+                .iter()
+                .any(|n| n.contains("one answer to all")),
+            "a single image examination carried the flat-column note"
+        );
     }
 
     #[test]
