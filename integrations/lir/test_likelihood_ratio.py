@@ -292,18 +292,59 @@ class TestPermutationNull:
         s = rng.normal(size=n)
         return np.concatenate([s, s]), np.concatenate([np.ones(n, int), np.zeros(n, int)])
 
-    def test_the_pipeline_is_biased_above_one_on_null_data(self):
-        """Pinning the bias, so nobody later reads it as a finding."""
-        scores, labels = self._identical_distributions()
-        lrs = cross_validated_lrs(scores, labels, folds=10)
-        observed = cllr(lrs[labels == 1], lrs[labels == 0])
-        assert observed > 1.0
-        # Small, but well outside what a bootstrap over the LRs would flag.
-        assert observed < 1.02
+    @staticmethod
+    def _pairs(n):
+        """Cover identifiers for `_identical_distributions`: i and i+n are one cover."""
+        return np.concatenate([np.arange(n), np.arange(n)])
+
+    def test_pair_aware_folds_score_exactly_one_on_null_data(self):
+        """The correctness anchor for the whole pipeline.
+
+        Both sides carry identical scores, so the true cost is exactly 1.000
+        and there is nothing to argue about. With both members of every
+        training pair present the logistic likelihood is symmetric, the fitted
+        coefficient is zero, every ratio is 1, and the cost is 1.000 exactly
+        with no seed to seed spread.
+        """
+        n = 200
+        scores, labels = self._identical_distributions(n)
+        groups = self._pairs(n)
+        for seed in range(5):
+            lrs = cross_validated_lrs(scores, labels, folds=10, seed=seed, groups=groups)
+            observed = cllr(lrs[labels == 1], lrs[labels == 0])
+            assert observed == pytest.approx(1.0, abs=1e-9), (
+                f"seed {seed} gave {observed!r} on an arm whose true cost is 1.000"
+            )
+
+    def test_splitting_pairs_across_folds_biases_the_cost_upward(self):
+        """Why `groups` is not optional, pinned so the fix cannot be undone.
+
+        This is a real defect that reached a draft paper: folds assigned on the
+        label alone separate a cover from its twin about nine times in ten, the
+        calibrator fits the resulting imbalance, and the cost drifts upward by
+        enough to turn "tells you nothing" into "worse than silence". The test
+        asserts the gap between the two schemes, not the broken value, so that
+        a future reader meets the reason rather than the symptom.
+        """
+        n = 200
+        scores, labels = self._identical_distributions(n)
+        grouped, split = [], []
+        for seed in range(5):
+            g = cross_validated_lrs(scores, labels, folds=10, seed=seed, groups=self._pairs(n))
+            s = cross_validated_lrs(scores, labels, folds=10, seed=seed)
+            grouped.append(cllr(g[labels == 1], g[labels == 0]))
+            split.append(cllr(s[labels == 1], s[labels == 0]))
+        assert np.allclose(grouped, 1.0, atol=1e-9)
+        assert np.mean(split) > 1.0, "the unbiased scheme is supposed to be the grouped one"
+        assert np.mean(split) - 1.0 > 1e-4, (
+            "the bias this guards against has vanished; if that is a genuine "
+            "improvement, update the docstring on cross_validated_lrs too"
+        )
 
     def test_the_null_covers_the_observed_value_on_null_data(self):
-        scores, labels = self._identical_distributions()
-        lrs = cross_validated_lrs(scores, labels, folds=10)
+        n = 200
+        scores, labels = self._identical_distributions(n)
+        lrs = cross_validated_lrs(scores, labels, folds=10, groups=self._pairs(n))
         observed = cllr(lrs[labels == 1], lrs[labels == 0])
         null = cllr_null(scores, labels, permutations=100, folds=10)
         p = (null <= observed).mean()
@@ -392,12 +433,43 @@ class TestPairedNull:
         pairs = np.concatenate([np.arange(n), np.arange(n)])
         return scores, labels, pairs
 
+    @staticmethod
+    def _unpaired_null_data(n: int = 150, seed: int = 0):
+        """Null, but not degenerate: two independent draws from one distribution.
+
+        `_paired_null_data` makes the two sides byte identical, which is the
+        structural arm and is a special case: a within pair flip there leaves
+        the data unchanged, so the null is a point mass. For testing that the
+        null *covers* a null arm, the arm has to have something to permute.
+        """
+        rng = np.random.default_rng(seed)
+        scores = np.concatenate([rng.normal(size=n), rng.normal(size=n)])
+        labels = np.concatenate([np.ones(n, int), np.zeros(n, int)])
+        pairs = np.concatenate([np.arange(n), np.arange(n)])
+        return scores, labels, pairs
+
     def test_the_paired_null_covers_a_provably_null_arm(self):
-        scores, labels, pairs = self._paired_null_data()
-        mean, _, _ = observed_cllr(scores, labels, folds=10, seeds=10)
+        scores, labels, pairs = self._unpaired_null_data()
+        mean, _, _ = observed_cllr(scores, labels, folds=10, seeds=10, groups=pairs)
         null = cllr_null(scores, labels, permutations=40, folds=10, pairs=pairs)
         p = (1 + (null <= mean).sum()) / (1 + len(null))
         assert 0.05 < p < 0.95, f"a provably null arm was called a finding at p={p}"
+
+    def test_on_byte_identical_sides_the_paired_null_is_a_point_mass(self):
+        """The structural arm's degenerate case, pinned rather than papered over.
+
+        When both sides carry the same scores, flipping a label within a pair
+        changes nothing, so every permutation reproduces the observed value
+        exactly and p is 1.0 by construction. That arm can demonstrate the
+        fold bias; it cannot test whether the null is correctly centred,
+        because it has no randomness for the null to explore.
+        """
+        scores, labels, pairs = self._paired_null_data()
+        mean, sd, _ = observed_cllr(scores, labels, folds=10, seeds=10, groups=pairs)
+        null = cllr_null(scores, labels, permutations=40, folds=10, pairs=pairs)
+        assert mean == pytest.approx(1.0, abs=1e-9)
+        assert sd == pytest.approx(0.0, abs=1e-12)
+        assert np.allclose(null, 1.0, atol=1e-9)
 
     def test_pairing_changes_the_null(self):
         """If it did not, the argument for it would be decoration."""

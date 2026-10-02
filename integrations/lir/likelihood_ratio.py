@@ -368,7 +368,9 @@ def cllr_null(
         # indistinguishable from it. See `observed_cllr`.
         draws = np.empty(seeds)
         for s in range(seeds):
-            lrs = cross_validated_lrs(scores, shuffled, folds=folds, bound=bound, seed=s)
+            lrs = cross_validated_lrs(
+                scores, shuffled, folds=folds, bound=bound, seed=s, groups=pairs
+            )
             draws[s] = cllr(lrs[shuffled == 1], lrs[shuffled == 0])
         out[i] = draws.mean()
     return out
@@ -380,6 +382,7 @@ def observed_decomposition(
     folds: int = 10,
     bound: float = DEFAULT_BOUND,
     seeds: int = 20,
+    groups: np.ndarray | None = None,
 ) -> tuple[CllrDecomposition, float]:
     """The whole decomposition averaged over fold seeds, not just the total.
 
@@ -401,7 +404,9 @@ def observed_decomposition(
     totals = np.empty(seeds)
     floors = np.empty(seeds)
     for i in range(seeds):
-        lrs = cross_validated_lrs(scores, labels, folds=folds, bound=bound, seed=i)
+        lrs = cross_validated_lrs(
+            scores, labels, folds=folds, bound=bound, seed=i, groups=groups
+        )
         d = decompose(lrs, labels, bound=bound)
         totals[i] = d.cllr
         floors[i] = d.cllr_min
@@ -424,14 +429,20 @@ def observed_cllr(
     folds: int = 10,
     bound: float = DEFAULT_BOUND,
     seeds: int = 20,
+    groups: np.ndarray | None = None,
 ) -> tuple[float, float, np.ndarray]:
     """Cllr averaged over fold seeds, with its spread.
 
     A single cross validation is one draw from a distribution whose width is
-    set by which cases landed in which fold. On the structural arm that spread
-    runs from 1.00084 to 1.00786 across 20 seeds: wider than the bias the
-    permutation null exists to correct, and wider than the gap between any two
-    numbers in the published table.
+    set by which cases landed in which fold. Pass `groups` on a matched
+    corpus: without it a cover is separated from its own twin and the draws
+    carry a bias as well as a spread, which is the defect documented on
+    `cross_validated_lrs`. With it, the structural arm returns exactly 1.000
+    on every seed and the spread collapses to zero.
+
+    **Use the same `groups` here as in the null you compare against.** An
+    observed value and a reference computed with different estimators are not
+    comparable, and that mistake has already cost this project one result.
 
     Printing one draw to three decimal places presents a random variable as a
     measurement, so the mean and the spread are returned together and the
@@ -442,7 +453,9 @@ def observed_cllr(
     draws = np.empty(seeds)
     labels = _check_labels(labels)
     for i in range(seeds):
-        lrs = cross_validated_lrs(scores, labels, folds=folds, bound=bound, seed=i)
+        lrs = cross_validated_lrs(
+            scores, labels, folds=folds, bound=bound, seed=i, groups=groups
+        )
         draws[i] = cllr(lrs[labels == 1], lrs[labels == 0])
     return float(draws.mean()), float(draws.std()), draws
 
@@ -552,6 +565,7 @@ def cross_validated_lrs(
     folds: int = 10,
     bound: float = DEFAULT_BOUND,
     seed: int = 0,
+    groups: np.ndarray | None = None,
 ) -> np.ndarray:
     """LRs for every case, each produced by a calibrator that never saw it.
 
@@ -560,6 +574,26 @@ def cross_validated_lrs(
     flexible. For an LR that is going to be quoted as evidence, that optimism
     is not a statistical nicety; it is an overstatement of the strength of
     evidence against someone.
+
+    :param groups: the unit that must not be split across folds, one entry per
+        case. On a matched corpus this is the cover identifier, so that a
+        picture and its stego twin always land in the same fold.
+
+    **Pass groups on any matched corpus.** Assigning folds on the label alone
+    splits a cover from its own twin about nine times in ten, and the damage is
+    not a rounding error. A training fold then holds one side of a pair without
+    the other, the calibrator fits a coefficient to that imbalance, the ratios
+    scatter away from 1, and scatter costs. On a corpus with no signal at all
+    the result drifts upward by about 0.004, which is large enough to turn
+    "this detector tells you nothing" into "this detector is worse than
+    silence".
+
+    The arithmetic of why grouping fixes it: when both members of every
+    training pair are present the logistic likelihood is exactly symmetric, the
+    fitted coefficient is exactly zero, every ratio is exactly 1, and the cost
+    is exactly 1.000 with no seed to seed spread at all. That is the right
+    answer on data that carries nothing, and it is checkable against any arm
+    whose two sides hold identical scores.
     """
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=int)
@@ -568,22 +602,43 @@ def cross_validated_lrs(
 
     rng = np.random.default_rng(seed)
     assignment = np.empty(len(scores), dtype=int)
-    # Stratify, so that a fold cannot come out with no clean cases in it and
-    # leave the calibrator with nothing to estimate the denominator from.
-    for value in (0, 1):
-        idx = np.flatnonzero(labels == value)
-        if len(idx) < folds:
+    if groups is None:
+        # Stratify, so that a fold cannot come out with no clean cases in it
+        # and leave the calibrator with nothing to estimate the denominator
+        # from. Only correct when the cases are genuinely independent.
+        for value in (0, 1):
+            idx = np.flatnonzero(labels == value)
+            if len(idx) < folds:
+                raise ValueError(
+                    f"only {len(idx)} cases with label {value}, which cannot fill {folds} folds"
+                )
+            shuffled = rng.permutation(idx)
+            assignment[shuffled] = np.arange(len(shuffled)) % folds
+    else:
+        groups = np.asarray(groups)
+        if len(groups) != len(scores):
+            raise ValueError("groups must carry one entry per case")
+        unique = np.unique(groups)
+        if len(unique) < folds:
             raise ValueError(
-                f"only {len(idx)} cases with label {value}, which cannot fill {folds} folds"
+                f"only {len(unique)} groups, which cannot fill {folds} folds"
             )
-        shuffled = rng.permutation(idx)
-        assignment[shuffled] = np.arange(len(shuffled)) % folds
+        order = rng.permutation(len(unique))
+        fold_of = {g: int(order[i] % folds) for i, g in enumerate(unique)}
+        assignment = np.array([fold_of[g] for g in groups], dtype=int)
 
     out = np.empty(len(scores), dtype=float)
     for fold in range(folds):
         test = assignment == fold
         train = ~test
-        prior_odds = (labels[train] == 1).sum() / (labels[train] == 0).sum()
+        n_pos = int((labels[train] == 1).sum())
+        n_neg = int((labels[train] == 0).sum())
+        if n_pos == 0 or n_neg == 0:
+            raise ValueError(
+                f"fold {fold} leaves the calibrator with {n_pos} payload and "
+                f"{n_neg} clean cases to train on"
+            )
+        prior_odds = n_pos / n_neg
         calibrator = LogisticCalibrator(bound=bound).fit(scores[train], labels[train])
         out[test] = calibrator.transform(scores[test], prior_odds)
     return out

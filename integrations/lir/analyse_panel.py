@@ -202,7 +202,12 @@ def main(argv=None):
             # the decomposition comes from the same draws, so the printed
             # Cllr minus the printed Cllr_min is the printed Cllr_cal.
             d, sd_cllr = observed_decomposition(
-                scores, labels, folds=args.folds, bound=args.bound, seeds=args.seeds
+                scores,
+                labels,
+                folds=args.folds,
+                bound=args.bound,
+                seeds=args.seeds,
+                groups=pairs,
             )
             mean_cllr = d.cllr
 
