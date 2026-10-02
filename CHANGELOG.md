@@ -14,8 +14,22 @@ the parts that are deliberately not finished.
 ### CLI
 
 - Every command in the tree is built and tested: `list`, `describe`,
-  `doctor`, `schema`, `validate`, `verify`, `plan`, `score`, `metrics`,
-  `fetch`, `report`, `completions` and `help`.
+  `doctor`, `examine`, `schema`, `validate`, `verify`, `plan`, `score`,
+  `metrics`, `fetch`, `report`, `completions` and `help`.
+- `stegobench examine` runs the detectors you name over images of your own and
+  prints one row per image and one column per detector, so several tools can be
+  compared on the same files without installing or invoking any of them
+  yourself. Name a directory and it stands for the images inside it.
+- An examination writes no result document, and nothing it prints is quotable
+  as an accuracy. Your own images carry no labels, so there is nothing for a
+  detector to be right or wrong about; `stegobench help scope` has the
+  difference and `score` is what produces a number you can defend.
+- `check`, `scan`, `inspect`, `detect` and `analyse` run `examine`. They used
+  to be refusals that explained the tool could not look at your own images.
+- Asking for a payload back out of an image is still refused, and the refusal
+  now says that rather than talking about scope: `decode`, `extract`, `reveal`
+  and `unhide` explain that Stegobench asks detectors questions and does not
+  pull hidden data out of pictures.
 - `stegobench report` turns a folder of result documents into a table for an
   evaluation document, as text, Markdown or CSV. Every row carries the corpus
   and its digest, the configuration, the pairing and the split beside the
@@ -137,6 +151,16 @@ the parts that are deliberately not finished.
   which is a finding rather than a gap.
 - Redistribution is recorded as its own field, separate from the licence,
   because a corpus you may use isn't always one you may publish.
+- Every tool entry now records that answer too, with the reasoning beside it,
+  and neither is accepted without the other. A licence says what we may do
+  with the software; whether a built image of it may be republished is a
+  separate permission that some of these grants withhold.
+- One tool entry records a decision rather than a grant. StegExpose is
+  archived and was published by its author for public use, nothing licences a
+  copy of it, and the entry says in its own words that the mirror is a
+  judgement and what that judgement rests on.
+- `stegobench describe` prints both lines, so whoever is about to publish an
+  image reads the answer rather than the TOML.
 - A registry entry that names a loopback or private-network address in how it
   runs a tool is refused, naming the entry, the field and the address, so a
   benchmark can't ship an address and quietly score whatever answers on it.
@@ -157,7 +181,7 @@ the parts that are deliberately not finished.
 - `docs/design/` holds the reasoning that the numbers depend on: the corpus,
   distribution, cover-source licensing and matched pairs.
 - `docs/guide/` is the reader-facing path: quickstart, pairing, scores,
-  limits and building a corpus.
+  limits, examining your own images and building a corpus.
 - `docs/leaderboard.md` publishes the submission rules before any table
   exists, so the rules can be argued about rather than invented once a
   submission arrives.

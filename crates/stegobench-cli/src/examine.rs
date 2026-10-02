@@ -367,7 +367,11 @@ where
             },
             items,
             &mut sink,
-            |_| {},
+            // The runner calls this at most once every thirty seconds, so a
+            // handful of images never prints it and a directory of ten
+            // thousand does not go silent for hours. Discarding it was the
+            // whole observability rule missed in one empty closure.
+            |t| progress(&heartbeat(&entry.name, t.seen(), images.len(), t.errored)),
         )?;
         if let Some(problem) = &tally.raw_problem {
             progress(problem);
@@ -381,6 +385,17 @@ where
     }
 
     Ok(Examination { images, columns })
+}
+
+/// The line a long examination prints while it works.
+///
+/// A function rather than a closure body so it can be read and tested. The
+/// wiring behind it cannot be unit tested without waiting thirty seconds for
+/// the runner's heartbeat, so it was verified by running: forty images
+/// against a detector sleeping a second each printed exactly one of these, at
+/// thirty, reading "slow: 30 of 40 answered, 0 errored".
+fn heartbeat(name: &str, answered: u64, total: usize, errored: u64) -> String {
+    format!("{name}: {answered} of {total} answered, {errored} errored")
 }
 
 /// A record as one cell.
@@ -606,6 +621,17 @@ mod tests {
             unavailable: None,
             answers,
         }
+    }
+
+    #[test]
+    fn the_heartbeat_names_the_detector_and_both_counts() {
+        // All four values, because a progress line that drops the total is
+        // the one that leaves somebody unable to tell a slow run from a
+        // stuck one.
+        let line = heartbeat("zsteg", 30, 40, 2);
+        assert!(line.contains("zsteg"), "{line}");
+        assert!(line.contains("30 of 40"), "{line}");
+        assert!(line.contains("2 errored"), "{line}");
     }
 
     #[test]
