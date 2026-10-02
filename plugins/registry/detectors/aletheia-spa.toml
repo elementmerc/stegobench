@@ -28,13 +28,31 @@ cores_per_worker = 1
 [invoke]
 # Driven through the library, not the command line, because the CLI compares
 # its own estimate to a threshold and prints a sentence. See the adapter.
-adapter = "plugins/adapters/aletheia_one.py"
+adapter = "plugins/adapters/aletheia_many.py"
 entrypoint = "python3"
 # The library is cloned to /opt/aletheia but the image's workdir is /data, so
 # an import fails without this. Image layout belongs in the entry, not in the
 # adapter, which should outlive any one image.
-env = ["PYTHONPATH=/opt/aletheia"]
-argv = ["{adapter}", "{file}", "spa"]
+env = [
+    "PYTHONPATH=/opt/aletheia",
+    # One core per worker, deliberately. Measured on an idle 16 core box: both
+    # estimators are single threaded anyway (CPU time equals wall time), and
+    # capping the numeric libraries made the RS attack FASTER, 14.6 against
+    # 17.7 CPU seconds, because the threads it was spawning only contended.
+    # Uncapped, a run at 14 workers drove the load average to 89 on 16 cores
+    # through contention that bought nothing.
+    "OMP_NUM_THREADS=1",
+    "OPENBLAS_NUM_THREADS=1",
+    "MKL_NUM_THREADS=1",
+    "NUMEXPR_NUM_THREADS=1",
+]
+argv = ["{adapter}", "spa", "{files}"]
+
+# 64 images per invocation. SPA's own work is 0.67 seconds against roughly
+# 0.62 seconds of container start and interpreter import, so unbatched it spent
+# close to half its time getting ready. At 64 the overhead amortises to about
+# 10 milliseconds an image.
+batch = 64
 parser = "number"
 
 [selftest]

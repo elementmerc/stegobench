@@ -397,6 +397,53 @@ where
         recorded = prior.next_id()?;
     }
 
+    #[allow(clippy::items_after_statements)]
+    /// Score one group of items, returning a record for each in the same order.
+    ///
+    /// A group of one takes the single image path unchanged, so an entry that
+    /// declares no batch is driven byte for byte as it was before batching
+    /// existed, and the self-test keeps predicting the run.
+    fn score_group(
+        entry: &Entry,
+        group: &[WorkItem],
+        per_item: Duration,
+        adapter_roots: &[PathBuf],
+    ) -> Vec<(Record, crate::selftest::Raw)> {
+        if group.len() == 1 {
+            let item = &group[0];
+            let mut raw = crate::selftest::Raw::default();
+            let record = crate::selftest::read_one_observed(
+                entry,
+                &item.path,
+                per_item,
+                adapter_roots,
+                &mut raw,
+            )
+            .into_record(item.id.as_str());
+            return vec![(record, raw)];
+        }
+
+        // The budget is per IMAGE, so a batch gets the sum. A batch of 64 held
+        // to one image's timeout would be killed for being a batch, and the
+        // whole group recorded as errors that were never attempted.
+        let timeout = per_item.saturating_mul(group.len() as u32);
+        let paths: Vec<PathBuf> = group.iter().map(|i| i.path.clone()).collect();
+        let mut raw = crate::selftest::Raw::default();
+        let readings =
+            crate::selftest::read_many_observed(entry, &paths, timeout, adapter_roots, &mut raw);
+        group
+            .iter()
+            .zip(readings)
+            .map(|(item, reading)| {
+                // One captured stdout covers the whole batch, so the raw text is
+                // attached to each item of it rather than split by guesswork.
+                // Whoever reads it needs the tool's own words, and the words
+                // are about all of them.
+                (reading.into_record(item.id.as_str()), raw.clone())
+            })
+            .collect()
+    }
+
     let mut finish = |record: Record, tally: &mut Tally| -> Result<(), RunError> {
         if record.error.is_some() {
             tally.errored += 1;
@@ -409,7 +456,16 @@ where
         Ok(())
     };
 
-    if jobs <= 1 {
+    // How many images this tool may be asked about in one invocation. One
+    // unless the entry says otherwise, so no existing tool changes behaviour.
+    let batch = entry
+        .invoke
+        .as_ref()
+        .and_then(|i| i.batch)
+        .unwrap_or(1)
+        .max(1) as usize;
+
+    if jobs <= 1 && batch == 1 {
         for (_, item) in it {
             let mut raw = crate::selftest::Raw::default();
             let record = crate::selftest::read_one_observed(
@@ -432,6 +488,31 @@ where
         return Ok(tally);
     }
 
+    if jobs <= 1 {
+        // Batched but serial: one invocation at a time, several images in it.
+        let mut group: Vec<WorkItem> = Vec::with_capacity(batch);
+        loop {
+            group.clear();
+            group.extend(it.by_ref().take(batch).map(|(_, item)| item));
+            if group.is_empty() {
+                break;
+            }
+            for ((record, raw), item) in
+                score_group(entry, &group, timeout, adapter_roots).into_iter().zip(group.iter())
+            {
+                if let Some(problem) = raw_sink.keep(&item.id, &record, &raw) {
+                    tally.raw_problem.get_or_insert(problem);
+                }
+                finish(record, &mut tally)?;
+            }
+            if last_beat.elapsed() >= HEARTBEAT {
+                progress(&tally);
+                last_beat = Instant::now();
+            }
+        }
+        return Ok(tally);
+    }
+
     // A WINDOW OF `jobs`, NOT A QUEUE OF EVERY ITEM
     //
     // The whole corpus is 344,357 items at Core, so nothing here may hold a
@@ -445,56 +526,53 @@ where
     // chunk, which costs a little throughput, and in exchange the ordering is
     // a property of the structure instead of something a reassembly buffer
     // has to be trusted to get right.
-    let mut chunk: Vec<WorkItem> = Vec::with_capacity(jobs);
+    // The window is `jobs` invocations, each carrying up to `batch` images, so
+    // at most `jobs * batch` items are in memory at once. Still bounded by
+    // configuration rather than by the corpus, which is the property that
+    // matters at Core tier.
+    let window = jobs.saturating_mul(batch);
+    let mut chunk: Vec<WorkItem> = Vec::with_capacity(window);
     loop {
         chunk.clear();
-        chunk.extend(it.by_ref().take(jobs).map(|(_, item)| item));
+        chunk.extend(it.by_ref().take(window).map(|(_, item)| item));
         if chunk.is_empty() {
             break;
         }
 
         let scored: Vec<(Record, crate::selftest::Raw)> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
-                .iter()
-                .map(|item| {
-                    scope.spawn(move || {
-                        let mut raw = crate::selftest::Raw::default();
-                        let record = crate::selftest::read_one_observed(
-                            entry,
-                            &item.path,
-                            timeout,
-                            adapter_roots,
-                            &mut raw,
-                        )
-                        .into_record(item.id.as_str());
-                        (record, raw)
-                    })
-                })
+                .chunks(batch)
+                .map(|group| scope.spawn(move || score_group(entry, group, timeout, adapter_roots)))
                 .collect();
             handles
                 .into_iter()
-                .zip(chunk.iter())
-                .map(|(handle, item)| {
-                    // A panicking worker is recorded as an error against its
-                    // own item rather than taken as the end of the run. The
-                    // alternative loses every answer in the chunk, including
-                    // the ones that were fine, and leaves a records file the
-                    // next run cannot resume from.
+                .zip(chunk.chunks(batch))
+                .flat_map(|(handle, group)| {
+                    // A panicking worker is recorded as an error against the
+                    // items it was holding rather than taken as the end of the
+                    // run. The alternative loses every answer in the chunk,
+                    // including the ones that were fine, and leaves a records
+                    // file the next run cannot resume from.
                     handle.join().unwrap_or_else(|_| {
-                        (
-                            Record {
-                                id: item.id.clone(),
-                                score: None,
-                                verdict: None,
-                                error: Some(
-                                    "the worker scoring this item panicked; the run \
-                                     continued and this item was not measured"
-                                        .into(),
-                                ),
-                                elapsed_ms: None,
-                            },
-                            crate::selftest::Raw::default(),
-                        )
+                        group
+                            .iter()
+                            .map(|item| {
+                                (
+                                    Record {
+                                        id: item.id.clone(),
+                                        score: None,
+                                        verdict: None,
+                                        error: Some(
+                                            "the worker scoring this item panicked; the run \
+                                             continued and this item was not measured"
+                                                .into(),
+                                        ),
+                                        elapsed_ms: None,
+                                    },
+                                    crate::selftest::Raw::default(),
+                                )
+                            })
+                            .collect()
                     })
                 })
                 .collect()

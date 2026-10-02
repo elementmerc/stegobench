@@ -128,6 +128,81 @@ pub fn parse(parser: &str, stdout: &str, stderr: &str) -> Reading {
     }
 }
 
+/// Reads the output of ONE invocation that was asked about several images.
+///
+/// `keys` are the paths the tool was given, in the order they were given, and
+/// the answer for each is returned at the same index.
+///
+/// WHY THE OUTPUT IS KEYED AND NOT POSITIONAL
+/// ------------------------------------------
+/// The obvious batch protocol is "print one number per line, in the order I
+/// gave you the files". It is wrong the first time a tool skips a file it
+/// cannot read, because every answer after the gap shifts up one and is
+/// recorded against the wrong image. Nothing detects that: the numbers are
+/// plausible, the count is plausible until the last line, and the run reports
+/// success. One silently misattributed score is worse than a hundred honest
+/// failures, because the failures get fixed and the misattribution gets
+/// published.
+///
+/// So a batched tool prints `<path>\t<answer>` and this maps by the path. A
+/// line for an image that was not in the batch means the mapping cannot be
+/// trusted at all, so the whole batch fails rather than the stray line being
+/// skipped: a tool inventing paths is a tool whose other answers are also
+/// suspect.
+pub fn parse_keyed(parser: &str, stdout: &str, stderr: &str, keys: &[String]) -> Vec<Reading> {
+    let mut found: Vec<Option<&str>> = vec![None; keys.len()];
+    let tail = stderr.lines().next_back().unwrap_or("no output").trim();
+
+    for line in stdout.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Split on the FIRST tab only. A path cannot contain a tab here (the
+        // host builds these names itself), and the answer may.
+        let Some((key, answer)) = line.split_once('\t') else {
+            return vec![
+                Reading::Failed(format!(
+                    "a batched tool printed a line with no tab in it, so no \
+                     answer in this batch can be attributed to an image. The \
+                     protocol is `<path>\\t<answer>`. The line was: {line:?}"
+                ));
+                keys.len()
+            ];
+        };
+        let key = key.trim();
+        match keys.iter().position(|k| k == key) {
+            Some(i) => found[i] = Some(answer),
+            None => {
+                return vec![
+                    Reading::Failed(format!(
+                        "a batched tool answered for {key:?}, which was not in \
+                         the batch it was given. Every other answer it printed \
+                         is therefore unattributable, so the whole batch is \
+                         refused rather than partly believed"
+                    ));
+                    keys.len()
+                ]
+            }
+        }
+    }
+
+    keys.iter()
+        .zip(found)
+        .map(|(key, answer)| match answer {
+            // Each answer goes through the SAME parser a single invocation
+            // would have used, so a batched run and an unbatched one cannot
+            // read the same output differently.
+            Some(text) => parse(parser, text, stderr),
+            None => Reading::Failed(format!(
+                "the tool was asked about {key} in a batch and printed no line \
+                 for it. Recorded as unanswered rather than as a score, because \
+                 a missing answer is not a zero. stderr: {tail}"
+            )),
+        })
+        .collect()
+}
+
 impl Reading {
     /// Turns a reading into a protocol record.
     pub fn into_record(self, id: impl Into<String>) -> Record {
@@ -354,6 +429,172 @@ mod tests {
                 "an unknown parser should say so: {why}"
             ),
             other => panic!("an unknown parser was handled: {other:?}"),
+        }
+    }
+
+    // ---- the batched, keyed protocol -------------------------------------
+    //
+    // These are the tests that matter most in this file. A positional batch
+    // protocol misattributes silently, and a misattributed score is published
+    // rather than fixed, so every way the mapping can go wrong is here.
+
+    fn keys(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("/work/{i:06}.png")).collect()
+    }
+
+    #[test]
+    fn a_keyed_batch_maps_each_answer_to_the_image_it_names() {
+        let k = keys(3);
+        let out = format!("{}\t0.25\n{}\t0.50\n{}\t0.75\n", k[0], k[1], k[2]);
+        let got = parse_keyed("number", &out, "", &k);
+        assert_eq!(
+            got,
+            vec![
+                Reading::Score(0.25),
+                Reading::Score(0.50),
+                Reading::Score(0.75)
+            ]
+        );
+    }
+
+    #[test]
+    fn answers_out_of_order_land_on_the_right_images() {
+        // The whole reason the protocol is keyed. A tool free to answer in any
+        // order is a tool whose output cannot be read positionally.
+        let k = keys(3);
+        let out = format!("{}\t0.75\n{}\t0.25\n{}\t0.50\n", k[2], k[0], k[1]);
+        let got = parse_keyed("number", &out, "", &k);
+        assert_eq!(
+            got,
+            vec![
+                Reading::Score(0.25),
+                Reading::Score(0.50),
+                Reading::Score(0.75)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_skipped_image_is_unanswered_and_does_not_shift_the_others() {
+        // The exact failure a positional protocol has. The tool skipped the
+        // middle image; under positional reading the third image's score would
+        // be recorded against the second and nothing would notice.
+        let k = keys(3);
+        let out = format!("{}\t0.25\n{}\t0.75\n", k[0], k[2]);
+        let got = parse_keyed("number", &out, "boom: cannot read it", &k);
+        assert_eq!(got[0], Reading::Score(0.25));
+        assert_eq!(got[2], Reading::Score(0.75));
+        match &got[1] {
+            Reading::Failed(why) => {
+                assert!(why.contains("printed no line for it"), "{why}");
+                // A missing answer is not a zero, and the message says so
+                // because that is the mistake somebody reading it would make.
+                assert!(why.contains("not a zero"), "{why}");
+            }
+            other => panic!("expected the skipped image to be unanswered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_answer_for_an_image_not_in_the_batch_fails_the_whole_batch() {
+        // A tool naming a path it was not given is a tool whose other answers
+        // cannot be trusted either, so none of them is believed.
+        let k = keys(2);
+        let out = format!("{}\t0.25\n/work/999999.png\t0.9\n", k[0]);
+        let got = parse_keyed("number", &out, "", &k);
+        assert_eq!(got.len(), 2);
+        for reading in &got {
+            match reading {
+                Reading::Failed(why) => assert!(why.contains("not in the batch"), "{why}"),
+                other => panic!("expected the batch to be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_with_no_tab_fails_the_whole_batch_rather_than_being_skipped() {
+        // Bare numbers mean the tool is speaking the unbatched protocol, so
+        // nothing it printed can be attributed. Refused loudly: skipping the
+        // line would leave every image unanswered with no explanation of why.
+        let k = keys(2);
+        let got = parse_keyed("number", "0.25\n0.75\n", "", &k);
+        assert_eq!(got.len(), 2);
+        for reading in &got {
+            match reading {
+                Reading::Failed(why) => assert!(why.contains("no tab in it"), "{why}"),
+                other => panic!("expected refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_that_printed_nothing_leaves_every_image_unanswered() {
+        let k = keys(3);
+        let got = parse_keyed("number", "", "the container died", &k);
+        assert_eq!(got.len(), 3);
+        for reading in &got {
+            match reading {
+                Reading::Failed(why) => assert!(why.contains("the container died"), "{why}"),
+                other => panic!("expected unanswered, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn blank_lines_and_trailing_whitespace_are_not_answers_and_are_not_errors() {
+        let k = keys(1);
+        let out = format!("\n  \n{}\t0.5  \n\n", k[0]);
+        assert_eq!(parse_keyed("number", &out, "", &k), vec![Reading::Score(0.5)]);
+    }
+
+    #[test]
+    fn an_empty_batch_asks_nothing_and_answers_nothing() {
+        assert!(parse_keyed("number", "", "", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_negative_estimate_survives_the_keyed_route() {
+        // Both Aletheia estimators return small negatives on clean images, and
+        // that spread is exactly what a false positive rate is measured from.
+        // Clamping it would make every clean image look identical.
+        let k = keys(1);
+        let out = format!("{}\t-0.0067568111\n", k[0]);
+        assert_eq!(
+            parse_keyed("number", &out, "", &k),
+            vec![Reading::Score(-0.0067568111)]
+        );
+    }
+
+    #[test]
+    fn each_answer_goes_through_the_same_parser_an_unbatched_run_would_use() {
+        // A batched run and an unbatched one must not read the same text
+        // differently. Here the answer is not a number, and the keyed route
+        // has to reach the same verdict the plain route does.
+        let k = keys(1);
+        let out = format!("{}\tnot-a-number\n", k[0]);
+        match &parse_keyed("number", &out, "stderr tail", &k)[0] {
+            Reading::Failed(why) => assert!(why.contains("no number on stdout"), "{why}"),
+            other => panic!("expected the number parser to refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_the_first_tab_separates_so_an_extra_column_is_refused_not_guessed_at() {
+        // The protocol is `<path>\t<answer>` and nothing else. Only the first
+        // tab is treated as the separator, so the key is split off correctly
+        // here, and the remainder `0.5\textra` is handed to the number parser
+        // whole, which refuses it.
+        //
+        // Refusing is the wanted behaviour rather than a limitation. The
+        // alternative is to take the first field that happens to parse, which
+        // would silently pick a number out of output whose shape this code does
+        // not actually understand, and a number read by guesswork is the thing
+        // this project exists not to publish.
+        let k = keys(1);
+        let out = format!("{}\t0.5\textra\n", k[0]);
+        match &parse_keyed("number", &out, "", &k)[0] {
+            Reading::Failed(why) => assert!(why.contains("no number on stdout"), "{why}"),
+            other => panic!("expected an off protocol line to be refused, got {other:?}"),
         }
     }
 }

@@ -55,6 +55,17 @@ const SHA256_HEX_LEN: usize = 64;
 /// well and matches nothing is worse than no field.
 pub const KNOWN_PLATFORMS: &[&str] = &["linux", "macos", "windows"];
 
+/// The largest batch an entry may declare in `invoke.batch`.
+///
+/// A batch shares one argv and one timeout, so the number trades startup
+/// overhead against blast radius: every answer in a batch is lost together when
+/// the invocation dies, and one pathological image can spend the whole budget
+/// for the rest. 256 keeps the saving (a 0.62 second per image startup cost
+/// falls below 3 milliseconds amortised) while keeping a loss to a few seconds
+/// of rework, and keeps the command line far inside what the kernel accepts
+/// even with long corpus paths.
+pub const MAX_BATCH: u32 = 256;
+
 /// A registered tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -512,6 +523,31 @@ pub struct Invoke {
     /// Meaningless without `host`, and refused there rather than ignored.
     #[serde(default)]
     pub endpoint_env: Option<String>,
+    /// How many images this tool may be asked about in ONE invocation.
+    ///
+    /// Absent, or 1, means one image per process, which is what every entry did
+    /// before this existed and remains the default. A higher number lets the
+    /// host hand the tool a batch, which matters because the per invocation
+    /// cost is not small: starting a container and importing the interpreter
+    /// measured 0.62 seconds per image on the build box, against 0.1 seconds of
+    /// actual work for zsteg. Nine tenths of that run was overhead, and at
+    /// Core tier, where the corpus is hundreds of thousands of images, that
+    /// overhead is days.
+    ///
+    /// **A tool only gets a batch if it can actually read one.** This is a
+    /// statement about the command, not a preference: StegExpose already takes
+    /// a directory, and an adapter we write can loop, but a CLI that accepts
+    /// exactly one filename cannot be batched by asking louder. Declaring a
+    /// batch for a tool that ignores the extra arguments would score the first
+    /// image N times and attribute the answer to N different files.
+    ///
+    /// The protocol a batch has to honour is keyed output, one line per image
+    /// as `<path>\t<score>`, because the alternative is positional and
+    /// positional output misattributes silently the first time a tool skips an
+    /// unreadable file. A wrong number that looks right is the fault this
+    /// project exists to prevent, so the mapping is explicit or it is refused.
+    #[serde(default)]
+    pub batch: Option<u32>,
     /// Which built-in parser reads the output. Named rather than described,
     /// because these formats are quirky enough that a rule in TOML would be a
     /// small programming language nobody wants to debug.
@@ -1067,6 +1103,56 @@ impl Entry {
                          address in a file is a default and a default is scored \
                          against whatever answers on it"
                     ));
+                }
+            }
+
+            if let Some(batch) = inv.batch {
+                if batch == 0 {
+                    bad.push(
+                        "invoke.batch is 0, which asks the tool about no images \
+                         at all. Leave it out for one image per invocation"
+                            .into(),
+                    );
+                }
+                if batch > MAX_BATCH {
+                    bad.push(format!(
+                        "invoke.batch is {batch}, above the cap of {MAX_BATCH}. \
+                         A batch is one argv and one timeout: too large and a \
+                         single slow image spends the whole budget, every answer \
+                         in the batch is lost together, and the command line can \
+                         exceed what the kernel accepts"
+                    ));
+                }
+                // The placeholder is how the paths reach the command. Without
+                // it a batched entry would launch the tool with one file named
+                // and silently score that file N times, attributing one answer
+                // to N different images.
+                if batch > 1 && !inv.argv.iter().any(|a| a == "{files}") {
+                    bad.push(format!(
+                        "invoke.batch is {batch} but no argv entry is exactly \
+                         {{files}}, so the batch would never reach the tool. It \
+                         would be asked about one image and its answer recorded \
+                         against {batch}. The placeholder stands on its own \
+                         because it expands to one argument per image, so it \
+                         cannot be glued to other text"
+                    ));
+                }
+                if batch > 1 && inv.argv.iter().any(|a| a.contains("{file}")) {
+                    bad.push(
+                        "invoke.argv uses both {file} and a batch above 1. \
+                         {file} names a single image, so the two cannot both be \
+                         honoured; use {files} for a batched entry"
+                            .into(),
+                    );
+                }
+                if batch > 1 && inv.output_file.is_some() {
+                    bad.push(
+                        "invoke.batch above 1 with invoke.output_file: one file \
+                         cannot carry answers keyed to each image of a batch \
+                         unless the tool writes them keyed, which this build \
+                         does not read. Batch through stdout instead"
+                            .into(),
+                    );
                 }
             }
         }

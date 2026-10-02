@@ -155,6 +155,15 @@ fn run_one(
 
     args.push(image.into());
     args.extend(invoke.argv.iter().map(|a| {
+        // `{files}` is honoured here as a batch of one, so a batched entry can
+        // still be asked about a single image. The self-test depends on it:
+        // `doctor` checks two fixtures one at a time, and an entry whose argv
+        // only speaks the batch placeholder would otherwise be handed the
+        // literal string `{files}` and fail for a reason that has nothing to do
+        // with the detector.
+        if a == "{files}" {
+            return inner.clone();
+        }
         a.replace("{file}", &inner)
             .replace("{adapter}", &adapter_inner)
     }));
@@ -208,6 +217,17 @@ fn run_one(
 
     raw.stdout = text.clone();
     raw.stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // A batched entry speaks the keyed protocol whatever the batch size, so one
+    // image still arrives as `<path>\t<answer>` and has to be read that way.
+    // Reading it with the plain parser would see a line that is not a number
+    // and report a working detector as broken, which is how `doctor` would
+    // start lying about an entry the moment it declared a batch.
+    if invoke.batch.is_some_and(|b| b > 1) {
+        let keys = vec![inner.clone()];
+        return parsers::parse_keyed(&invoke.parser, &text, &raw.stderr.clone(), &keys)
+            .pop()
+            .unwrap_or_else(|| Reading::Failed("the batch parser returned nothing".into()));
+    }
     parsers::parse(&invoke.parser, &text, &raw.stderr.clone())
 }
 
@@ -296,6 +316,125 @@ pub fn read_one_observed(
         (_, Some(_)) => run_binary(entry, fixture, timeout, raw),
         _ => Reading::Failed("entry declares neither an image nor a binary".into()),
     }
+}
+
+/// Ask this tool about SEVERAL files in one invocation.
+///
+/// Returns one reading per input, at the same index, always: a batch that dies
+/// produces a failure for every image in it rather than a short list the caller
+/// would have to align itself.
+///
+/// WHY THIS EXISTS
+/// ---------------
+/// Starting a container and importing an interpreter measured 0.62 seconds per
+/// image on the build box, against 0.1 seconds of actual work for zsteg. Nine
+/// tenths of that run was overhead that scales with the corpus, and the Core
+/// tier is hundreds of thousands of images, so it is days of pure startup.
+///
+/// Only an entry declaring `invoke.batch` above 1 is ever routed here, because
+/// a tool that reads exactly one filename cannot be batched by being handed
+/// more. See [`stegobench_core::registry::Invoke::batch`].
+pub fn read_many_observed(
+    entry: &Entry,
+    files: &[PathBuf],
+    timeout: Duration,
+    adapter_roots: &[PathBuf],
+    raw: &mut Raw,
+) -> Vec<Reading> {
+    let fail = |why: String| vec![Reading::Failed(why); files.len()];
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let Some(invoke) = &entry.invoke else {
+        return fail("entry declares no invoke block".into());
+    };
+    // A host adapter and a bare binary are both one-at-a-time today. Routed
+    // back rather than refused, so declaring a batch never makes a working
+    // entry stop working.
+    if invoke.host || entry.image.is_none() {
+        return files
+            .iter()
+            .map(|f| read_one_observed(entry, f, timeout, adapter_roots, &mut Raw::default()))
+            .collect();
+    }
+    let Some(image) = &entry.image else {
+        return fail("entry declares no image".into());
+    };
+
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+    args.extend(SANDBOX.iter().map(|s| s.to_string()));
+
+    // Each image is mounted at a name this host chose, numbered by its position
+    // in the batch. NOT at its own basename: every arm restarts its numbering
+    // at 000000, so a batch spanning two arms would mount two different
+    // photographs at one path and the second would shadow the first. The
+    // numbered name is also the key the tool echoes back, so the mapping from
+    // answer to image is a string this code constructed rather than a guess.
+    let mut keys: Vec<String> = Vec::with_capacity(files.len());
+    for (i, file) in files.iter().enumerate() {
+        let Ok(absolute) = file.canonicalize() else {
+            return fail(format!("{} not found", file.display()));
+        };
+        let ext = absolute
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        let inner = format!("/work/{i:06}{ext}");
+        args.push("-v".into());
+        args.push(format!("{}:{}:ro", absolute.display(), inner));
+        keys.push(inner);
+    }
+
+    let mut adapter_inner = String::new();
+    if let Some(rel) = &invoke.adapter {
+        let abs = match crate::adapter::resolve(rel, adapter_roots) {
+            Ok(p) => p,
+            Err(why) => return fail(why.to_string()),
+        };
+        let Some(base) = abs.file_name().and_then(|n| n.to_str()) else {
+            return fail("adapter has no usable filename".into());
+        };
+        adapter_inner = format!("/adapter/{base}");
+        args.push("-v".into());
+        args.push(format!("{}:{}:ro", abs.display(), adapter_inner));
+    }
+
+    for kv in &invoke.env {
+        args.push("-e".into());
+        args.push(kv.clone());
+    }
+    if let Some(ep) = &invoke.entrypoint {
+        args.push("--entrypoint".into());
+        args.push(ep.clone());
+    }
+    args.push(image.reference.clone());
+
+    // `{files}` stands alone and expands to one argument per image, which is
+    // why the registry refuses it glued to other text.
+    for a in &invoke.argv {
+        if a == "{files}" {
+            args.extend(keys.iter().cloned());
+        } else {
+            args.push(a.replace("{adapter}", &adapter_inner));
+        }
+    }
+
+    let mut docker = Command::new("docker");
+    docker.args(&args);
+    let out = match crate::exec::captured(docker, "the container", timeout) {
+        Ok(out) => out,
+        // Every image in the batch shares the one invocation, so they share its
+        // fate. Said per image so the records file still has a line each and a
+        // resume does not have to reason about which of them were attempted.
+        Err(e) => return fail(format!("the batch of {} failed: {e}", files.len())),
+    };
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    raw.stdout = stdout.clone();
+    raw.stderr = stderr.clone();
+    parsers::parse_keyed(&invoke.parser, &stdout, &stderr, &keys)
 }
 
 /// Ask this tool about one file, dispatching on whichever kind of plugin the
