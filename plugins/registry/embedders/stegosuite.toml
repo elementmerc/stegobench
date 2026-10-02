@@ -13,6 +13,11 @@ without them beside it would not be compliant, so whoever pushes it writes
 them into the image description at the same time.
 """
 maintainer = "third_party"
+notes = """
+No round trip is declared, so nothing here drives this entry and `doctor`
+cannot self-test it. The entry records the licence, the provenance and the
+cost; embedding with it is somebody's own job at the command line.
+"""
 
 [image]
 reference = "stegobench/stegosuite@sha256:f3d9110af92cf4eea396a9a8b4aaa61bc67160e2f316b1db36f57f9b9f216906"

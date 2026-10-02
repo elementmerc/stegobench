@@ -32,10 +32,36 @@
 //! turns them into instructions.
 
 use stegobench_core::corpus::{CorpusEntry, LicenceStatus};
-use stegobench_core::registry::Entry;
+use stegobench_core::registry::{Entry, Kind};
 use stegobench_plugin::availability::{Availability, Presence};
 
-/// Whether the thing is usable right now, in four answers rather than two.
+/// Can the harness run this entry at all, as the entry is written?
+///
+/// Delegates to the entry, which owns the rule: it is a fact about the shape
+/// of the TOML rather than about this machine. Kept as a function here so the
+/// readers of it read one name.
+pub fn can_be_driven(entry: &Entry) -> bool {
+    entry.can_be_driven()
+}
+
+/// Why the harness cannot drive this entry, in one clause that follows the
+/// entry's name.
+///
+/// Derived from which block is missing rather than written per entry, so a
+/// new undrivable entry gets the sentence without anybody remembering to add
+/// one, and so the two readers of this answer cannot word it differently.
+pub fn undrivable_because(entry: &Entry) -> String {
+    let block = match entry.kind {
+        Kind::Detector => "invoke",
+        Kind::Embedder => "roundtrip",
+    };
+    format!(
+        "declares no {block} block, so nothing in its registry entry says \
+         what command to launch and the host has no way to drive it"
+    )
+}
+
+/// Whether the thing is usable right now, in five answers rather than two.
 ///
 /// `Unknown` is load-bearing and is not a polite way of saying no. A service
 /// whose address nobody has supplied is not missing, and a container runtime
@@ -51,6 +77,15 @@ pub enum Readiness {
     /// This entry cannot run on this machine at all, so nothing to install
     /// would change it.
     CannotRunHere,
+    /// The code may well be here; nothing in the entry says how to drive it.
+    ///
+    /// A JOURNEY FOUND THIS AS A CONTRADICTION BETWEEN THREE SURFACES.
+    /// `aletheia-rich` has its image on the machine, so `describe` said
+    /// "stegobench can run it" and `list` showed it among the detectors,
+    /// while `plan` and `score` refused it for declaring no invoke block.
+    /// Presence was standing in for drivability, and the reader was left to
+    /// work out which of the three commands was lying.
+    CannotBeDriven,
     /// Whether it is ready could not be established.
     Unknown,
 }
@@ -63,6 +98,7 @@ impl Readiness {
             Readiness::Ready => "ready",
             Readiness::NeedsYou => "NEEDS YOU",
             Readiness::CannotRunHere => "n/a here",
+            Readiness::CannotBeDriven => "undrivable",
             Readiness::Unknown => "unknown",
         }
     }
@@ -73,6 +109,7 @@ impl Readiness {
             Readiness::Ready => "ready",
             Readiness::NeedsYou => "needs_you",
             Readiness::CannotRunHere => "cannot_run_here",
+            Readiness::CannotBeDriven => "cannot_be_driven",
             Readiness::Unknown => "unknown",
         }
     }
@@ -178,6 +215,20 @@ pub fn of_tool(
             readiness: Readiness::CannotRunHere,
             steps: vec![Step::just(format!(
                 "{reason}. Nothing to install will change it."
+            ))],
+        };
+    }
+
+    // Asked before anything about this machine, because the answer is a
+    // property of the entry: pulling the image would not make it drivable, so
+    // telling the reader to pull it would be sending them to fetch something
+    // no run here will ever execute.
+    if !can_be_driven(entry) {
+        return Needs {
+            readiness: Readiness::CannotBeDriven,
+            steps: vec![Step::just(format!(
+                "This entry {}. Nothing you install will change that.",
+                undrivable_because(entry)
             ))],
         };
     }
@@ -399,6 +450,12 @@ mod tests {
 
     const SELFTEST: &str = "\n[selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n";
 
+    /// The block that makes a fixture detector drivable, which three of these
+    /// fixtures used to leave out while asserting the entry was ready. A
+    /// detector with no `[invoke]` is one nothing here can run, so those
+    /// three were modelling an entry the registry would refuse to drive.
+    const INVOKE: &str = "\n[invoke]\nargv = [\"{file}\"]\nparser = \"number\"\n";
+
     fn availability(entry: &Entry) -> Availability {
         stegobench_plugin::availability::check(entry, &[])
     }
@@ -418,13 +475,13 @@ mod tests {
         let digest = "5".repeat(64);
         let container = entry(&format!(
             "name = \"c\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
-             [image]\nreference = \"ghcr.io/x/y@sha256:{digest}\"\nsize_mb = 42\n{SELFTEST}"
+             [image]\nreference = \"ghcr.io/x/y@sha256:{digest}\"\nsize_mb = 42\n{INVOKE}{SELFTEST}"
         ));
         let binary = entry(&format!(
             "name = \"b\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
              upstream = \"https://example.invalid/b\"\n\
              [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
-             version_args = [\"--version\"]\n{SELFTEST}"
+             version_args = [\"--version\"]\n{INVOKE}{SELFTEST}"
         ));
         let service = entry(&format!(
             "name = \"s\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
@@ -454,7 +511,8 @@ mod tests {
         let digest = "5".repeat(64);
         let e = entry(&format!(
             "name = \"c\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
-             [image]\nreference = \"ghcr.io/x/y@sha256:{digest}\"\nsize_mb = 42\n{SELFTEST}"
+             [image]\nreference = \"ghcr.io/x/y@sha256:{digest}\"\nsize_mb = 42\n\
+             {INVOKE}{SELFTEST}"
         ));
         // Built by hand rather than probed, so the test says the same thing on
         // a machine with the image pulled and on one without a runtime at all.
@@ -536,7 +594,7 @@ mod tests {
         let e = entry(&format!(
             "name = \"x\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
              secrets = [\"STEGOBENCH_TEST_TOKEN_UNSET\"]\n\
-             [binary]\ncommand = [\"sh\"]\nversion_args = [\"--version\"]\n{SELFTEST}"
+             [binary]\ncommand = [\"sh\"]\nversion_args = [\"--version\"]\n{INVOKE}{SELFTEST}"
         ));
         let av = Availability {
             name: e.name.clone(),
@@ -560,7 +618,7 @@ mod tests {
     fn a_tool_with_everything_in_place_says_so_and_prints_nothing() {
         let e = entry(&format!(
             "name = \"x\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
-             [binary]\ncommand = [\"sh\"]\nversion_args = [\"--version\"]\n{SELFTEST}"
+             [binary]\ncommand = [\"sh\"]\nversion_args = [\"--version\"]\n{INVOKE}{SELFTEST}"
         ));
         let av = Availability {
             name: e.name.clone(),

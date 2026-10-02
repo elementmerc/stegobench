@@ -628,6 +628,9 @@ fn readiness_word(needs: &needs::Needs, kind: &str, name: &str) -> String {
     if needs.readiness == needs::Readiness::Ready {
         return "stegobench can run it".to_string();
     }
+    if needs.readiness == needs::Readiness::CannotBeDriven {
+        return "stegobench cannot drive it".to_string();
+    }
     needs.readiness.word().to_string()
 }
 
@@ -656,7 +659,17 @@ fn describe_block(
              works.\n"
         ));
     } else {
-        text.push_str(&format!("\nNeeds from you:\n{steps}\n"));
+        // Two of the five states are properties of the entry or the machine
+        // rather than a list of jobs, and "Needs from you:" over "nothing you
+        // install will change that" asks the reader to resolve a
+        // contradiction the heading created.
+        let heading = match needs.readiness {
+            needs::Readiness::CannotRunHere | needs::Readiness::CannotBeDriven => {
+                "Why you can't use it here:"
+            }
+            _ => "Needs from you:",
+        };
+        text.push_str(&format!("\n{heading}\n{steps}\n"));
     }
     text.push_str(&format!(
         "\nThe registered entry in full: stegobench describe {name} --toml"
@@ -4904,6 +4917,8 @@ mod tests {
             "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
              [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
              version_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"number\"\n\
              [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
         )
         .expect("written");
@@ -5175,6 +5190,100 @@ mod tests {
             assert_eq!(corpus.validate(), Ok(()), "{id} is registered but invalid");
             assert_eq!(id, &corpus.id, "keyed under a name that is not its id");
         }
+    }
+
+    /// Three commands read one registry, and they have to agree about whether
+    /// an entry is usable.
+    ///
+    /// RAISED BY A JOURNEY, 2026-10-02. With `aletheia-rich`'s image on the
+    /// machine, `describe` said "stegobench can run it" and `list detectors`
+    /// showed it beside the six that work, while `plan` said it "declares no
+    /// invoke block, so nothing in its registry entry says what command to
+    /// launch". The reader was left to work out which of the three was wrong,
+    /// and the honest answer was the two that sounded encouraging.
+    ///
+    /// Written over the registry this repository ships rather than a fixture,
+    /// because the contradiction needed a real entry to appear at all: every
+    /// fixture in `needs` modelled a detector that was present and drivable,
+    /// and three of them modelled one that was present and could never have
+    /// been driven while asserting it was ready.
+    ///
+    /// Presence is supplied here rather than probed, so the answer is the same
+    /// on a machine with every image pulled and on one with no container
+    /// runtime, and so the test cannot pass by finding nothing present.
+    #[test]
+    fn no_surface_calls_an_entry_usable_that_nothing_here_can_drive() {
+        let reg = Registry::load(&shipped_registry()).expect("the real registry loads");
+        assert!(
+            !reg.entries.is_empty(),
+            "no tools were loaded from {}, so this test verified nothing",
+            shipped_registry().display()
+        );
+        let mut undrivable = 0;
+        for entry in reg.entries.values() {
+            let present = stegobench_plugin::availability::Availability {
+                name: entry.name.clone(),
+                presence: stegobench_plugin::availability::Presence::Present {
+                    pin: "supplied by the test".into(),
+                },
+                verified: None,
+                missing_secrets: Vec::new(),
+            };
+            let needs = needs::of_tool(entry, &present, &[]);
+            let word = readiness_word(&needs, "tool", &entry.name);
+            let row = entry.summary();
+            if entry.can_be_driven() {
+                assert_eq!(
+                    needs.readiness,
+                    needs::Readiness::Ready,
+                    "{} is drivable and present and was not reported ready",
+                    entry.name
+                );
+                assert!(
+                    !row.contains("can't drive it"),
+                    "{} is drivable and its listing row says otherwise: {row}",
+                    entry.name
+                );
+                continue;
+            }
+            undrivable += 1;
+            assert_eq!(
+                needs.readiness,
+                needs::Readiness::CannotBeDriven,
+                "{} declares nothing to drive and was reported otherwise",
+                entry.name
+            );
+            assert_ne!(
+                word, "stegobench can run it",
+                "describe says it can run {}, which no command here can",
+                entry.name
+            );
+            assert!(
+                row.contains("can't drive it"),
+                "{} sits in the listing unmarked: {row}",
+                entry.name
+            );
+            // The adapter roots are empty and no probe should be needed: the
+            // answer is a property of the entry, so it is reached without
+            // asking this machine anything.
+            let why = stegobench_cli::unavailable_reason(entry, &[])
+                .unwrap_or_else(|| panic!("{} would be run by score and plan", entry.name));
+            assert!(
+                why.contains("block"),
+                "{} is skipped for a reason that does not name the missing \
+                 block: {why}",
+                entry.name
+            );
+        }
+        // Not a claim about how many; a claim that the undrivable branch above
+        // was entered at all. Zero would mean every assertion in it was
+        // skipped and this test measured only the easy half.
+        assert!(
+            undrivable > 0,
+            "no registered entry is undrivable, so the branch that this test \
+             exists for was never reached. If that is now true of the \
+             registry, delete this assertion and say so."
+        );
     }
 
     /// Every result document this repository ships must satisfy this
@@ -6928,6 +7037,8 @@ mod tests {
             "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
              [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
              version_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"number\"\n\
              [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
         )
         .unwrap();
@@ -7639,6 +7750,8 @@ mod tests {
             "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
              [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
              version_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"number\"\n\
              [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
         )
         .unwrap();
@@ -7813,6 +7926,8 @@ mod tests {
                 "name = \"ghost\"\nkind = \"detector\"\nlicence = \"MIT\"\n\
                  [binary]\ncommand = [\"definitely-not-installed-xyzzy\"]\n\
                  version_args = [\"--version\"]\n\
+                 [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+                 [invoke]\nargv = [\"{file}\"]\nparser = \"number\"\n\
                  [selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n",
             )
             .unwrap();

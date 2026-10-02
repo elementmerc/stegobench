@@ -1391,12 +1391,44 @@ impl Entry {
         // third column looks like a registry reference. It is the one thing on
         // this line that changes what the reader has to do next, and what the
         // run costs them in isolation.
+        // Marked in the listing because the listing is where a reader picks
+        // one. An entry nothing here can run sat among the others with no
+        // mark, and the reader found out by passing it to `score`.
+        let undrivable = if self.can_be_driven() {
+            String::new()
+        } else {
+            "  stegobench can't drive it".to_string()
+        };
         vec![
             self.name.clone(),
             self.licence.clone(),
             self.route().to_string(),
-            format!("{how}{secrets}"),
+            format!("{how}{secrets}{undrivable}"),
         ]
+    }
+
+    /// Can the harness run this entry at all, as the entry is written?
+    ///
+    /// Kind-dependent, because the two kinds are driven by different blocks: a
+    /// detector is launched from `[invoke]`, and an embedder's round trip from
+    /// `[roundtrip]`. Asking only about `[invoke]` would call every registered
+    /// embedder undrivable, which is wrong about all six of them.
+    ///
+    /// An entry that declares neither describes something a person can run by
+    /// hand and nothing here can drive, which is a real entry rather than a
+    /// gap: a feature extractor that decides nothing on its own is registered
+    /// for its licence, its provenance and its cost.
+    ///
+    /// Here rather than beside the readiness words that print it, because it
+    /// is a fact about the entry's shape. PRESENCE WAS STANDING IN FOR IT AND
+    /// THREE COMMANDS DISAGREED: with the image on the machine, `describe`
+    /// said "stegobench can run it" and `list` showed the entry among the
+    /// detectors, while `plan` and `score` refused it.
+    pub fn can_be_driven(&self) -> bool {
+        match self.kind {
+            Kind::Detector => self.invoke.is_some(),
+            Kind::Embedder => self.roundtrip.is_some(),
+        }
     }
 
     /// `container` or `local`: how this tool gets run, in one word.

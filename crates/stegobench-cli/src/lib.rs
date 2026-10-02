@@ -95,19 +95,25 @@ use stegobench_plugin::availability::Presence;
 /// project's own registry was reported as a fault in the user's corpus. It is
 /// a skip.
 ///
-/// Asked inside the Present arm rather than before the check, so a tool that
-/// is neither installed nor drivable is still answered with the half the
-/// reader can act on.
+/// ASKED BEFORE THE PRESENCE CHECK RATHER THAN INSIDE THE PRESENT ARM, WHICH
+/// IS A CHANGE FROM WHAT THIS COMMENT USED TO ARGUE. The old order answered an
+/// entry that was neither installed nor drivable with the install step, on the
+/// grounds that it was the half the reader could act on. It is not: installing
+/// a tool whose entry says nothing about what command to launch buys a reader
+/// a download and the same refusal afterwards, and for one registered entry
+/// that download is nine gigabytes. Drivability is a property of the entry, so
+/// it is terminal, and `needs::of_tool` decides it in the same position for
+/// the same reason. One rule, asked one way, because two commands reading one
+/// registry and disagreeing about whether an entry is usable is the defect a
+/// journey found here.
 pub fn unavailable_reason(
     entry: &stegobench_core::registry::Entry,
     adapter_roots: &[PathBuf],
 ) -> Option<String> {
+    if !crate::needs::can_be_driven(entry) {
+        return Some(crate::needs::undrivable_because(entry));
+    }
     match availability::check(entry, adapter_roots).presence {
-        Presence::Present { .. } if entry.invoke.is_none() => Some(
-            "declares no invoke block, so nothing in its registry entry says \
-             what command to launch and the host has no way to drive it"
-                .to_string(),
-        ),
         Presence::Present { .. } => None,
         Presence::Unsupported { reason } => Some(format!("cannot run on this machine: {reason}")),
         Presence::Absent { reason } => Some(format!(
