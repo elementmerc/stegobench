@@ -59,6 +59,7 @@ Nine cells, and they're saying four different kinds of thing.
 | Cell | What it means |
 |---|---|
 | A number | The detector computed a score and this is it. Higher means more suspicious, on that detector's own scale and nobody else's |
+| A negative number | Some detectors estimate how much payload an image carries, and an estimate can land below zero on an image carrying none. Read it as no evidence, the same as a small positive. It is not a stronger "clean" than zero, and the distance below zero means nothing |
 | `stego` or `clean` | The detector only gives a verdict. Somebody else already chose the threshold and threw the number away. See [Scores, not verdicts](/guide/scores) |
 | `unavailable` | This machine can't run that detector. `stegobench doctor` says what it needs |
 | `failed` | It ran and produced nothing readable. `--raw` is how you find out why |

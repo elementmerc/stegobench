@@ -30,6 +30,18 @@ the parts that are deliberately not finished.
   now says that rather than talking about scope: `decode`, `extract`, `reveal`
   and `unhide` explain that Stegobench asks detectors questions and does not
   pull hidden data out of pictures.
+- A detector that crashes is reported as having failed, not as having found
+  the image clean. A tool that exits without answering used to produce the
+  same cell as a tool that looked and found nothing, so four crashed runs
+  could read as four clean images with the command still exiting 0.
+- A detector asked about a format its own registry entry doesn't declare
+  still answers, and the table now says underneath which images those were
+  and that its answers about them are outside what it claims to support.
+- `stegobench examine --json` records the SHA-256 of every image it examined,
+  with the tool name and version beside them, so an examination can be filed
+  as a record of which bytes were looked at rather than which filenames.
+- `stegobench doctor` says `undrivable` rather than `present` for an entry
+  that declares no command to launch.
 - `stegobench fetch --out` names where a corpus goes. It was `--dest` while
   `embed`, `score` and `report` all said `--out`, so the README and the corpus
   guide both documented the name the rest of the tree teaches and the first

@@ -156,13 +156,17 @@ row, so a figure can't be lifted out without them. Rows are ordered by arm and
 then detector, never by score: it isn't a ranking and no ranking can be
 derived from it.
 
+This repository ships 21 real result documents under `results/v1`, so the
+command below needs a clone of it. Point `report` at a folder of your own
+results and it behaves the same way.
+
 ```sh
 stegobench report results/v1 --format markdown
 ```
 
-This repository ships 21 real result documents under `results/v1`. Every row
-is flagged `confounded`, which is the point: they're real measurements, and
-the report says what's wrong with them in the same cell as the number.
+Every row in those 21 is flagged `confounded`, which is the point: they're
+real measurements, and the report says what's wrong with them in the same
+cell as the number.
 
 ## The commands
 
