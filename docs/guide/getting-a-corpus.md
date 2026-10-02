@@ -98,8 +98,66 @@ it is missing, the command says so and downloads nothing.
 ### Where it puts things
 
 Under your user data directory by default, laid out by content address, so the
-same tier fetched from two different folders is downloaded once. `--dest` names
+same tier fetched from two different folders is downloaded once. `--out` names
 somewhere else, and `STEGOBENCH_CORPUS_DIR` sets it for good.
+
+## Obtaining a corpus that's published but not fetchable
+
+A corpus can be published and still have no download route on file, and
+Pentimento is the case that matters: its tiers are on the Internet Archive, on
+HuggingFace and on Kaggle, and `stegobench fetch pentimento-core --tier nano`
+refuses with exit 3 because the registry entry declares no route. The bytes are
+there; the command can't go and get them for you yet.
+
+Four steps get from a mirror to a number. `stegobench describe pentimento-core`
+prints the first one.
+
+**1. Download the shards and the checksum files.** The entry names the mirror.
+Each tier ships its shards plus `SHA256SUMS-covers` and `SHA256SUMS-arms`, and
+the files that say what the corpus is: `README.md`, `DATASHEET.md`,
+`LICENCES.md`, `SPLITS.md` and the attribution list.
+
+**2. Check them.**
+
+```sh
+sha256sum -c SHA256SUMS-covers
+```
+
+Do this before anything else. A shard that arrived truncated reads as a smaller
+corpus rather than as an error, which is the failure that doesn't announce
+itself.
+
+**3. Extract each shard into its own subdirectory under one root.** Shards are
+ordinary tar files, and the members inside one are named by position:
+`000000.png` and `000000.json`. Two shards therefore hold the same member
+names, so extracting several into one flat folder silently overwrites. One
+subdirectory per shard, named after what it holds, and `score` walks them:
+
+```sh
+mkdir -p corpus/covers corpus/lsb-0400
+tar xf pentimento-nano-covers-00000.tar -C corpus/covers
+tar xf pentimento-nano-lsb-0400-00000.tar -C corpus/lsb-0400
+```
+
+On Kaggle the shards are named `.tar.bin`, because Kaggle extracts anything
+ending in `.tar` as it's uploaded. The same `tar xf` opens them: a tar file is
+recognised by its contents rather than by its name.
+
+**4. Score the root.**
+
+```sh
+stegobench score --corpus ./corpus --detector <name>
+```
+
+Two things to expect. The clean images and the stego images have to be under
+one root, because a measurement needs both sides and `score` refuses a corpus
+holding only one. And Pentimento declares no records digest, so the run is
+marked `custom`: comparable with itself, not with somebody else's number. The
+[scores](/guide/scores) page says what that word costs you.
+
+`load_pentimento.py` ships beside the shards and reads a shard, a `.tar.bin`
+shard or a directory somebody has already extracted. It's the way in for
+training code; `score` needs the extracted directory above.
 
 ## Building your own instead
 

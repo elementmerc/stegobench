@@ -67,8 +67,11 @@ covers only. The Kaggle shards are named .tar.bin because Kaggle unpacks a \
 files.
 
 Shards are tar archives, so a tier has to be extracted before `stegobench \
-score` can read it. `load_pentimento.py` ships beside the shards and reads \
-either shape.\
+score` can read it. Extract each shard into its own subdirectory under one \
+root and point `--corpus` at the root: the members inside a shard are named \
+by position, so two shards hold the same names and extracting them into one \
+flat folder overwrites instead of failing. `load_pentimento.py` ships beside \
+the shards and reads a shard or an extracted directory alike.\
 """
 
 # NO [[download]] BLOCK YET, AND THAT IS THE HONEST STATE.
