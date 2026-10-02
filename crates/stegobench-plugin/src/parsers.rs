@@ -77,15 +77,50 @@ pub fn stegexpose(stdout: &str, _stderr: &str) -> Reading {
 /// indistinguishable from a confident "clean", which is how a broken tool
 /// starts looking like a working one.
 pub fn number(stdout: &str, stderr: &str) -> Reading {
+    // ONE QUESTION, ONE ANSWER, AND MORE THAN ONE IS NOT A DETAIL.
+    //
+    // This took the first finite number it found and ignored the rest, which
+    // reads as leniency and is misattribution. An adversarial researcher
+    // pointed a tool that prints several numbers per invocation at a run that
+    // asks about one image at a time, and every image was scored with the first
+    // of a set of answers that were not about it: the figures drifted upward
+    // across the run, the corpus is ordered clean images and then stego ones,
+    // and the measurement came out at AUC 1.0000 with `n_error: 0` and nothing
+    // said. A batching mistake in somebody's own adapter is the honest version
+    // of the same thing, and that one will happen to a careful researcher.
+    //
+    // So an ambiguous answer is refused. Nothing here can know which of several
+    // numbers was about the image that was asked about, and guessing is how a
+    // misread becomes a published figure.
+    let mut found: Vec<f64> = Vec::new();
     for line in stdout.lines() {
         if let Ok(v) = line.trim().parse::<f64>() {
             if v.is_finite() {
-                return Reading::Score(v);
+                found.push(v);
+                // Two is enough to know it is ambiguous, and a tool printing
+                // thousands of lines should not be collected into memory to
+                // find that out.
+                if found.len() > 1 {
+                    break;
+                }
             }
         }
     }
-    let why = stderr.lines().next_back().unwrap_or("no output").trim();
-    Reading::Failed(format!("no number on stdout: {why}"))
+    match found.len() {
+        1 => Reading::Score(found[0]),
+        0 => {
+            let why = stderr.lines().next_back().unwrap_or("no output").trim();
+            Reading::Failed(format!("no number on stdout: {why}"))
+        }
+        _ => Reading::Failed(format!(
+            "more than one number on stdout ({} and {}) for one image, and \
+             nothing here can know which is the answer. A tool asked about one \
+             image answers once; if it answers about several, declare \
+             invoke.batch and the keyed protocol so each answer names its own \
+             image",
+            found[0], found[1]
+        )),
+    }
 }
 
 /// Stegcore prints a JSON envelope; the score is in the first data record.
@@ -440,6 +475,48 @@ mod tests {
 
     fn keys(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("/work/{i:06}.png")).collect()
+    }
+
+    /// Rung 5 of the journey round, and the finding the persona ranked first of
+    /// the eight he found: a tool that answers about several images while being
+    /// asked about one had its first answer recorded against every image. The
+    /// answers drifted upward across the run, the corpus is ordered clean images
+    /// and then stego ones, and the result was AUC 1.0000 with `n_error: 0`.
+    #[test]
+    fn two_numbers_for_one_image_is_refused_rather_than_resolved_by_guessing() {
+        let got = number("0.05\n0.07\n", "");
+        match &got {
+            Reading::Failed(why) => {
+                assert!(why.contains("more than one number"), "{why}");
+                assert!(why.contains("0.05") && why.contains("0.07"), "{why}");
+                assert!(why.contains("invoke.batch"), "no route out is named: {why}");
+            }
+            other => panic!("an ambiguous answer was resolved by guessing: {other:?}"),
+        }
+    }
+
+    /// The honest single answer is untouched, including with the tool's own
+    /// chatter around it, because a parser that refuses everything is not a
+    /// stricter parser.
+    #[test]
+    fn one_number_among_prose_is_still_one_answer() {
+        assert_eq!(
+            number("reading image\n0.42\ndone\n", ""),
+            Reading::Score(0.42)
+        );
+    }
+
+    /// Nothing changed about the no-answer case, which has its own message and
+    /// must not be absorbed into the ambiguous one.
+    #[test]
+    fn no_number_at_all_still_says_so_in_its_own_words() {
+        match number("nothing numeric here\n", "it fell over") {
+            Reading::Failed(why) => {
+                assert!(why.contains("no number on stdout"), "{why}");
+                assert!(why.contains("it fell over"), "the tool's own words: {why}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

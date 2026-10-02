@@ -252,7 +252,18 @@ fn run_binary(entry: &Entry, fixture: &Path, timeout: Duration, raw: &mut Raw) -
     }
     let file = fixture.display().to_string();
     let mut argv: Vec<String> = bin.command[1..].to_vec();
-    argv.extend(invoke.argv.iter().map(|a| a.replace("{file}", &file)));
+    argv.extend(invoke.argv.iter().map(|a| {
+        // `{files}` as a batch of one, exactly as the container path treats it.
+        // The registry now refuses a batched binary entry outright, so nothing
+        // should reach here declaring one; this is the second layer, because a
+        // placeholder that survives into argv is handed to the tool as six
+        // literal characters and the tool fails for a reason that has nothing
+        // to do with the image it was asked about.
+        if a == "{files}" {
+            return file.clone();
+        }
+        a.replace("{file}", &file)
+    }));
 
     let mut program_cmd = Command::new(&path);
     program_cmd.args(&argv);
@@ -628,6 +639,49 @@ mod tests {
              [selftest]\nmust_detect = \"fixtures/a.png\"\nmust_clear = \"fixtures/b.png\"\n"
         ))
         .expect("parses")
+    }
+
+    /// The second layer under rung 5's `{files}` finding. The registry now
+    /// refuses a batched binary entry outright, so this entry cannot be written
+    /// in a TOML file any more; it is built here deliberately, because the
+    /// defence is that a placeholder must never be handed to a tool as literal
+    /// text whatever route it arrived by.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_handed_the_batch_placeholder_still_receives_a_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmp");
+        // Prints the argument it was given, so the test reads what the tool saw
+        // rather than what the harness believes it sent.
+        let script = tmp.path().join("echoer.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo v1; exit 0; }\n\
+             case \"$1\" in *a.png) echo 0.9 ;; *) echo 0.1 ;; esac\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let e = entry(&format!(
+            "[binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{{files}}\"]\nparser = \"number\"",
+            script.display().to_string()
+        ));
+        let fixture = tmp.path().join("a.png");
+        std::fs::write(&fixture, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        // 0.9 is the branch the script takes when it was given the path. The
+        // literal placeholder would take the other branch, so the assertion
+        // distinguishes a substituted argument from an unsubstituted one rather
+        // than merely checking that something came back.
+        assert_eq!(
+            read_one(&e, &fixture, Duration::from_secs(5), &[]),
+            Reading::Score(0.9),
+            "the tool was handed the placeholder instead of the image"
+        );
     }
 
     #[test]

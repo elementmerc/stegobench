@@ -1145,6 +1145,37 @@ impl Entry {
                             .into(),
                     );
                 }
+                // THE DECLARATION HAS TO BE ONE THE HOST CAN HONOUR.
+                //
+                // Batching is a container protocol in this build: the keyed
+                // output that keeps an answer attached to its own image is
+                // parsed only on the container path. A binary or host entry
+                // declaring a batch was quietly routed back to one image at a
+                // time, so the entry said one thing and the run did another,
+                // and `{files}` reached the tool as the literal six characters.
+                // An adversarial researcher registered exactly that, watched his
+                // probe log `ARG={files}`, and spent five minutes believing his
+                // own plugin was broken.
+                //
+                // Refused rather than downgraded, because a declaration nothing
+                // honours is worse than no declaration: it reads, to the person
+                // who wrote it and to anyone auditing the entry afterwards, as a
+                // property of the run.
+                if batch > 1 && (inv.host || self.image.is_none()) {
+                    bad.push(format!(
+                        "invoke.batch is {batch}, but this entry runs {}. \
+                         Batching needs the keyed output protocol, which this \
+                         build reads only from a container, so the batch could \
+                         not be honoured and {{files}} would reach the tool \
+                         unexpanded. Remove invoke.batch to be asked about one \
+                         image at a time, or give the entry a pinned image",
+                        if inv.host {
+                            "an adapter on the host"
+                        } else {
+                            "a locally installed binary"
+                        }
+                    ));
+                }
                 if batch > 1 && inv.output_file.is_some() {
                     bad.push(
                         "invoke.batch above 1 with invoke.output_file: one file \
@@ -1468,6 +1499,80 @@ must_clear = "b.png"
     }
 
     const A_REAL_DIGEST: &str = "59710f7b5fbaeb7c3b1d4333e64654c1721a3ddb60b489d8e54d5d0e8b269bfb";
+
+    /// Rung 5 of the journey round: a researcher registered a locally installed
+    /// binary with `batch = 4`, the entry loaded, `doctor` called it verified,
+    /// and the run asked it about one image at a time while handing it the six
+    /// literal characters `{files}`. He spent five minutes believing his own
+    /// plugin was broken, and nearly abandoned the line of enquiry that turned
+    /// out to be his best finding.
+    #[test]
+    fn a_batch_an_installed_binary_cannot_honour_is_refused_at_load() {
+        let binary = parse(
+            "[binary]\ncommand = [\"probe\"]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{files}\"]\nparser = \"number\"\nbatch = 4",
+        );
+        let problems = binary.validate().expect_err("a batched binary is refused");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("locally installed binary") && p.contains("invoke.batch is 4")),
+            "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    /// The host adapter route is the same case and gets the same refusal, said
+    /// in its own words so the reader is told which of the two they wrote.
+    #[test]
+    fn a_batch_a_host_adapter_cannot_honour_is_refused_too() {
+        let host = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{files}\"]\nparser = \"number\"\nbatch = 8\nhost = true",
+        );
+        let problems = host
+            .validate()
+            .expect_err("a batched host adapter is refused");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("an adapter on the host")),
+            "refused for the wrong reason: {problems:?}"
+        );
+    }
+
+    /// And the container entry that CAN honour it is refused for nothing here,
+    /// so the two tests above cannot be passing because every batch is refused.
+    #[test]
+    fn a_container_may_declare_a_batch() {
+        let image = parse(
+            "[image]\nreference = \"x@sha256:a\"\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{files}\"]\nparser = \"number\"\nbatch = 16",
+        );
+        let remaining = image.validate().err().unwrap_or_default();
+        assert!(
+            !remaining.iter().any(|p| p.contains("invoke.batch")),
+            "a container was refused its batch: {remaining:?}"
+        );
+    }
+
+    /// One image per invocation is the default and needs no image, because the
+    /// refusal is about the batch rather than about the route.
+    #[test]
+    fn an_unbatched_binary_is_not_caught_by_the_batch_rule() {
+        let binary = parse(
+            "[binary]\ncommand = [\"probe\"]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\nhigher_means_stego = true\n\
+             [invoke]\nargv = [\"{file}\"]\nparser = \"number\"",
+        );
+        let remaining = binary.validate().err().unwrap_or_default();
+        assert!(
+            !remaining.iter().any(|p| p.contains("invoke.batch")),
+            "an entry that declared no batch was told about one: {remaining:?}"
+        );
+    }
 
     /// A detector the host can actually drive has to say what it prints.
     ///
