@@ -440,6 +440,46 @@ pub struct Provenance {
     /// Absent where the run wrote no records file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub records: Option<RecordsRef>,
+    /// How many of the answers this document summarises were produced by THIS
+    /// run, and how many were already in the records file when it started.
+    ///
+    /// WHY A SEALED FIELD AND NOT A TERMINAL LINE
+    ///
+    /// Resuming is a real feature: a Core tier run is twenty two hours and an
+    /// interrupted one has to continue rather than restart. The records file is
+    /// therefore read as prior work, and an adversarial researcher wrote one by
+    /// hand: twenty perfect answers, scored, and zsteg came out at AUC 1.0000 on
+    /// JPEG DCT stego, sealed by this harness, with nothing edited afterwards.
+    ///
+    /// The terminal said so plainly ("nothing was scored", "20 resumed"). The
+    /// document said nothing at all, and the document is the artefact. Its only
+    /// trace was `elapsed_seconds: 0.008` for twenty container invocations,
+    /// which is outside the seal and which he then set to a plausible 14.392
+    /// without resealing anything.
+    ///
+    /// So the counts are here, inside the seal, where a reviewer reads them and
+    /// a forger cannot change them without breaking the digest. A run that
+    /// measured nothing now says so in the artefact as well as in the terminal.
+    #[serde(default)]
+    pub answers: AnswerSource,
+}
+
+/// Where the answers behind a result came from.
+///
+/// Zero everywhere is what a document written before this field existed means,
+/// and it is honest: nobody recorded it. A reader cannot tell such a document's
+/// resumed count, which is the same thing the absence always meant.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema, PartialOrd,
+)]
+pub struct AnswerSource {
+    /// Answers this run obtained by actually asking the detector.
+    pub measured: u64,
+    /// Answers already in the records file when this run started.
+    ///
+    /// Equal to the total means this run asked the detector nothing, and every
+    /// figure above summarises somebody else's file.
+    pub resumed: u64,
 }
 
 /// The digest and record count of a per-item scores file.
@@ -707,6 +747,53 @@ pub struct Declarations {
     /// had produced it. A field that defaults to the flattering answer is
     /// worse than no field.
     pub self_reported: bool,
+    /// What the pairing check actually did, as counts.
+    ///
+    /// WHY A VERDICT WAS NOT ENOUGH
+    ///
+    /// `pairing` has three values and an adversarial researcher found that two
+    /// of them are reachable from the same corpus, in the flattering direction,
+    /// by a one-field edit. A stego record naming a clean half that the corpus
+    /// does not contain cannot be compared against anything, so the run says
+    /// `unverified`; delete that field and the check falls back to the cover,
+    /// finds the format difference, and says `confounded`. Same bytes, same
+    /// confound, and `help results` tells a reader to treat `unverified` as
+    /// "nothing is claimed" rather than as a warning. A submitter who wants the
+    /// mild badge points `clean` at a file they do not ship.
+    ///
+    /// The fallback is not the answer: for a JPEG arm the cover is the crop the
+    /// clean half was encoded from, so it differs in format by construction and
+    /// comparing against it reports a correctly paired arm as confounded. That
+    /// was a real defect and it was fixed by not falling back.
+    ///
+    /// So the counts travel with the verdict. `unverified` beside
+    /// `named_a_half_not_here: 200` is a corpus that asked to be checked against
+    /// files it did not provide, which is a different statement from a corpus
+    /// whose records never claimed anything, and a reviewer can now see which
+    /// one they have.
+    #[serde(default)]
+    pub pairing_evidence: PairingEvidence,
+}
+
+/// How many pairs the pairing check reached, and what it found.
+///
+/// Counts rather than a verdict, because the verdict alone cannot distinguish a
+/// corpus that made no claim from one whose claims pointed at files it did not
+/// ship. Zero everywhere is what a document written before this field existed
+/// means, and that is honest: nobody recorded it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema, PartialOrd,
+)]
+pub struct PairingEvidence {
+    /// Pairs where both halves were read and compared.
+    pub compared: u64,
+    /// Pairs that could not be compared because the record named a clean half
+    /// the corpus does not contain, or because an image's header could not be
+    /// read. **The flattering failure**: it reads as `unverified` while the
+    /// corpus is the thing at fault.
+    pub named_a_half_not_here: u64,
+    /// Pairs that were compared and differed in more than the payload.
+    pub differed: u64,
 }
 
 /// Whether this measurement is comparable to anybody else's.
@@ -1481,6 +1568,10 @@ mod tests {
                 network_reachable: false,
                 host: None,
                 records: None,
+                answers: AnswerSource {
+                    measured: 6,
+                    resumed: 0,
+                },
             },
             declarations: Declarations {
                 split_discipline: SplitDiscipline::ByCover,
@@ -1489,6 +1580,11 @@ mod tests {
                 trained_on: None,
                 contaminated: false,
                 self_reported: false,
+                pairing_evidence: PairingEvidence {
+                    compared: 6,
+                    named_a_half_not_here: 0,
+                    differed: 0,
+                },
             },
             content_digest: None,
         }

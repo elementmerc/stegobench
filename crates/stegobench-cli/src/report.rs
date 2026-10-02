@@ -559,9 +559,42 @@ fn to_row(source: &Path, r: Result1) -> Row {
         Pairing::Confounded => {
             flags.push("CONFOUNDED: the pair differs in more than the payload".to_string())
         }
+        // THE TWO UNVERIFIED CASES ARE NOT THE SAME CLAIM.
+        //
+        // One is a corpus whose records never said what the clean half was, and
+        // "nothing could be compared" is the whole truth about it. The other is
+        // a corpus whose records named a clean half it did not ship, which a
+        // researcher demonstrated is reachable from a confounded corpus by
+        // pointing one field at a file that is not there: the check cannot run,
+        // the row says `unverified`, and `help results` tells a reader to treat
+        // that as "nothing is claimed" rather than as a warning. Separated here
+        // because this table is what a reviewer reads.
+        Pairing::Unverified if r.declarations.pairing_evidence.named_a_half_not_here > 0 => flags
+            .push(format!(
+                "PAIRING UNVERIFIED: {} pair(s) name a clean half this corpus \
+                 does not contain, so the rule could not be checked on a corpus \
+                 that asked for it to be",
+                r.declarations.pairing_evidence.named_a_half_not_here
+            )),
         Pairing::Unverified => {
             flags.push("PAIRING UNVERIFIED: nothing could be compared".to_string())
         }
+    }
+    // A RUN THAT ASKED THE DETECTOR NOTHING IS NOT A MEASUREMENT OF IT.
+    //
+    // Resuming is legitimate and a Core tier run depends on it, so this is not
+    // a refusal. But a document whose every answer came off disk summarises a
+    // file this run did not produce, and a researcher demonstrated the obvious
+    // consequence: hand-write the file, score it, and the harness seals a
+    // perfect result without anything being edited afterwards. The terminal
+    // said so; this table did not, and this table is what a reviewer reads.
+    if r.provenance.answers.resumed > 0 && r.provenance.answers.measured == 0 {
+        flags.push(format!(
+            "NOTHING MEASURED HERE: all {} answer(s) were already in the \
+             records file, so this run summarised them rather than producing \
+             them",
+            r.provenance.answers.resumed
+        ));
     }
     if r.declarations.split_discipline == SplitDiscipline::ByFile {
         flags.push("SPLIT BY FILE: inflates every number here".to_string());
@@ -1714,6 +1747,11 @@ mod tests {
         auc: f64,
         n_error: u64,
         trained_on: Option<String>,
+        /// Stego images naming a clean half the corpus does not contain.
+        named_a_half_not_here: u64,
+        /// Answers already on disk when the run started, and answers it took.
+        resumed: u64,
+        measured: u64,
     }
 
     impl Default for Doc {
@@ -1729,6 +1767,9 @@ mod tests {
                 auc: 0.9,
                 n_error: 0,
                 trained_on: None,
+                named_a_half_not_here: 0,
+                resumed: 0,
+                measured: 10,
             }
         }
     }
@@ -1740,6 +1781,11 @@ mod tests {
                 "pairing": self.pairing,
                 "configuration": self.configuration,
                 "self_reported": false,
+                "pairing_evidence": {
+                    "compared": 10 - self.named_a_half_not_here,
+                    "named_a_half_not_here": self.named_a_half_not_here,
+                    "differed": 0,
+                },
             });
             if let Some(t) = &self.trained_on {
                 declarations["trained_on"] = serde_json::json!(t);
@@ -1782,6 +1828,10 @@ mod tests {
                     "started_utc": "2026-09-27T00:00:00Z",
                     "elapsed_seconds": 1.0,
                     "network_reachable": false,
+                    "answers": {
+                        "measured": self.measured,
+                        "resumed": self.resumed,
+                    },
                 },
                 "declarations": declarations,
             })
@@ -1896,6 +1946,95 @@ mod tests {
                 "an outguess row does not say so: {row}"
             );
         }
+    }
+
+    /// Rung 5: a corpus that named a clean half it does not ship reads, in this
+    /// table, exactly like one that claimed nothing, and `help results` tells a
+    /// reader to treat that as "nothing is claimed" rather than as a warning. A
+    /// submitter reaches the mild badge from the damning one by pointing a
+    /// single field at a file they do not provide.
+    #[test]
+    fn a_corpus_that_named_a_clean_half_it_does_not_ship_says_which_in_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            pairing: "unverified".into(),
+            named_a_half_not_here: 7,
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        for format in [
+            ReportFormat::Text,
+            ReportFormat::Markdown,
+            ReportFormat::Csv,
+        ] {
+            let text = flat(&render(&report, format));
+            assert!(
+                text.contains("7 pair(s) name a clean half this corpus does not contain"),
+                "{format:?} did not say the corpus named a half it does not ship: {text}"
+            );
+        }
+    }
+
+    /// And a corpus that genuinely claimed nothing keeps the shorter sentence,
+    /// so the two cases cannot collapse back into one.
+    #[test]
+    fn a_corpus_that_claimed_nothing_is_not_accused_of_withholding_a_clean_half() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            pairing: "unverified".into(),
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(text.contains("nothing could be compared"), "{text}");
+        assert!(!text.contains("does not contain"), "{text}");
+    }
+
+    /// Rung 5: a hand-written records file, scored, yields a sealed document
+    /// claiming a perfect result with nothing edited afterwards. The terminal
+    /// said "nothing was scored"; this table said nothing, and this table is
+    /// what a reviewer reads.
+    #[test]
+    fn a_run_that_measured_nothing_says_so_in_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            auc: 1.0,
+            measured: 0,
+            resumed: 10,
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        for format in [
+            ReportFormat::Text,
+            ReportFormat::Markdown,
+            ReportFormat::Csv,
+        ] {
+            let text = flat(&render(&report, format));
+            assert!(
+                text.contains("NOTHING MEASURED HERE"),
+                "{format:?} published a resumed-only run as a measurement: {text}"
+            );
+            assert!(text.contains("all 10 answer(s)"), "{text}");
+        }
+    }
+
+    /// A run that resumed PART of its work is a normal interrupted run and must
+    /// not be flagged, or the flag becomes one a reader skips past.
+    #[test]
+    fn a_partly_resumed_run_is_not_accused_of_measuring_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        Doc {
+            measured: 6,
+            resumed: 4,
+            ..Doc::default()
+        }
+        .write(dir.path(), "a.json");
+        let report = build(&[dir.path().to_path_buf()]).unwrap();
+        let text = flat(&render(&report, ReportFormat::Text));
+        assert!(!text.contains("NOTHING MEASURED HERE"), "{text}");
     }
 
     #[test]

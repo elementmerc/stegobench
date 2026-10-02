@@ -1233,6 +1233,14 @@ where
             // Filled in after the run, below: the file is still being
             // appended to at this point.
             records: None,
+            // From the run's own tally rather than from the records file,
+            // because the file cannot say which of its lines this command
+            // wrote. Sealed, so a hand-written records file cannot claim to
+            // have been measured.
+            answers: stegobench_core::result::AnswerSource {
+                measured: tally.scored,
+                resumed: tally.resumed,
+            },
         },
         declarations: Declarations {
             split_discipline: checks.split,
@@ -1244,6 +1252,14 @@ where
             // whether that somebody owns the detector. The submission path
             // is what clears it.
             self_reported: true,
+            // The counts behind `pairing`, so a reviewer reading only this
+            // document can tell a corpus that claimed nothing from one whose
+            // claims named files it did not ship.
+            pairing_evidence: stegobench_core::result::PairingEvidence {
+                compared: checks.compared,
+                named_a_half_not_here: checks.unreadable,
+                differed: checks.pairing_breaks.count as u64,
+            },
         },
         content_digest: None,
     };
@@ -3523,6 +3539,50 @@ mod tests {
         assert_eq!(checks.unreadable, 1);
         assert!(checks.pairing_breaks.is_empty());
         assert_eq!(checks.pairing, Pairing::Unverified);
+    }
+
+    /// Rung 5 of the journey round, and the gap the two tests above sit either
+    /// side of without closing. Both verdicts are correct; the problem is that
+    /// one corpus can reach either of them by editing a single field, in the
+    /// flattering direction, and the verdict alone does not say which happened.
+    /// A submitter who wants the mild `unverified` badge instead of the damning
+    /// `confounded` one points `clean` at a file they do not ship.
+    #[test]
+    fn the_two_unverified_corpora_are_told_apart_by_the_counts_rather_than_the_verdict() {
+        let tmp = tempfile::tempdir().expect("tmp");
+
+        // Names a clean half it does not contain: uncomparable, and the corpus
+        // is the thing at fault.
+        let dangling = tmp.path().join("dangling");
+        jpeg_arm(
+            &dangling,
+            &jpeg(64, 64),
+            Some("a-digest-no-row-here-states"),
+        );
+        let dangling = check(&dangling).expect("checked");
+
+        // Claims nothing about a clean half AND has no cover to fall back to,
+        // so there was never anything to compare.
+        let silent = tmp.path().join("silent");
+        std::fs::create_dir_all(&silent).unwrap();
+        std::fs::write(silent.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(silent.join("c0.json"), r#"{"role":"clean","sha256":"a"}"#).unwrap();
+        std::fs::write(silent.join("s0.png"), png(64, 64, 8, 2, 9)).unwrap();
+        std::fs::write(silent.join("s0.json"), r#"{"role":"stego","sha256":"b"}"#).unwrap();
+        let silent = check(&silent).expect("checked");
+
+        // The verdict is the same for both, which is the finding.
+        assert_eq!(dangling.pairing, Pairing::Unverified);
+        assert_eq!(silent.pairing, Pairing::Unverified);
+        // The counts are not, which is the fix.
+        assert_eq!(
+            dangling.unreadable, 1,
+            "the dangling pointer was not counted"
+        );
+        assert_eq!(
+            silent.unreadable, 0,
+            "a corpus that claimed nothing was blamed"
+        );
     }
 
     #[test]
