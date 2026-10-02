@@ -29,6 +29,7 @@ import collections
 import json
 import math
 import pathlib
+import re
 import sys
 
 import numpy as np
@@ -120,16 +121,52 @@ def main(argv=None):
         print(f"no {args.tool}/{args.variant} arm in {args.scores}", file=sys.stderr)
         return 2
 
-    rng = np.random.default_rng(args.seed)
-    n = min(len(stego), len(clean))
-    picked_stego = [stego[i] for i in rng.choice(len(stego), n, replace=False)]
-    picked_clean = [clean[i] for i in rng.choice(len(clean), n, replace=False)]
-    picked = picked_stego + picked_clean
+    # Match each stego file to the cover it came from, rather than drawing the
+    # two sides independently. Drawing them independently discards the pairing
+    # the corpus was built with, and then nothing downstream can keep a cover
+    # and its twin in the same calibration fold.
+    def cover_of(row):
+        """The cover a row belongs to.
+
+        Clean files are named for the cover (`00004.png`); stego files embed
+        it (`image_04001_html_0.png`), so the digits are the join key and the
+        filename is not.
+        """
+        name = pathlib.PurePosixPath(row["path"]).name
+        match = re.search(r"image_(\d+)_", name)
+        return match.group(1) if match else name.split(".")[0]
+
+    clean_by_cover = {cover_of(r): r for r in clean}
+    # A cover can carry more than one stego file in an arm; take one, by path,
+    # so the result does not depend on the order the file happened to be read.
+    seen: dict[str, dict] = {}
+    for r in sorted(stego, key=lambda r: r["path"]):
+        seen.setdefault(cover_of(r), r)
+    matched = [
+        (clean_by_cover[c], r) for c, r in sorted(seen.items()) if c in clean_by_cover
+    ]
+    if not matched:
+        print(
+            f"no {args.tool}/{args.variant} stego file shares a filename with a "
+            f"clean cover, so the arm cannot be paired",
+            file=sys.stderr,
+        )
+        return 2
+
+    n = len(matched)
+    picked = [s for _, s in matched] + [c for c, _ in matched]
+    covers = [cover_of(s) for _, s in matched]
 
     scores = np.array([r[args.detector] for r in picked], dtype=float)
     labels = np.concatenate([np.ones(n, int), np.zeros(n, int)])
+    groups = np.array(covers + covers)
     lrs = cross_validated_lrs(
-        scores, labels, folds=args.folds, bound=args.bound, seed=args.seed
+        scores,
+        labels,
+        folds=args.folds,
+        bound=args.bound,
+        seed=args.seed,
+        groups=groups,
     )
 
     print(f"arm {args.tool}/{args.variant}, detector {args.detector.upper()}, "

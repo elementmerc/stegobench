@@ -78,7 +78,9 @@ def gather(panel: pathlib.Path, folds: int, seeds: int, perms: int):
             labels = np.concatenate([np.ones(len(ids), int), np.zeros(len(ids), int)])
             pairs = np.concatenate([np.arange(len(ids)), np.arange(len(ids))])
 
-            mean, sd, _ = observed_cllr(scores, labels, folds=folds, seeds=seeds)
+            mean, sd, _ = observed_cllr(
+                scores, labels, folds=folds, seeds=seeds, groups=pairs
+            )
             null = cllr_null(
                 scores, labels, permutations=perms, folds=folds, pairs=pairs, seeds=seeds
             )
@@ -124,17 +126,39 @@ def main(argv=None):
         1, 2, figsize=(7.2, 3.15), gridspec_kw={"width_ratios": [1.0, 1.2]}
     )
 
-    # (a) One cell's null. The structural arm, because its true Cllr is
-    # exactly 1.0 by construction and there is no argument about it.
-    pick = next((c for c in cells if c[0].startswith("structural")), cells[0])
-    arm, det, mean, sem, null, _ = pick
-    ax1.hist(null, bins=24, color="0.80", edgecolor="0.45", linewidth=0.5)
-    ax1.axvline(1.0, color="0.25", linestyle=":", linewidth=1.2, label="theoretical 1.000")
-    ax1.axvline(mean, color="black", linewidth=1.6, label=f"observed {mean:.3f}")
+    # (a) The known-truth arm under both fold schemes. Its two sides carry
+    # byte-identical scores, so the true Cllr is exactly 1.000 and there is no
+    # argument about it. Grouping folds by cover lands on it exactly;
+    # splitting pairs across folds does not, and the gap is what a draft of
+    # this paper mistook for a property of the estimator.
+    records = load(args.panel)
+    by_arm: dict[str, dict] = collections.defaultdict(dict)
+    for name, row in records.items():
+        by_arm[arm_of(name)][cover_id(name)] = row
+    clean_rows = by_arm["clean"]
+    st_rows = next(by_arm[a] for a in by_arm if a.startswith("structural"))
+    ids = sorted(set(st_rows) & set(clean_rows))
+    det_key = DETECTORS[0]
+    s = np.array([float(st_rows[c][det_key]) for c in ids])
+    c = np.array([float(clean_rows[c][det_key]) for c in ids])
+    scores = np.concatenate([s, c])
+    labels = np.concatenate([np.ones(len(ids), int), np.zeros(len(ids), int)])
+    pairs = np.concatenate([np.arange(len(ids)), np.arange(len(ids))])
+    _, _, grouped = observed_cllr(
+        scores, labels, folds=args.folds, seeds=args.seeds, groups=pairs
+    )
+    _, _, split = observed_cllr(scores, labels, folds=args.folds, seeds=args.seeds)
+
+    ax1.hist(split, bins=14, color="0.80", edgecolor="0.45", linewidth=0.5,
+             label="pairs split across folds")
+    ax1.axvline(float(np.mean(grouped)), color="black", linewidth=1.8,
+                label="folds grouped by cover")
+    ax1.axvline(1.0, color="0.25", linestyle=":", linewidth=1.2,
+                label="true value, 1.000")
     ax1.set_xlabel(r"$C_{llr}$")
-    ax1.set_ylabel("permutations")
-    ax1.set_title(f"(a) within-pair null, {arm}/{det}", fontsize=9)
-    ax1.legend(fontsize=7, frameon=False, loc="upper left")
+    ax1.set_ylabel("fold seeds")
+    ax1.set_title(f"(a) a known-truth arm, {SHORT[det_key]}", fontsize=9)
+    ax1.legend(fontsize=6.5, frameon=False, loc="upper right")
     ax1.tick_params(labelsize=8)
 
     # (b) Every cell against its own null band.
