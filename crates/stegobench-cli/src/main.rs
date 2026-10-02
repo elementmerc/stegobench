@@ -1181,6 +1181,10 @@ fn cmd_doctor(
             Verified::Answered(why) => {
                 format!("{}  ({why})", row.replace("not verified", "responded "))
             }
+            // An undrivable entry's state column already says so, and
+            // repeating the skip reason beside it printed the same fact
+            // twice in one line.
+            Verified::Skipped(_) if !entry.can_be_driven() => row,
             Verified::Skipped(why) if !no_selftest && check.presence.is_present() => {
                 format!("{row}  ({why})")
             }

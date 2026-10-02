@@ -30,6 +30,11 @@ the parts that are deliberately not finished.
   now says that rather than talking about scope: `decode`, `extract`, `reveal`
   and `unhide` explain that Stegobench asks detectors questions and does not
   pull hidden data out of pictures.
+- zsteg runs under the sandbox again, and its answers are its own rather than
+  its guesses. It's asked with `--no-file --no-strings`, so it reports what it
+  finds in the container and no longer runs the `file` command over every
+  extracted bitplane: that was what wrote a temporary file the sandbox forbids,
+  and what reported random bits from a clean photograph as an encryption key.
 - A detector that crashes is reported as having failed, not as having found
   the image clean. A tool that exits without answering used to produce the
   same cell as a tool that looked and found nothing, so four crashed runs

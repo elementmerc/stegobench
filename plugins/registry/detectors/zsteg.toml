@@ -49,7 +49,30 @@ cores_per_worker = 1
 # printed an ENOENT before it got to the real image. The scan itself was
 # unaffected, which is why it went unnoticed, but every run carried a Ruby
 # error somebody reading the output would reasonably think was theirs.
-argv = ["-a", "{file}"]
+#
+# `--no-file --no-strings`, AND THEY ARE WHAT MAKES THIS ENTRY WORK AT ALL.
+#
+# `--file` (on by default) runs the `file` command over everything zsteg
+# extracts, to guess what the bits are. It writes a tempfile to do it, and
+# under this project's read-only sandbox that is an immediate Ruby traceback
+# and exit 1: zsteg could not process a single image here, on any run, and
+# said so only on stderr. `--strings` is the other half, finding ASCII runs in
+# extracted bitplanes.
+#
+# Both are what made zsteg useless in both directions. Under the sandbox it
+# crashed on every image; given a writable /tmp it stopped crashing and
+# started calling random bits out of a CLEAN image an OpenPGP key or an
+# archive, which its own two-sided self-test caught. The earlier attempt to
+# fix this went at the sandbox (`--tmpfs /tmp`) and had to be reverted,
+# because loosening the sandbox cannot make a noisy check quiet.
+#
+# Turning the two heuristics off instead leaves exactly the arm this entry
+# declares and the self-test fixtures test: the structural one. Measured
+# 2026-10-03 under the real sandbox, three clean photographs give exit 0 and
+# zero finding markers, and an image with 29 bytes after IEND is still
+# reported with its payload. The scan over bitplanes still runs; what is gone
+# is guessing what the extracted bits mean, which was never this entry's job.
+argv = ["--no-file", "--no-strings", "-a", "{file}"]
 parser = "zsteg"
 
 [selftest]
