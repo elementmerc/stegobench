@@ -19,7 +19,8 @@ So this imports once and then answers about many images. It calls exactly the
 same functions `aletheia_one.py` calls, in the same way, with the same
 channel rule and the same treatment of negative estimates, so a batched run and
 an unbatched run of the same corpus produce the same numbers. If the two ever
-disagree the batched one is wrong, and `test_adapters.py` holds them to it.
+disagree the batched one is wrong, and `test_aletheia_adapters.py` holds them to
+it, including the case where an image part way through a batch fails.
 
 THE OUTPUT IS KEYED, AND THAT IS NOT A STYLE CHOICE
 ---------------------------------------------------
