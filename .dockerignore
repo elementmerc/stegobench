@@ -1,0 +1,51 @@
+# Author:  Daniel Iwugo
+# Comment: Christ is King
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# WHY THIS IS AN ALLOWLIST AND NOT A LIST OF EXCLUSIONS
+#
+# The build context is what the Dockerfile's first stage copies in, and that
+# stage is a real image layer whether or not anybody pushes it. An exclusion
+# list has to name every private path, which means a directory added next month
+# is included by default and somebody has to remember. This repository has a
+# public remote, an untracked `private/` tree, an untracked `DEFERRED.md` naming
+# internal hosts, and a `.claude/` directory, so "included by default" is the
+# wrong default.
+#
+# So everything is excluded and the build's inputs are named back in. A path
+# that is not listed here cannot reach a layer by accident, and adding an input
+# is a visible line in a diff.
+#
+# It also keeps the context small: unfiltered it is 268 MB before `target/`,
+# which is 2.6 GB on its own.
+
+*
+
+# The workspace, its lockfile and the pinned toolchain.
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates
+
+# Compiled into the binary by crates/stegobench-cli/build.rs, so they are build
+# inputs rather than runtime files. Leaving any of them out produces a binary
+# that starts, runs, and has lost half of what it needs: no registry, no
+# self-test fixtures, no adapters, no starter corpus.
+!plugins/registry
+!plugins/adapters
+!fixtures
+!corpora/starter
+
+# Shipped in the final image beside the binary, because a container with no
+# licence text in it is a container somebody has to go and look up.
+!README.md
+!LICENSE
+!CHANGELOG.md
+
+# Re-excluded under the directories admitted above. `target` is the local build
+# tree, and a stale one in the context would be copied in and then ignored;
+# `__pycache__` and the starter's builder are not inputs to a Rust build.
+crates/**/target
+**/__pycache__
+**/*.pyc

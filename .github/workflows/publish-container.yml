@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Daniel Iwugo
+#
+# THE HARNESS IMAGE, AND ONLY THE HARNESS IMAGE
+#
+# This publishes `stegobench` in a container so somebody can run the tool
+# without a Rust toolchain. It has nothing to do with the nine detector and
+# embedder images the registry pins by digest; those cannot be published from
+# a GitHub runner at all, because the bytes exist only on the machines that
+# built them and rebuilding them would change every digest the registry names.
+# The reasoning and the route are in `docs/guide/running-in-a-container.md`.
+#
+# WHY IT NEVER FIRES ON ITS OWN
+#
+# A container push is close to a one way door: deleting a package version does
+# not reach anybody who already pulled it, and this project has twice been
+# bitten by a publish step that returned success while the public artefact was
+# wrong. So there is no `push:` trigger and no schedule. A human dispatches it,
+# and even then the default run BUILDS AND PROVES WITHOUT PUBLISHING: `publish`
+# has to be set deliberately.
+#
+# WHY THERE ARE NO DOCKER ACTIONS IN HERE
+#
+# `docker/login-action` and `docker/build-push-action` are the usual answer and
+# they are three more third party dependencies running with this workflow's
+# token (baseline Section 5). The runner already has docker and `docker login`
+# reads a password from stdin, so the whole job is the two commands it would
+# have wrapped. The only action used is `actions/checkout`, pinned by commit.
+name: Publish the harness container
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push to GHCR. Left false, this builds and proves the image and publishes nothing."
+        type: boolean
+        default: false
+      registry_namespace:
+        description: "The GHCR namespace to publish under."
+        type: string
+        default: "elementmerc"
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time, and never cancelled: a half-pushed manifest is worse than a
+  # duplicate run, and duplicate runs are cheap.
+  group: publish-container
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build, prove, and publish only if asked
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Narrowed by the `if:` on the publish steps rather than by a second job,
+      # because a second job would have to rebuild the image to have it, and a
+      # second build is a second set of bytes.
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The version check below reads the annotated tag pointing at this
+          # commit, and a shallow checkout brings no tags.
+          fetch-depth: 0
+
+      - name: Work out what is being built, and refuse to publish an untagged commit
+        id: facts
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "stegobench-cli") | .version')"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Workspace version ${version}, commit ${GITHUB_SHA}."
+
+          if [ "${{ inputs.publish }}" != "true" ]; then
+            echo "Not publishing, so the tag is not required."
+            exit 0
+          fi
+
+          # AN IMAGE TAG HAS TO NAME BYTES SOMEBODY CAN FIND. Publishing
+          # `:0.1.0` from an arbitrary dev commit produces an image whose
+          # version label points at a tree nobody can check out, which is the
+          # same defect this project refuses in everybody else's registry
+          # entries.
+          if ! git describe --exact-match --match "v*" HEAD > /dev/null 2>&1; then
+            echo "::error::HEAD is not a v* tag, so there is no released version to publish as." >&2
+            echo "Dispatch this from a tag, or leave publish false to build and prove only." >&2
+            exit 1
+          fi
+          tag="$(git describe --exact-match --match 'v*' HEAD)"
+          if [ "v${version}" != "${tag}" ]; then
+            echo "::error::Tag ${tag} does not match workspace version ${version}." >&2
+            exit 1
+          fi
+          echo "Tag ${tag} agrees with the workspace version."
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.facts.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg "VERSION=${VERSION}" \
+            --build-arg "REVISION=${GITHUB_SHA}" \
+            --tag stegobench:candidate \
+            .
+
+      # ── PROOF, BEFORE ANYTHING LEAVES THE RUNNER ────────────────────────
+      #
+      # An image that builds is not an image that runs. These three are what a
+      # first time user types, and they are run here so a broken image is
+      # caught by this workflow rather than by them. `doctor` is expected to
+      # exit non-zero: there is no container runtime inside this container, so
+      # every containerised tool is undetermined and `doctor` says the machine
+      # is unfit. That is the honest answer and it is asserted rather than
+      # tolerated, because an image where `doctor` suddenly succeeds has grown
+      # a docker client nobody meant to add.
+      - name: The image answers --version
+        run: docker run --rm stegobench:candidate --version
+
+      - name: The image lists the registry compiled into it
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm stegobench:candidate list detectors)"
+          printf '%s\n' "${out}"
+          printf '%s\n' "${out}" | grep -q "registry  built in" \
+            || { echo "::error::The image did not read its built-in registry." >&2; exit 1; }
+
+      - name: doctor reports honestly that it has no container runtime
+        run: |
+          set -euo pipefail
+          status=0
+          out="$(docker run --rm stegobench:candidate doctor)" || status=$?
+          printf '%s\n' "${out}"
+          if [ "${status}" -eq 0 ]; then
+            echo "::error::doctor succeeded inside the image, which it cannot honestly do without a container runtime. Something added a docker client." >&2
+            exit 1
+          fi
+          printf '%s\n' "${out}" | grep -q "fixtures  built in" \
+            || { echo "::error::The image did not find its built-in self-test fixtures." >&2; exit 1; }
+          echo "doctor exited ${status}, naming what it cannot reach. Expected."
+
+      - name: Publish
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          NAMESPACE: ${{ inputs.registry_namespace }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${NAMESPACE}/stegobench"
+
+          printf '%s' "${GH_TOKEN}" \
+            | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+          # NO `latest`, DELIBERATELY. This project refuses a mutable tag from
+          # everybody else's registry entries on the grounds that a result
+          # naming one cannot be reproduced. Publishing our own mutable tag
+          # would invite exactly the reference we refuse to accept.
+          docker tag stegobench:candidate "${repo}:${VERSION}"
+          docker push "${repo}:${VERSION}"
+
+      - name: Reconcile what the registry actually serves
+        if: ${{ inputs.publish }}
+        env:
+          VERSION: ${{ steps.facts.outputs.version }}
+          NAMESPACE: ${{ inputs.registry_namespace }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${NAMESPACE}/stegobench"
+
+          # Success on a push says what the client sent, not what the registry
+          # holds. The digest is read back from the registry and the image is
+          # pulled by it, because a digest a user cannot pull is not a pin.
+          digest="$(docker image inspect "${repo}:${VERSION}" \
+            --format '{{index .RepoDigests 0}}' | cut -d@ -f2)"
+          docker image rm "${repo}:${VERSION}" > /dev/null
+          docker pull "${repo}@${digest}"
+
+          {
+            echo "### Published"
+            echo
+            echo '```'
+            echo "docker pull ${repo}@${digest}"
+            echo '```'
+            echo
+            echo "Tag \`${VERSION}\`, digest \`${digest}\`, built from \`${GITHUB_SHA}\`."
+            echo
+            echo "Record the digest in \`tools/release/channels.toml\` and flip that channel to \`required = true\` in the same commit, or the distribution watch stays decorative."
+          } >> "${GITHUB_STEP_SUMMARY}"
