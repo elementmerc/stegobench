@@ -50,6 +50,22 @@ pub fn plain_io(e: &std::io::Error) -> String {
     }
 }
 
+/// Seconds as something a person can judge a decision against.
+///
+/// Here rather than in `main.rs` because `plan` and `score` have to agree. One
+/// estimates a run before it starts and the other corrects that estimate from
+/// what the run then measures, and two renderings of one duration would have
+/// the correction read as a disagreement about the format.
+pub fn human_duration(seconds: f64) -> String {
+    if seconds < 90.0 {
+        return format!("{seconds:.0} seconds");
+    }
+    if seconds < 5_400.0 {
+        return format!("{:.0} minutes", seconds / 60.0);
+    }
+    format!("{:.1} hours", seconds / 3_600.0)
+}
+
 pub mod cli;
 pub mod fetch;
 pub mod fixtures;

@@ -820,6 +820,14 @@ where
         ));
     }
     let own_started = Instant::now();
+    // A run that knows its own rate should not leave a reader doing the
+    // arithmetic. The reasoning is on `revised_estimate`.
+    let total = prepared.items();
+    let declared_total = entry
+        .cost
+        .seconds_per_image
+        .map(|s| s * total.max(1) as f64);
+    let mut said_already = false;
     let tally = runner::score(
         runner::Run {
             entry,
@@ -834,7 +842,25 @@ where
         },
         &mut feed,
         &mut sink,
-        |t| progress(&format!("{} scored, {} errored", t.scored, t.errored)),
+        |t| {
+            progress(&format!("{} scored, {} errored", t.scored, t.errored));
+            // Once per run, not once per heartbeat: an estimate that revises
+            // itself every thirty seconds is noise. The latch is set by any
+            // verdict, including "close enough to say nothing", so a run whose
+            // rate settles early stops recomputing this.
+            if !said_already && t.scored >= REVISE_AFTER {
+                said_already = true;
+                if let Some(line) = revised_estimate(
+                    t.scored,
+                    total.saturating_sub(t.seen()),
+                    total,
+                    own_started.elapsed(),
+                    declared_total,
+                ) {
+                    progress(&line);
+                }
+            }
+        },
     )?;
     // Said once, after the run, because it is a fact about the evidence
     // rather than about the measurement: the number is still good and the
@@ -1373,6 +1399,14 @@ impl Iterator for Feed {
 /// that works: a corpus built by a broken script fails on every one of its
 /// 344,357 rows, and a list of them would put the whole corpus in memory to
 /// print three lines of it.
+/// How many images a run has to have scored before its own rate is worth
+/// quoting back.
+///
+/// Sixteen rather than a handful: the first invocation of a batched detector
+/// carries the whole container start, so a rate taken over two images is a
+/// measurement of the startup and not of the work.
+const REVISE_AFTER: u64 = 16;
+
 const MAX_EXAMPLES: usize = 3;
 
 /// A tally of one kind of corpus defect, with a few examples kept to show.
@@ -2099,6 +2133,62 @@ fn intern(table: &mut Vec<String>, name: Option<&str>) -> Option<u16> {
     u16::try_from(table.len() - 1).ok()
 }
 
+/// The time still to come, measured rather than declared.
+///
+/// `plan` promised twenty four minutes for a run whose first detector alone was
+/// on course for two and three quarter hours, and the person waiting worked that
+/// out himself from the line count of the records file, nine minutes in. By then
+/// the tool had scored thirty two images and knew its own throughput better than
+/// any declared figure could, and said nothing. A declared rate is a guess made
+/// before the run; this is a measurement of this machine, this corpus and this
+/// day.
+///
+/// `None` where the two agree closely enough that saying so would be noise. The
+/// band is wide on purpose: a tenth of a second either way on a tool that takes
+/// a second is not news, and a reader who is told their estimate has moved by
+/// 10% learns to skip the line that would have told them it moved by 1,200%.
+fn revised_estimate(
+    scored: u64,
+    left: u64,
+    total: u64,
+    elapsed: Duration,
+    declared_total: Option<f64>,
+) -> Option<String> {
+    if scored == 0 {
+        return None;
+    }
+    let per_image = elapsed.as_secs_f64() / scored as f64;
+    let projected = per_image * left as f64;
+    // Against the time still to come rather than against the whole run, because
+    // what a reader is deciding is whether to keep waiting.
+    let declared_left = declared_total.map(|d| d * (left as f64 / total.max(1) as f64));
+    let out_by = declared_left.map(|d| projected / d.max(1e-9));
+    if out_by.is_some_and(|r| (0.7..1.4).contains(&r)) {
+        return None;
+    }
+    let how_long = crate::human_duration(projected);
+    let measured = format!(
+        "measured on this machine: {per_image:.1}s an image over the first \
+         {scored} scored, so the {left} still to go will take about {how_long}"
+    );
+    Some(match out_by {
+        Some(ratio) if ratio > 1.0 => format!(
+            "{measured}, which is {ratio:.0}x what this detector's declared rate \
+             predicted. The declared figure is a guess made before the run; this \
+             one is what is happening"
+        ),
+        Some(ratio) => format!(
+            "{measured}, which is {:.0}x faster than this detector's declared \
+             rate predicted",
+            1.0 / ratio.max(1e-9)
+        ),
+        None => format!(
+            "{measured}. This detector declares no rate, so there was nothing to \
+             estimate from beforehand"
+        ),
+    })
+}
+
 /// What `join` read out of a records file.
 ///
 /// A struct rather than the tuple it used to be: four of the five fields are
@@ -2565,6 +2655,75 @@ mod tests {
             script.display().to_string()
         ))
         .expect("parses")
+    }
+
+    #[test]
+    fn an_estimate_twelve_times_out_is_corrected_in_the_direction_it_is_wrong() {
+        // The measurement that produced this: 32 images in 9.5 minutes against a
+        // declared floor of 13 minutes for 553. The reader worked out the 12x
+        // himself and the tool, which had the same two numbers, said nothing.
+        let said = revised_estimate(
+            32,
+            521,
+            553,
+            Duration::from_secs_f64(570.0),
+            Some(1.4 * 553.0),
+        )
+        .expect("a 12x miss is worth saying");
+        assert!(said.contains("measured on this machine"), "{said}");
+        assert!(
+            said.contains("13x what this detector's declared rate predicted"),
+            "{said}"
+        );
+        assert!(
+            said.contains("2.6 hours"),
+            "the projection is missing: {said}"
+        );
+    }
+
+    #[test]
+    fn an_estimate_that_was_about_right_says_nothing_at_all() {
+        assert_eq!(
+            revised_estimate(
+                20,
+                80,
+                100,
+                Duration::from_secs_f64(20.0),
+                Some(1.0 * 100.0)
+            ),
+            None,
+            "a run going to plan interrupted the reader to say so"
+        );
+    }
+
+    #[test]
+    fn a_run_faster_than_promised_is_also_worth_saying() {
+        let said = revised_estimate(
+            50,
+            50,
+            100,
+            Duration::from_secs_f64(5.0),
+            Some(10.0 * 100.0),
+        )
+        .expect("a 100x overestimate is worth saying");
+        assert!(said.contains("faster"), "{said}");
+    }
+
+    #[test]
+    fn a_detector_declaring_no_rate_gets_a_measurement_rather_than_a_comparison() {
+        let said = revised_estimate(16, 984, 1000, Duration::from_secs_f64(160.0), None)
+            .expect("a measurement stands on its own");
+        assert!(said.contains("declares no rate"), "{said}");
+        assert!(said.contains("2.7 hours"), "{said}");
+    }
+
+    #[test]
+    fn nothing_is_claimed_before_anything_has_been_scored() {
+        assert_eq!(
+            revised_estimate(0, 100, 100, Duration::from_secs_f64(30.0), Some(100.0)),
+            None,
+            "a rate was divided by zero images"
+        );
     }
 
     /// A detector that answers yes or no, and whose answer varies.

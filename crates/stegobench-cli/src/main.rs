@@ -2036,7 +2036,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         }
         let duration = match (blocked, seconds) {
             (Some(why), _) => format!("NOT AVAILABLE: {why}"),
-            (None, Some(s)) => format!("at least {}", human_duration(s)),
+            (None, Some(s)) => format!("at least {}", stegobench_cli::human_duration(s)),
             (None, None) => "unknown: it declares no seconds_per_image".to_string(),
         };
         lines.push(format!("{:<16} {duration}", entry.name));
@@ -2099,7 +2099,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
         human.push_str(&format!(
             "\n\nTotal          at least {}, over the {estimated} that declare \
              a rate",
-            human_duration(total_seconds),
+            stegobench_cli::human_duration(total_seconds),
         ));
         if unestimated > 0 {
             // A total that reads as the whole job when it covers five of seven
@@ -2113,7 +2113,7 @@ fn cmd_plan(resolved: &Resolved, command: &[String]) -> Output {
     human.push_str(&format!(
         "\nRecords        about {records_mb:.1} MB\nWorst case     \
          {}\nConfiguration  {configuration}: {why}",
-        human_duration(worst_case_seconds as f64)
+        stegobench_cli::human_duration(worst_case_seconds as f64)
     ));
     if unavailable > 0 {
         human.push_str(&format!(
@@ -2191,17 +2191,6 @@ fn plan_configuration(
              against it and refuses if it disagrees"
         ),
     )
-}
-
-/// Seconds as something a person can judge a decision against.
-fn human_duration(seconds: f64) -> String {
-    if seconds < 90.0 {
-        return format!("{seconds:.0} seconds");
-    }
-    if seconds < 5_400.0 {
-        return format!("{:.0} minutes", seconds / 60.0);
-    }
-    format!("{:.1} hours", seconds / 3_600.0)
 }
 
 /// What happened to one detector of a `score` command.
