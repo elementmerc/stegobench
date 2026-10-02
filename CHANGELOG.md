@@ -30,6 +30,20 @@ the parts that are deliberately not finished.
   now says that rather than talking about scope: `decode`, `extract`, `reveal`
   and `unhide` explain that Stegobench asks detectors questions and does not
   pull hidden data out of pictures.
+- `stegobench fetch --out` names where a corpus goes. It was `--dest` while
+  `embed`, `score` and `report` all said `--out`, so the README and the corpus
+  guide both documented the name the rest of the tree teaches and the first
+  command a reader copied was refused. `--dest` keeps working.
+- `stegobench describe` and `stegobench list` now say when a registered entry
+  is one nothing here can drive. An entry can be registered for its licence,
+  its provenance and its cost and still declare no command to launch, and two
+  commands used to call such an entry runnable while two others refused it.
+- An examination says when a detector gave one answer to every image. That is
+  what finding nothing looks like and also what a misread output looks like,
+  and the table cannot tell you which; `--raw` can.
+- An examination's rows carry their parent directory when two images share a
+  filename, so a cover and a stego image both called `000000.png` are two rows
+  a reader can tell apart.
 - `stegobench report` turns a folder of result documents into a table for an
   evaluation document, as text, Markdown or CSV. Every row carries the corpus
   and its digest, the configuration, the pairing and the split beside the
@@ -180,6 +194,11 @@ the parts that are deliberately not finished.
 
 - `docs/design/` holds the reasoning that the numbers depend on: the corpus,
   distribution, cover-source licensing and matched pairs.
+- The corpus guide says how to get from published shards to a directory
+  `score` can read: download, check the digests, extract each shard into its
+  own subdirectory under one root, score the root. Members inside a shard are
+  named by position, so extracting several into one folder overwrites instead
+  of failing.
 - `docs/guide/` is the reader-facing path: quickstart, pairing, scores,
   limits, examining your own images and building a corpus.
 - `docs/leaderboard.md` publishes the submission rules before any table
