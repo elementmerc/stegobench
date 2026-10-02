@@ -3422,6 +3422,31 @@ fn summarise(
             ));
         }
     }
+    // SAID BECAUSE THE PATH ALONE DOES NOT SAY WHICH KIND IT IS.
+    //
+    // `--out results` makes a directory of documents when several detectors are
+    // named and a single document called `results` when one is, and the summary
+    // printed the same bare path either way. A reader who ran the two-detector
+    // form first goes looking inside the file. The contract is not worth
+    // changing for it, because one detector's document landing exactly where
+    // the caller pointed is the reading that wins when somebody writes
+    // `--out run.json`; what was missing was the sentence saying which happened.
+    //
+    // Read off the outcome rather than from `--out`, because `out_dir` is None
+    // for exactly one case: a path was named and one detector was asked for.
+    if !many && out_dir.is_none() {
+        if let Some(named) = outcomes.iter().find_map(|(_, o)| match o {
+            Outcome::Measured { written, .. } => written.as_deref(),
+            _ => None,
+        }) {
+            lines.push(format!(
+                "{} is the result document itself, because one detector was \
+                 asked for. More than one would have made it a directory with \
+                 a document per detector inside.",
+                named.display()
+            ));
+        }
+    }
     // TWO "Next:" LINES ARE NONE.
     //
     // A run of the shipped starter corpus into a directory printed both
@@ -7247,6 +7272,81 @@ mod tests {
             "a single run stopped emitting the result document itself"
         );
         assert!(out.json["metrics"]["auc"].is_number());
+    }
+
+    /// Rung 3 of the journey round: `--out results-test` with one detector
+    /// created a FILE, where the same flag with two had created a directory,
+    /// and nothing said which had happened.
+    #[cfg(unix)]
+    #[test]
+    fn one_detector_is_told_its_out_path_is_the_document_and_not_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let named = tmp.path().join("results-test");
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: Some(&named),
+                timeout: 5,
+                jobs: 1,
+                keep_raw: false,
+                seed: None,
+                fixtures: None,
+                limit: None,
+                split: None,
+            },
+        );
+        assert_eq!(out.code, exit::OK, "{}", out.human);
+        assert!(named.is_file(), "the document is not at the named path");
+        assert!(
+            out.human.contains("is the result document itself"),
+            "nothing said the path was a file rather than a directory: {}",
+            out.human
+        );
+    }
+
+    /// And the notice does not fire for the case it would be wrong about.
+    #[cfg(unix)]
+    #[test]
+    fn several_detectors_are_not_told_their_out_path_is_a_document() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with_one_present_and_one_missing(tmp.path());
+        let corpus = tmp.path().join("corpus");
+        scratch_corpus(&corpus);
+        let named = tmp.path().join("results-dir");
+
+        let out = cmd_score(
+            &resolved_at(&reg),
+            ScoreRequest {
+                corpus: &corpus,
+                detectors: &["sizer".to_string(), "ghost".to_string()],
+                corpus_id: None,
+                trained_on: None,
+                records: None,
+                out: Some(&named),
+                timeout: 5,
+                jobs: 1,
+                keep_raw: false,
+                seed: None,
+                fixtures: None,
+                limit: None,
+                split: None,
+            },
+        );
+        assert!(
+            !out.human.contains("is the result document itself"),
+            "a directory run was told its path was a document: {}",
+            out.human
+        );
+        assert!(named.is_dir(), "{}", out.human);
     }
 
     /// Asking for every detector when none of them is here is not a run that
