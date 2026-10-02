@@ -1690,6 +1690,13 @@ struct Cover {
 /// row is judged against it.
 fn check(corpus: &Path) -> Result<Checks, ScoreError> {
     let mut covers: HashMap<String, Cover> = HashMap::new();
+    // The clean halves, keyed on the digest each one states for itself, so a
+    // stego row can find the exact file it is supposed to differ from in
+    // nothing but the payload. See `Sample::clean_digest`: joining a JPEG arm
+    // through `source_png` compares the stego JPEG against the original PNG
+    // crop, which differs in format, and reported 6,859 of 7,812 images in a
+    // correctly paired tier as confounded.
+    let mut clean_halves: HashMap<String, Cover> = HashMap::new();
     let mut any_split = false;
     let mut digest = CorpusDigest::new();
     let mut facts = ArmFacts::default();
@@ -1756,7 +1763,15 @@ fn check(corpus: &Path) -> Result<Checks, ScoreError> {
             covers.insert(name, cover.clone());
         }
         if let Some(name) = on_disk {
-            covers.entry(name).or_insert(cover);
+            covers.entry(name).or_insert(cover.clone());
+        }
+
+        // Filed by its own digest as well, which is what a stego row's
+        // `clean_sha256` names. Unlike the names above this cannot collide: two
+        // clean rows sharing a digest are the same bytes, so whichever wins is
+        // the same comparison.
+        if let Some(digest) = sample.digest {
+            clean_halves.insert(digest, cover);
         }
     }
 
@@ -1794,35 +1809,64 @@ fn check(corpus: &Path) -> Result<Checks, ScoreError> {
         if sample.role != Role::Stego {
             continue;
         }
-        let Some(cover_name) = sample.cover else {
-            continue;
-        };
-        let Some(cover) = covers.get(&cover_name) else {
-            continue;
-        };
-
-        // A stego row with no split of its own inherits its cover's, which is
-        // the corpus doing the right thing by construction and cannot be a
-        // violation. Only a row that states one can contradict.
-        if let (Some(split), Some(cover_split)) = (&sample.split, &cover.split) {
-            any_split = true;
-            if split != cover_split {
-                checks.split_leaks.note(format!(
-                    "{} is in the {split} split while its cover {cover_name} is \
-                     in the {cover_split} split",
-                    sample.id
-                ));
+        // The SPLIT is joined on the cover, and that is right for every arm: a
+        // JPEG arm's clean half and its stego half both descend from the one
+        // crop, so they inherit that crop's side. A stego row with no split of
+        // its own cannot contradict anything; only a row that states one can.
+        if let Some(cover_name) = &sample.cover {
+            if let Some(cover) = covers.get(cover_name) {
+                if let (Some(split), Some(cover_split)) = (&sample.split, &cover.split) {
+                    any_split = true;
+                    if split != cover_split {
+                        checks.split_leaks.note(format!(
+                            "{} is in the {split} split while its cover {cover_name} is \
+                             in the {cover_split} split",
+                            sample.id
+                        ));
+                    }
+                }
             }
         }
 
-        match (cover.shape, header::read(&sample.image).ok()) {
-            (Some(cover_shape), Some(stego_shape)) => match difference(cover_shape, stego_shape) {
+        // The PAIRING comparand, which is a different question and often a
+        // different file. The rule being checked is that a stego image differs
+        // from its clean twin in nothing but the payload, so the comparand is
+        // the twin, and only the corpus can say which file that is.
+        let against = match &sample.clean_digest {
+            Some(digest) => match clean_halves.get(digest) {
+                Some(half) => Some((half, "its clean half".to_string())),
+                // The corpus names a clean half that is not in this directory,
+                // so this pair cannot be compared. It deliberately does NOT
+                // fall back to the cover: for a JPEG arm the cover is the crop
+                // the clean half was encoded from, which differs in format by
+                // construction, and comparing against it reports a correctly
+                // paired arm as confounded.
+                None => {
+                    checks.unreadable += 1;
+                    continue;
+                }
+            },
+            // No clean half stated, so the cover is the best available
+            // comparand. True of the spatial arms, where the clean half IS the
+            // crop, and of any corpus whose records do not carry the field.
+            None => sample.cover.as_ref().and_then(|name| {
+                covers
+                    .get(name)
+                    .map(|cover| (cover, format!("its cover {name}")))
+            }),
+        };
+        let Some((against, label)) = against else {
+            continue;
+        };
+
+        match (against.shape, header::read(&sample.image).ok()) {
+            (Some(clean_shape), Some(stego_shape)) => match difference(clean_shape, stego_shape) {
                 None => checks.compared += 1,
                 Some(what) => {
                     checks.compared += 1;
                     checks
                         .pairing_breaks
-                        .note(format!("{} and its cover {cover_name} {what}", sample.id));
+                        .note(format!("{} and {label} {what}", sample.id));
                 }
             },
             _ => checks.unreadable += 1,
@@ -3023,6 +3067,151 @@ mod tests {
             let checks = check(&root).expect("checked");
             assert_eq!(checks.pairing, Pairing::Confounded);
         }
+    }
+
+    /// A minimal JPEG header of the given size, enough for `header::read`.
+    fn jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.push(3);
+        bytes.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+        bytes
+    }
+
+    /// A corpus shaped like a Pentimento JPEG arm, which is three rows and not
+    /// two: a PNG cover crop, the clean JPEG encoded from it, and the stego
+    /// JPEG. The stego row names the crop under `source_png` and the clean JPEG
+    /// under `clean_sha256`, which is what the real records do.
+    ///
+    /// `clean_digest` is what the stego row claims its clean half is, so a test
+    /// can point it at the clean row, at nothing, or leave it out.
+    fn jpeg_arm(root: &Path, stego_image: &[u8], clean_digest: Option<&str>) {
+        std::fs::create_dir_all(root).expect("corpus");
+        // The cover tier: a PNG crop, which is the grandparent of the pair.
+        std::fs::write(root.join("c0.png"), png(64, 64, 8, 2, 0)).unwrap();
+        std::fs::write(
+            root.join("c0.json"),
+            r#"{"role":"clean","file":"c0.png","sha256":"covercrop"}"#,
+        )
+        .unwrap();
+        // The clean half: the same picture as a JPEG, which is what the stego
+        // image actually differs from in nothing but the payload.
+        std::fs::write(root.join("k0.jpg"), jpeg(64, 64)).unwrap();
+        std::fs::write(
+            root.join("k0.json"),
+            r#"{"role":"clean","file":"clean_jpeg/00000.jpg","sha256":"cleanhalf"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("s0.jpg"), stego_image).unwrap();
+        let clean = match clean_digest {
+            Some(digest) => format!(r#","clean_sha256":"{digest}""#),
+            None => String::new(),
+        };
+        std::fs::write(
+            root.join("s0.json"),
+            format!(r#"{{"role":"stego","source_png":"c0.png","sha256":"0"{clean}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_jpeg_arm_is_compared_against_its_clean_jpeg_half_and_not_against_the_cover_crop() {
+        // The regression. Every JPEG arm of a correctly built corpus used to
+        // fail this check, because the comparand was the PNG crop the clean
+        // half had been encoded from rather than the clean half itself. On the
+        // Nano tier that reported 6,859 of 7,812 images as confounded and put
+        // the claim into the result document, which is the exact class of
+        // confidently wrong statement about evidence this project exists to
+        // prevent.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        jpeg_arm(&root, &jpeg(64, 64), Some("cleanhalf"));
+        let checks = check(&root).expect("checked");
+        assert!(
+            checks.pairing_breaks.is_empty(),
+            "{}",
+            checks.pairing_breaks.examples()
+        );
+        assert_eq!(checks.compared, 1);
+        assert_eq!(checks.unreadable, 0);
+        assert_eq!(checks.pairing, Pairing::SingleVariable);
+    }
+
+    #[test]
+    fn the_same_corpus_stating_no_clean_half_falls_back_to_the_cover_and_is_confounded() {
+        // The other side of the same fact, so the test suite records WHY the
+        // field is load-bearing rather than only that the good case passes. A
+        // corpus whose records do not name a clean half has nothing better to
+        // offer than the cover, and against the cover this pair really does
+        // differ in more than the payload.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        jpeg_arm(&root, &jpeg(64, 64), None);
+        let checks = check(&root).expect("checked");
+        assert_eq!(checks.pairing, Pairing::Confounded);
+        let seen = checks.pairing_breaks.examples();
+        assert!(seen.contains("its cover c0.png"), "{seen}");
+    }
+
+    #[test]
+    fn a_clean_half_the_corpus_names_but_does_not_ship_is_uncomparable_rather_than_confounded() {
+        // It must NOT fall back to the cover here. Falling back would compare
+        // against the one file already known to differ in more than the
+        // payload, and report a corpus that is merely incomplete as one that is
+        // confounded. Those are different problems with different fixes.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        jpeg_arm(&root, &jpeg(64, 64), Some("a-digest-no-row-here-states"));
+        let checks = check(&root).expect("checked");
+        assert_eq!(checks.compared, 0);
+        assert_eq!(checks.unreadable, 1);
+        assert!(checks.pairing_breaks.is_empty());
+        assert_eq!(checks.pairing, Pairing::Unverified);
+    }
+
+    #[test]
+    fn a_stego_image_differing_from_its_clean_half_is_still_confounded_and_says_so() {
+        // The check has to keep working after the comparand moved. A stego
+        // image a different size from its clean half is the original failure
+        // this whole check exists for, and the message names the clean half
+        // rather than a cover the reader would then go and inspect in vain.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        jpeg_arm(&root, &jpeg(63, 64), Some("cleanhalf"));
+        let checks = check(&root).expect("checked");
+        assert_eq!(checks.pairing, Pairing::Confounded);
+        let seen = checks.pairing_breaks.examples();
+        assert!(seen.contains("its clean half"), "{seen}");
+        assert!(seen.contains("different sizes"), "{seen}");
+    }
+
+    #[test]
+    fn the_split_still_joins_on_the_cover_when_the_pairing_joins_on_the_digest() {
+        // Two joins, two keys, on purpose. The split is a property of the
+        // COVER and every arm descending from one crop inherits its side; the
+        // pairing comparand is the clean TWIN. Moving the second must not move
+        // the first, or a corpus would stop being checked for the leak that
+        // inflates every number taken from it.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("corpus");
+        jpeg_arm(&root, &jpeg(64, 64), Some("cleanhalf"));
+        // The cover says test; the stego row contradicts it.
+        std::fs::write(
+            root.join("c0.json"),
+            r#"{"role":"clean","file":"c0.png","sha256":"covercrop","split":"test"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("s0.json"),
+            r#"{"role":"stego","source_png":"c0.png","sha256":"0","split":"train","clean_sha256":"cleanhalf"}"#,
+        )
+        .unwrap();
+        let checks = check(&root).expect("checked");
+        assert_eq!(checks.split_leaks.count, 1);
+        assert_eq!(checks.split, SplitDiscipline::ByCover);
+        // And the pairing is still clean, measured against the twin.
+        assert_eq!(checks.pairing, Pairing::SingleVariable);
     }
 
     #[cfg(unix)]

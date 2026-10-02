@@ -172,6 +172,29 @@ pub struct Sample {
     /// says, which is the only identification available for a directory
     /// somebody extracted from a shard and then moved.
     pub digest: Option<String>,
+    /// The digest the record states for the CLEAN HALF of this pair.
+    ///
+    /// Set on a stego row that names one, `None` everywhere else. This is the
+    /// pairing rule as the corpus itself states it: the generator wrote the
+    /// clean and the stego image from the same source array through the same
+    /// code path, and this digest names the exact file the stego image should
+    /// differ from in nothing but the payload.
+    ///
+    /// It exists because [`Sample::cover`] is the WRONG comparand for a JPEG
+    /// arm and joining on it reports a corpus that is correctly paired as
+    /// confounded. `source_png` names the original crop, which for a JPEG arm is
+    /// the grandparent of the pair: the crop is encoded to JPEG to make the
+    /// clean half, and only then does the payload go in. Comparing the stego
+    /// JPEG against that PNG measures the re-encode, which differs in format,
+    /// so every JPEG arm in a correctly built corpus failed the check.
+    ///
+    /// A digest rather than the record's `clean` path, because a path only
+    /// resolves against the one directory layout the packer happened to write.
+    /// Every member is renamed to its position on a packed release, and a
+    /// reader who extracts the shards anywhere else has a correct corpus whose
+    /// internal paths all point at nothing. A digest joins whatever the
+    /// directories are called.
+    pub clean_digest: Option<String>,
     /// What the record says about the arm this sample belongs to.
     pub arm: ArmInfo,
 }
@@ -510,16 +533,17 @@ impl Samples {
             (Some(_), []) => Err(SampleError::RecordWithoutImage { id }),
             (Some(rec), [image]) => {
                 let value = read_record(&self.current_dir.join(rec))?;
-                let (role, cover, split, declared_name, digest, arm) = describe(&id, &value)?;
+                let described = describe(&id, &value)?;
                 Ok(Some(Sample {
                     id,
                     image: self.current_dir.join(image),
-                    role,
-                    cover,
-                    split,
-                    declared_name,
-                    digest,
-                    arm,
+                    role: described.role,
+                    cover: described.cover,
+                    split: described.split,
+                    declared_name: described.declared_name,
+                    digest: described.digest,
+                    clean_digest: described.clean_digest,
+                    arm: described.arm,
                 }))
             }
             (Some(_), _) => Err(SampleError::AmbiguousImage {
@@ -627,14 +651,21 @@ fn read_record(path: &Path) -> Result<serde_json::Value, SampleError> {
 
 /// What the record says: which side, which cover, which split, which name,
 /// which digest, and which arm.
-type Described = (
-    Role,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    ArmInfo,
-);
+/// Everything [`describe`] reads out of one record.
+///
+/// A struct rather than the tuple this used to be, because five of the fields
+/// are `Option<String>` in a row and a tuple lets a transposition of any two of
+/// them compile and run. This is the pairing path, where a silently swapped
+/// field is how a corpus gets attributed to the wrong photograph.
+struct Described {
+    role: Role,
+    cover: Option<String>,
+    split: Option<String>,
+    declared_name: Option<String>,
+    digest: Option<String>,
+    clean_digest: Option<String>,
+    arm: ArmInfo,
+}
 
 fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleError> {
     let object = value.as_object().ok_or_else(|| SampleError::BadRecord {
@@ -715,6 +746,14 @@ fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleErro
         _ => None,
     };
 
+    // Read on the same terms as `sha256`: a claim by whoever built the corpus,
+    // reported rather than checked here. See [`Sample::clean_digest`] for why
+    // the digest is the join key and the record's `clean` path is not.
+    let clean_digest = match object.get("clean_sha256") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        _ => None,
+    };
+
     // Reported, never mapped. See [`ArmInfo`]: turning `jpeg-dct` into this
     // project's own word for it is a judgement about two vocabularies, and it
     // belongs with whoever writes the result document.
@@ -737,7 +776,15 @@ fn describe(id: &str, value: &serde_json::Value) -> Result<Described, SampleErro
         _ => None,
     };
 
-    Ok((role, cover, split, declared_name, digest, arm))
+    Ok(Described {
+        role,
+        cover,
+        split,
+        declared_name,
+        digest,
+        clean_digest,
+        arm,
+    })
 }
 
 /// A record field read as a string, or None where it is absent, empty, null or
