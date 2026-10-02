@@ -1532,18 +1532,20 @@ fn cmd_verify(file: &Path, corpus: &Path, records: Option<&Path>, shallow: bool)
     // is the one that was written rather than whether the bytes it names are
     // the ones that were measured. A document edited after the fact cannot be
     // trusted to say which corpus to go and look at.
+    //
+    // What it computed is deliberately NOT printed. See the same check in
+    // `result-v1`'s own validation: printing it turns the refusal into an
+    // oracle that hands a forger the one thing they lack.
     if let Some(claimed) = result.content_digest.as_deref() {
-        let actual = result.compute_content_digest();
-        if claimed != actual {
+        if claimed != result.compute_content_digest() {
             return Output::err(
                 exit::VERIFY_MISMATCH,
                 format!(
-                    "{} does not match its own content digest. It declares\n  \
-                     {claimed}\nand its contents come to\n  {actual}\nEvery \
-                     field except the two that record WHEN the run happened is \
-                     covered, so something in this document changed after it \
-                     was written. Re-run the measurement rather than trusting \
-                     the number in it",
+                    "{} does not match its own content digest, which it \
+                     declares as\n  {claimed}\nEvery field except the two that \
+                     record WHEN the run happened is covered, so something in \
+                     this document changed after it was written. Re-run the \
+                     measurement rather than trusting the number in it",
                     file.display()
                 ),
             );

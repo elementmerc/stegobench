@@ -1016,15 +1016,29 @@ impl Result1 {
         // its other merits: something changed after the run wrote it, and
         // every other field in it is a number nobody can stand behind. Absent
         // is not a fault, because absent means nobody offered one.
+        //
+        // THE RECOMPUTED DIGEST IS NOT PRINTED, AND THAT IS THE WHOLE POINT.
+        //
+        // It used to be, on the reasonable-sounding grounds that a reader
+        // debugging a mismatch wants both numbers. An adversarial researcher
+        // used it as an oracle: edit the AUC to 0.99, read the digest of the
+        // edited document out of the refusal, paste it into the document's own
+        // `content_digest`, and `validate` returns 0 and `verify` returns 0. The
+        // seal was never broken; the refusal handed over the one thing he did
+        // not have, which was the canonicalisation.
+        //
+        // So the refusal says the document does not match, and what it declares,
+        // and nothing about what it would have to declare to pass. A reader with
+        // a genuine mismatch has lost nothing: their next step is re-running the
+        // measurement, not reconciling two hex strings by hand.
         if let Some(claimed) = &self.content_digest {
-            let actual = self.compute_content_digest();
-            if *claimed != actual {
+            if *claimed != self.compute_content_digest() {
                 bad.push(format!(
-                    "this document does not match its own content digest: it \
-                     declares {claimed} and its contents come to {actual}. Every \
-                     field except the two recording when the run happened is \
-                     covered, so something in it changed after it was written. \
-                     Re-run the measurement rather than trusting the number in it"
+                    "this document does not match its own content digest, which \
+                     it declares as {claimed}. Every field except the two \
+                     recording when the run happened is covered, so something in \
+                     it changed after it was written. Re-run the measurement \
+                     rather than trusting the number in it"
                 ));
             }
         }
@@ -1299,6 +1313,31 @@ mod tests {
             bad.iter()
                 .any(|m| m.contains("does not match its own content digest")),
             "{bad:?}"
+        );
+    }
+
+    /// Rung 5 of the journey round: the refusal used to print the digest it had
+    /// computed over the edited document, which is exactly the value a forger
+    /// needs and the only thing standing between editing the JSON and resealing
+    /// it. The researcher pasted it in and the document validated clean.
+    #[test]
+    fn the_refusal_does_not_hand_over_the_digest_that_would_make_it_pass() {
+        let mut d = sample();
+        d.seal();
+        let honest = d.content_digest.clone().expect("sealed");
+        d.metrics.auc = 0.99;
+        let forged = d.compute_content_digest();
+        assert_ne!(honest, forged, "the edit did not change the digest");
+
+        let bad = d.validate().expect_err("refused");
+        let said = bad.join(" ");
+        assert!(
+            said.contains(&honest),
+            "the refusal no longer says what the document declares: {said}"
+        );
+        assert!(
+            !said.contains(&forged),
+            "the refusal still hands over the forging digest: {said}"
         );
     }
 
