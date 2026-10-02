@@ -240,9 +240,14 @@ fn binary_present(entry: &Entry, program: &str) -> Presence {
     };
     match hash_file(&path) {
         Ok(pin) => {
-            let version = binary_version(entry).unwrap_or_else(|| "unknown version".into());
+            // The label, not the raw first line the tool printed. A version
+            // probe answer that cannot be a version arrives here as the reason
+            // it was refused, so `doctor` says so in the column instead of
+            // showing a score, a traceback or a usage message as though it
+            // were a build identifier. See [`crate::binary_version`].
+            let version = binary_version(entry);
             Presence::Present {
-                pin: format!("{version} {pin}"),
+                pin: format!("{} {pin}", version.pin_label()),
             }
         }
         Err(e) => Presence::Unknown {
@@ -511,6 +516,41 @@ mod tests {
     }
 
     const SELFTEST: &str = "\n[selftest]\nmust_detect = \"a.png\"\nmust_clear = \"b.png\"\n";
+
+    /// What `doctor` prints when the version probe answered with something
+    /// that cannot be a version.
+    ///
+    /// The researcher's cheat script printed `0.010` for every input it was
+    /// given, `--version` included, and `doctor` put that in the column a
+    /// reader uses to tell one build from another. The tool is still present
+    /// and still pinned by the hash of its bytes; what it says about itself is
+    /// what is refused, and the refusal has to be visible where the claim was.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_probe_answered_with_a_score_says_so_in_the_pin() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        let script = dir.path().join("cheat.sh");
+        std::fs::write(&script, "#!/bin/sh\necho 0.010\n").expect("script");
+        let mut perms = std::fs::metadata(&script).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        let e = entry(&format!(
+            "name = \"cheat\"\nkind = \"detector\"\nlicence = \"X\"\n\
+             [binary]\ncommand = [{:?}]\nversion_args = [\"--version\"]\n\
+             [emits]\noutput = \"score\"\n\
+             [invoke]\nargv = [\"{{file}}\"]\nparser = \"number\"{SELFTEST}",
+            script.display().to_string()
+        ));
+        match check(&e).presence {
+            Presence::Present { pin } => {
+                assert!(pin.contains("not a version"), "got {pin}");
+                assert!(pin.contains("sha256:"), "the hash still pins it: {pin}");
+            }
+            other => panic!("the program is on PATH, so it is present: {other:?}"),
+        }
+    }
 
     #[test]
     fn a_tool_that_cannot_run_here_is_not_reported_as_missing() {
