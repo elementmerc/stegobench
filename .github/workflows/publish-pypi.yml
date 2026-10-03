@@ -3,9 +3,12 @@
 #
 # THE PYTHON HALF, WHICH IS A DIFFERENT PRODUCT ON A DIFFERENT VERSION
 #
-# This publishes `pentimento`, the corpus builder, to PyPI. It is NOT the
-# harness: `stegobench` is four Rust crates going to crates.io, and that job
-# already exists in `release.yml`.
+# This publishes the corpus builder to PyPI as `pentimento-corpus`, which is
+# the name on the index; the command it installs is `pentimento`. They differ
+# because `pentimento` on PyPI was taken on 2026-09-25 by an unrelated project.
+#
+# It is NOT the harness: `stegobench` is four Rust crates going to crates.io,
+# and that job already exists in `release.yml`.
 #
 # The two are separate products with separate version lines. `pyproject.toml`
 # and the Rust workspace happen to read the same today and nothing keeps them
@@ -128,7 +131,14 @@ jobs:
           # thing packaging can silently drop.
           python3 - <<'PY'
           import glob, zipfile, sys
-          wheel = glob.glob("dist/pentimento-*.whl")[0]
+          # `pentimento_corpus`, the normalised distribution name, not the
+          # `pentimento` command the wheel installs. Indexing a glob that
+          # matched nothing is what made this fail with an IndexError and no
+          # sentence, so say which name was expected when it is not there.
+          wheels = glob.glob("dist/pentimento_corpus-*.whl")
+          if not wheels:
+              sys.exit(f"no wheel matching dist/pentimento_corpus-*.whl; dist holds {sorted(glob.glob('dist/*'))}")
+          wheel = wheels[0]
           with zipfile.ZipFile(wheel) as z:
               names = z.namelist()
               entry = [n for n in names if n.endswith("entry_points.txt")]
