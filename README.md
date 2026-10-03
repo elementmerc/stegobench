@@ -27,11 +27,21 @@ the tool that produced the number. Stegobench is an attempt at fixing both.
 **To score detectors, you need one thing: the `stegobench` binary.**
 
 ```sh
+git clone https://github.com/elementmerc/stegobench
+cd stegobench
 cargo install --path crates/stegobench-cli
 ```
 
-No configuration files, no checkout: the registry and a starter corpus are
-compiled into the binary, so it works from any directory on a fresh machine.
+No configuration files and nothing to point at afterwards: the registry, the
+fixtures and a starter corpus are compiled into the binary as it builds, so the
+installed command works from any directory on a fresh machine and the clone is
+only needed to build it.
+
+**`cargo install stegobench-cli` from crates.io is not the same thing.** Those
+files live beside the crate rather than inside it, so a binary built from the
+published crate alone starts with an empty registry and tells you so on the
+first command. It's usable, but you have to supply a registry yourself with
+`--registry`, and most people want the line above instead.
 
 There's a second, separate program in this repository, `pentimento`, written
 in Python. **You need it only if you're building a corpus of your own.** Most
