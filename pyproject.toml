@@ -9,6 +9,15 @@
 #     pip install -e .
 #     pentimento
 #
+# THE DISTRIBUTION IS NAMED `pentimento-corpus` AND THE COMMAND IS `pentimento`
+#
+# Those are two different names on purpose. `pentimento` on PyPI was taken on
+# 2026-09-25 by an unrelated project, and a distribution name cannot be shared.
+# The command a reader types is not the distribution name, though, so the name
+# the corpus is published under on the Internet Archive, Hugging Face and
+# Kaggle survives intact and every document that says to run `pentimento` stays
+# true. Only the `pip install` line changes.
+#
 # Versions are pinned rather than bounded, and the reasoning is in
 # requirements.txt: a corpus whose dependency set floats is a corpus whose
 # numbers move without anybody touching it. To REPRODUCE the published corpus
@@ -21,7 +30,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pentimento"
+name = "pentimento-corpus"
 version = "1.0.0"
 description = "Build, audit, pack and verify the Pentimento cover corpus"
 readme = "README.md"

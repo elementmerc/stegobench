@@ -393,5 +393,50 @@ class EntryPointShapeTests(unittest.TestCase):
                     f"arguments, so `python3 generators/{name}.py` is broken")
 
 
+class DistributionName(unittest.TestCase):
+    """The name `cli.version()` asks for must be the name that gets installed.
+
+    These are two different names (`pentimento-corpus` on the index,
+    `pentimento` on PATH) because the obvious one was taken on PyPI by an
+    unrelated project, and the pair is easy to get wrong in a way nothing else
+    catches: asking the metadata for a name nothing installed under fails
+    identically to running from a checkout, so a wrong name here answers
+    `0+unknown` on a correct install and writes that into every corpus built.
+    """
+
+    def test_matches_pyproject(self):
+        import tomllib
+
+        from generators import cli
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        declared = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["name"]
+        self.assertEqual(
+            cli.DISTRIBUTION, declared,
+            f"cli.DISTRIBUTION is {cli.DISTRIBUTION!r} and pyproject.toml "
+            f"declares {declared!r}. `pentimento --version` would report "
+            f"0+unknown on an installed copy, which reads as a checkout")
+
+    def test_the_command_is_not_the_distribution(self):
+        import tomllib
+
+        from generators import cli
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        scripts = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["scripts"]
+        self.assertIn(
+            "pentimento", scripts,
+            "the command every document tells a reader to type is "
+            "`pentimento`, whatever the distribution is called")
+        self.assertNotEqual(
+            cli.DISTRIBUTION, "pentimento",
+            "`pentimento` on PyPI belongs to an unrelated project, so this "
+            "distribution cannot take that name back")
+
+
 if __name__ == "__main__":
     unittest.main()

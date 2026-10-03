@@ -103,13 +103,24 @@ jobs:
 
           # The declared version has to be the one in the filenames, because
           # the filename is what the index keys on.
+          #
+          # `pentimento_corpus`, with an underscore, is not a typo for the
+          # `pentimento-corpus` in pyproject.toml. PEP 625 says the filename
+          # carries the NORMALISED name, which lowercases and turns runs of
+          # `-`, `_` and `.` into a single `_`. These two assertions are
+          # therefore also what checks the distribution did not get renamed by
+          # accident, which matters more than usual here: the obvious name is
+          # taken on PyPI by somebody else, so a silent revert to it would be
+          # rejected at upload with an error about permissions rather than
+          # about the name.
           version="${{ steps.facts.outputs.version }}"
-          test -f "dist/pentimento-${version}.tar.gz" \
+          test -f "dist/pentimento_corpus-${version}.tar.gz" \
             || { echo "::error::No sdist named for ${version}." >&2; exit 1; }
-          ls "dist/pentimento-${version}-"*.whl > /dev/null \
+          ls "dist/pentimento_corpus-${version}-"*.whl > /dev/null \
             || { echo "::error::No wheel named for ${version}." >&2; exit 1; }
 
-          # The entry point `pip install pentimento` is meant to put on PATH.
+          # The entry point `pip install pentimento-corpus` is meant to put on
+          # PATH, and it is `pentimento` rather than the distribution name.
           # Checked by reading the wheel rather than by installing it: the
           # dependencies are numpy, scipy, opencv and jpeglib, so a real
           # install smoke test is a several minute download that CI already

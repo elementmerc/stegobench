@@ -68,6 +68,10 @@ EXCLUDED = {"cli", "__main__"}
 #: How wide a summary may be in the listing before it is shortened.
 SUMMARY_WIDTH = 74
 
+#: The name on the index, which is not the name of the command. Kept in step
+#: with `pyproject.toml` by `test_version_distribution_name`.
+DISTRIBUTION = "pentimento-corpus"
+
 
 def version() -> str:
     """The installed version of this package, or a marker that it is not one.
@@ -78,11 +82,20 @@ def version() -> str:
     than duplicated here, so `pyproject.toml` stays the only place it is
     written down. `0+unknown` is what a source tree that was never installed
     reports, which is a truthful answer rather than a failure.
+
+    The distribution is NOT named for the command: it is `pentimento-corpus`,
+    because `pentimento` on PyPI belongs to an unrelated project. Asking the
+    metadata for the wrong name fails exactly the way an uninstalled checkout
+    does, so a drifted name here would report `0+unknown` on a correctly
+    installed package and stamp that into every corpus built with it. That is
+    why `DISTRIBUTION` is checked against `pyproject.toml` by a test rather
+    than being trusted to stay right.
     """
+    from importlib import metadata
+
     try:
-        from importlib import metadata
-        return metadata.version("pentimento")
-    except Exception:  # noqa: BLE001 - a running-from-a-checkout answer is fine
+        return metadata.version(DISTRIBUTION)
+    except metadata.PackageNotFoundError:
         return "0+unknown"
 
 
