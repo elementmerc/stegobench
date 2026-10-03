@@ -13,6 +13,15 @@ documentation = "https://docs.rs/stegobench-cli"
 keywords = ["steganalysis", "steganography", "benchmark", "forensics", "cli"]
 categories = ["command-line-utilities", "science", "multimedia::images"]
 
+# `embedded/` holds a symlink per data tree so the published crate carries the
+# registry, adapters, fixtures and starter corpus; build.rs explains why they
+# cannot simply live here. Cargo follows those symlinks with a filesystem walk
+# rather than by asking git, so the ignore rules that apply at the real
+# location do not apply through the link, and compiled Python caches would
+# ship. They are machine specific and name the interpreter that wrote them,
+# which is not something a release artefact should carry.
+exclude = ["embedded/**/__pycache__/**"]
+
 # ── cargo-binstall ──────────────────────────────────────────────────────────
 #
 # `cargo binstall stegobench-cli` should fetch the archive `release.yml` built

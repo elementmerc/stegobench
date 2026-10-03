@@ -37,6 +37,38 @@ use clap::CommandFactory;
 
 include!("src/cli.rs");
 
+/// Where a data tree lives, checking the packaged copy and the checkout.
+///
+/// WHY THERE ARE TWO PLACES AND NOT ONE
+/// ------------------------------------
+/// The registry, adapters, fixtures and starter corpus live at the repository
+/// root, which is OUTSIDE this crate. Cargo cannot package a file outside the
+/// package root, so a crate published to an index carried none of them: a
+/// binary from `cargo install stegobench-cli` started with an empty registry
+/// and could not list a tool, fetch a corpus or check its own health. That was
+/// true of 1.0.0 as published.
+///
+/// `embedded/` holds a symlink to each tree. Cargo follows a symlinked
+/// directory and copies the files it finds into the `.crate`, so the published
+/// package carries real files at `embedded/<name>` while the checkout keeps
+/// exactly one copy of each tree and no duplication to drift.
+///
+/// WHY THE CHECKOUT PATH IS STILL TRIED
+/// ------------------------------------
+/// Git on Windows without symlink support materialises a symlink as a small
+/// text file rather than a link. Reading `embedded/` alone would therefore
+/// silently stop embedding anything on exactly the platform this repository
+/// builds on in CI, so the original path is tried whenever the first is not a
+/// directory. A plain file at `embedded/<name>` is not an error, it is that
+/// checkout telling us which of the two to use.
+fn data_root(manifest_dir: &std::path::Path, embedded: &str, in_checkout: &str) -> PathBuf {
+    let packaged = manifest_dir.join("embedded").join(embedded);
+    if packaged.is_dir() {
+        return packaged;
+    }
+    manifest_dir.join(in_checkout)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=src/cli.rs");
 
@@ -133,7 +165,7 @@ fn write_embedded_registry(out_dir: &std::path::Path) {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"),
     );
-    let root = manifest_dir.join("../../plugins/registry");
+    let root = data_root(&manifest_dir, "registry", "../../plugins/registry");
     println!("cargo:rerun-if-changed={}", root.display());
 
     let dest = out_dir.join("embedded_registry.rs");
@@ -190,7 +222,7 @@ fn write_embedded_adapters(out_dir: &std::path::Path) {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"),
     );
-    let root = manifest_dir.join("../../plugins/adapters");
+    let root = data_root(&manifest_dir, "adapters", "../../plugins/adapters");
     println!("cargo:rerun-if-changed={}", root.display());
 
     let dest = out_dir.join("embedded_adapters.rs");
@@ -257,7 +289,7 @@ fn write_embedded_fixtures(out_dir: &std::path::Path) {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"),
     );
-    let root = manifest_dir.join("../../fixtures");
+    let root = data_root(&manifest_dir, "fixtures", "../../fixtures");
     println!("cargo:rerun-if-changed={}", root.display());
 
     let dest = out_dir.join("embedded_fixtures.rs");
@@ -546,7 +578,7 @@ fn write_embedded_starter(out_dir: &std::path::Path) {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"),
     );
-    let root = manifest_dir.join("../../corpora/starter");
+    let root = data_root(&manifest_dir, "starter", "../../corpora/starter");
     println!("cargo:rerun-if-changed={}", root.display());
 
     let dest = out_dir.join("embedded_starter.rs");
