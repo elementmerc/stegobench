@@ -376,6 +376,24 @@ jobs:
         # Keyless Sigstore signing. The installer action itself still needs a
         # commit SHA of its own, which is the placeholder below.
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2, tagged 2026-05-06
+        with:
+          # PINNED, AND THE PIN IS LOAD BEARING RATHER THAN TIDINESS.
+          #
+          # Pinning the action by commit says nothing about the cosign it
+          # installs: that input defaults to whatever is newest, so this step
+          # floated while looking pinned. It floated onto cosign v3.0.6 on
+          # 2026-10-02 and the v1.0.0 release failed, because v3 `sign-blob`
+          # writes a Sigstore bundle by default and this repository's script
+          # asks only for a detached `.sig` and `.pem`. The bundle path was
+          # therefore empty and cosign exited with `create bundle file: open :
+          # no such file or directory` after every artefact had been built.
+          #
+          # v2 is the line whose output is the two detached files, which is
+          # what `tools/release/RELEASING.md` tells a downloader to verify
+          # with. Moving to v3 means changing the script AND those published
+          # instructions together, so it is a deliberate piece of work rather
+          # than something a default should decide.
+          cosign-release: "v2.6.5"
 
       - name: Sign every artefact, SHA256SUMS included, and verify each one
         # The script signs, then verifies what it signed against the identity
