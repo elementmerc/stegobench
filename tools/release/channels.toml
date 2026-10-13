@@ -38,6 +38,14 @@ id = "github-release"
 what = "The tagged release, with the binaries, SBOM, checksums and signatures"
 url = "https://github.com/elementmerc/stegobench/releases/tag/v{version}"
 must_contain = ["SHA256SUMS", "stegobench-v{version}-x86_64-unknown-linux-musl.tar.gz"]
+# STILL OPTIONAL, and the reason is about the artefacts rather than the page.
+# The v1.0.0 release exists and is published; what it does not carry is the
+# binaries. `release.yml` built all four platforms and the SBOM, then failed at
+# signing, because the cosign version it installed was not pinned and v3
+# changed what `sign-blob` writes. Nothing was attached and the release went
+# out with source archives alone, which the operator chose knowingly rather
+# than cut a second tag hours later. So this channel is honestly not serving
+# what it describes, and it flips with the first tag that signs.
 required = false
 
 [[channel]]
@@ -46,7 +54,7 @@ what = "The stegobench command on crates.io"
 url = "https://crates.io/api/v1/crates/stegobench-cli"
 json_path = "crate.max_version"
 must_equal = "{version}"
-required = false
+required = true
 
 [[channel]]
 id = "crates-io-core"
@@ -54,14 +62,14 @@ what = "The schemas crate, which other people are meant to depend on"
 url = "https://crates.io/api/v1/crates/stegobench-core"
 json_path = "crate.max_version"
 must_equal = "{version}"
-required = false
+required = true
 
 [[channel]]
 id = "docs-rs-core"
 what = "Rendered API documentation, which fails silently when a build breaks"
 url = "https://docs.rs/stegobench-core/{version}/stegobench_core/"
 must_contain = ["stegobench_core"]
-required = false
+required = true
 
 [[channel]]
 id = "pentimento-internet-archive"
@@ -69,7 +77,7 @@ what = "The corpus item. Close to immutable once uploaded, so worth watching"
 url = "https://archive.org/metadata/pentimento-core-v1"
 json_path = "metadata.identifier"
 must_equal = "pentimento-core-v1"
-required = false
+required = true
 
 [[channel]]
 id = "pentimento-huggingface"
@@ -77,11 +85,17 @@ what = "The corpus on HuggingFace, which versions through git"
 url = "https://huggingface.co/api/datasets/the-malware-files/pentimento-core"
 json_path = "id"
 must_equal = "the-malware-files/pentimento-core"
-required = false
+required = true
 
 [[channel]]
 id = "docs-site"
 what = "The documentation site. A dead docs link is the first thing a reader hits"
 url = "https://elementmerc.github.io/stegobench/"
 must_contain = ["Stegobench"]
+# STILL OPTIONAL because it has never been deployed. `docs.yml` is
+# `workflow_dispatch` only, which was correct while the repository was private
+# on a free plan and Pages was unavailable: a red check everybody learns to
+# ignore costs more than it reports. The repository went public on 2026-09-30,
+# so the constraint that made it dispatch-only is gone and this is now a
+# decision nobody has taken rather than a limit. It flips when Pages serves.
 required = false
